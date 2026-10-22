@@ -22,6 +22,7 @@ tracing.workspace = true
 grain-id.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

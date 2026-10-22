@@ -28,7 +28,7 @@ pub struct ScanReport {
     pub skipped: Vec<(String, String)>,
 }
 
-fn mtime_ns(meta: &std::fs::Metadata) -> i128 {
+pub(crate) fn mtime_ns(meta: &std::fs::Metadata) -> i128 {
     let Ok(t) = meta.modified() else { return 0 };
     match t.duration_since(UNIX_EPOCH) {
         Ok(d) => d.as_nanos() as i128,
@@ -36,19 +36,19 @@ fn mtime_ns(meta: &std::fs::Metadata) -> i128 {
     }
 }
 
-fn is_hidden(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_hidden(name: &std::ffi::OsStr) -> bool {
     name.as_encoded_bytes().first() == Some(&b'.')
 }
 
 /// Library-relative `/`-joined path, or `None` if any component is not UTF-8.
-fn rel_string(root: &Path, path: &Path) -> Option<String> {
+pub(crate) fn rel_string(root: &Path, path: &Path) -> Option<String> {
     let rel = path.strip_prefix(root).ok()?;
     let parts: Option<Vec<&str>> = rel.components().map(|c| c.as_os_str().to_str()).collect();
     Some(parts?.join("/"))
 }
 
 /// Library-relative `/`-joined path for reporting; non-UTF-8 parts are replaced lossily.
-fn rel_lossy(root: &Path, path: &Path) -> String {
+pub(crate) fn rel_lossy(root: &Path, path: &Path) -> String {
     let rel = path.strip_prefix(root).unwrap_or(path);
     let parts: Vec<_> = rel
         .components()
