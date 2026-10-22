@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use asteria_framework::MediaKind;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::sync::{OnceCell, Semaphore};
+use tokio::sync::{Semaphore, watch};
 
 /// Environment variable naming the `vipsthumbnail` executable.
 pub const VIPSTHUMBNAIL_ENV: &str = "ASTERIA_VIPSTHUMBNAIL";
@@ -65,21 +65,55 @@ pub enum ProcessError {
     Io(String),
 }
 
-type Shared = Arc<OnceCell<Result<PathBuf, ProcessError>>>;
+type Outcome = Result<PathBuf, ProcessError>;
+type Pending = watch::Receiver<Option<Outcome>>;
 
+/// Renders thumbnails. Cheap to share behind an `Arc`; renders run detached from the
+/// requests that asked for them, so a dropped request neither kills nor leaks a render.
 pub struct Processor {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     thumbs_dir: PathBuf,
+    /// Set when the thumbs directory cannot be used; every render then fails with it.
+    config_error: Option<String>,
     permits: Semaphore,
     timeout: Duration,
     vips: OsString,
     ffmpeg: OsString,
-    inflight: Mutex<HashMap<(String, Preset), Shared>>,
+    inflight: Mutex<HashMap<(String, Preset), Pending>>,
     started: AtomicUsize,
     tmp_counter: AtomicUsize,
 }
 
+/// Deletes the listed files when dropped, on every exit path.
+struct Cleanup(Vec<PathBuf>);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// Removes a single-flight entry when dropped, even if the render task panicked.
+struct Unregister {
+    inner: Arc<Inner>,
+    key: (String, Preset),
+}
+
+impl Drop for Unregister {
+    fn drop(&mut self) {
+        self.inner.inflight.lock().unwrap().remove(&self.key);
+    }
+}
+
 impl Processor {
     /// Tools come from `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG`, else from `PATH`.
+    /// `thumbs_dir` must be absolute and must not contain `%` (vipsthumbnail expands it in
+    /// output names); otherwise every render fails with an `Io` error.
     pub fn new(thumbs_dir: PathBuf, max_jobs: usize, timeout: Duration) -> Processor {
         let tool = |var: &str, default: &str| {
             std::env::var_os(var).unwrap_or_else(|| OsString::from(default))
@@ -100,21 +134,50 @@ impl Processor {
         vipsthumbnail: impl Into<OsString>,
         ffmpeg: impl Into<OsString>,
     ) -> Processor {
+        let config_error = if !thumbs_dir.is_absolute() {
+            Some("thumbs directory is not absolute".to_string())
+        } else if thumbs_dir.to_string_lossy().contains('%') {
+            Some("thumbs directory contains '%'".to_string())
+        } else {
+            None
+        };
         Processor {
-            thumbs_dir,
-            permits: Semaphore::new(max_jobs.max(1)),
-            timeout,
-            vips: vipsthumbnail.into(),
-            ffmpeg: ffmpeg.into(),
-            inflight: Mutex::new(HashMap::new()),
-            started: AtomicUsize::new(0),
-            tmp_counter: AtomicUsize::new(0),
+            inner: Arc::new(Inner {
+                thumbs_dir,
+                config_error,
+                permits: Semaphore::new(max_jobs.max(1)),
+                timeout,
+                vips: vipsthumbnail.into(),
+                ffmpeg: ffmpeg.into(),
+                inflight: Mutex::new(HashMap::new()),
+                started: AtomicUsize::new(0),
+                tmp_counter: AtomicUsize::new(0),
+            }),
         }
+    }
+
+    /// Removes stale `.tmp-*` and `.src-*` files that an earlier run left under the thumbs
+    /// directory. Call once at startup, before serving. Returns how many were removed.
+    pub fn sweep_tmp(&self) -> usize {
+        let mut removed = 0;
+        for entry in walkdir::WalkDir::new(&self.inner.thumbs_dir)
+            .into_iter()
+            .flatten()
+        {
+            let name = entry.file_name().to_string_lossy();
+            if (name.starts_with(".tmp-") || name.starts_with(".src-"))
+                && !entry.file_type().is_dir()
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                removed += 1;
+            }
+        }
+        removed
     }
 
     /// How many renders actually ran a tool (not counting cache hits or shared waits).
     pub fn renders_started(&self) -> usize {
-        self.started.load(Ordering::SeqCst)
+        self.inner.started.load(Ordering::SeqCst)
     }
 
     /// Where the thumbnail for `hash` (`blake3:<hex>`) lives, or `None` if the hash is not
@@ -125,7 +188,8 @@ impl Processor {
             return None;
         }
         Some(
-            self.thumbs_dir
+            self.inner
+                .thumbs_dir
                 .join(preset.name())
                 .join(&hex[..2])
                 .join(format!("{hex}.webp")),
@@ -133,7 +197,7 @@ impl Processor {
     }
 
     /// Returns the path of the rendered thumbnail, rendering it first if needed.
-    /// `src` must be absolute.
+    /// `src` must be absolute. The render keeps running if this future is dropped.
     pub async fn render(
         &self,
         src: &Path,
@@ -141,31 +205,85 @@ impl Processor {
         hash: &str,
         preset: Preset,
     ) -> Result<PathBuf, ProcessError> {
+        if let Some(e) = &self.inner.config_error {
+            return Err(ProcessError::Io(e.clone()));
+        }
+        if !src.is_absolute() {
+            return Err(ProcessError::Io("source path is not absolute".into()));
+        }
         let out = self
             .thumb_path(hash, preset)
             .ok_or_else(|| ProcessError::Io("malformed content hash".into()))?;
-        if tokio::fs::try_exists(&out).await.unwrap_or(false) {
+        if exists(&out).await? {
             return Ok(out);
         }
         let key = (hash.to_string(), preset);
-        let cell = self
-            .inflight
-            .lock()
-            .unwrap()
-            .entry(key.clone())
-            .or_default()
-            .clone();
-        let result = cell
-            .get_or_init(|| self.render_once(src, kind, &out, preset))
+        let mut pending = {
+            let mut map = self.inner.inflight.lock().unwrap();
+            match map.get(&key) {
+                Some(rx) => rx.clone(),
+                None => {
+                    let (tx, rx) = watch::channel(None);
+                    map.insert(key.clone(), rx.clone());
+                    let inner = self.inner.clone();
+                    let src = src.to_path_buf();
+                    tokio::spawn(async move {
+                        let _unregister = Unregister {
+                            inner: inner.clone(),
+                            key,
+                        };
+                        let result = inner.render_once(&src, kind, &out, preset).await;
+                        // Nobody may be listening any more; that is fine.
+                        let _ = tx.send(Some(result));
+                    });
+                    rx
+                }
+            }
+        };
+        let done = pending
+            .wait_for(|v| v.is_some())
             .await
-            .clone();
-        let mut map = self.inflight.lock().unwrap();
-        if map.get(&key).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
-            map.remove(&key);
-        }
-        result
+            .map_err(|_| ProcessError::Io("render task ended without a result".into()))?;
+        done.clone().unwrap_or_else(|| {
+            Err(ProcessError::Io(
+                "render task ended without a result".into(),
+            ))
+        })
     }
+}
 
+/// `try_exists`, with an error being an `Io` failure (logged) instead of "absent".
+async fn exists(path: &Path) -> Result<bool, ProcessError> {
+    tokio::fs::try_exists(path).await.map_err(|e| {
+        tracing::error!("cannot check for a thumbnail: {e}");
+        ProcessError::Io(format!("cannot check for a thumbnail: {e}"))
+    })
+}
+
+/// A file extension that is safe to put in a file name: a few ASCII alphanumerics.
+fn safe_ext(src: &Path) -> String {
+    let ext: String = src
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect();
+    if ext.is_empty() { "bin".into() } else { ext }
+}
+
+#[cfg(unix)]
+async fn link_or_copy(src: &Path, dest: &Path) -> std::io::Result<()> {
+    tokio::fs::symlink(src, dest).await
+}
+
+#[cfg(not(unix))]
+async fn link_or_copy(src: &Path, dest: &Path) -> std::io::Result<()> {
+    tokio::fs::copy(src, dest).await.map(|_| ())
+}
+
+impl Inner {
     async fn render_once(
         &self,
         src: &Path,
@@ -179,7 +297,7 @@ impl Processor {
             .await
             .map_err(|e| ProcessError::Io(e.to_string()))?;
         // A render that finished while this one waited for a permit.
-        if tokio::fs::try_exists(out).await.unwrap_or(false) {
+        if exists(out).await? {
             return Ok(out.to_path_buf());
         }
         self.started.fetch_add(1, Ordering::SeqCst);
@@ -187,28 +305,32 @@ impl Processor {
         tokio::fs::create_dir_all(dir)
             .await
             .map_err(|e| ProcessError::Io(e.to_string()))?;
+        let n = self.tmp_counter.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
         // The tool picks the format from the extension, so the temporary name ends in `.webp`.
-        let tmp = dir.join(format!(
-            ".tmp-{}-{}.webp",
-            std::process::id(),
-            self.tmp_counter.fetch_add(1, Ordering::SeqCst)
-        ));
+        let tmp = dir.join(format!(".tmp-{pid}-{n}.webp"));
+        let mut cleanup = Cleanup(vec![tmp.clone()]);
         let result = match kind {
-            MediaKind::Image => self.run_vips(src, &tmp, preset).await,
+            MediaKind::Image => {
+                // libvips reads a trailing `[...]` of a file name as loader options, so it
+                // gets the image under a name we chose.
+                let link = dir.join(format!(".src-{pid}-{n}.{}", safe_ext(src)));
+                cleanup.0.push(link.clone());
+                match link_or_copy(src, &link).await {
+                    Ok(()) => self.run_vips(&link, &tmp, preset).await,
+                    Err(e) => Err(ProcessError::Io(format!("cannot stage the source: {e}"))),
+                }
+            }
             MediaKind::Video => self.run_ffmpeg(src, &tmp, preset).await,
             _ => Err(ProcessError::Unprocessable("not an image or video".into())),
         };
-        let result = match result {
+        match result {
             Ok(()) => tokio::fs::rename(&tmp, out)
                 .await
                 .map(|()| out.to_path_buf())
                 .map_err(|e| ProcessError::Io(e.to_string())),
             Err(e) => Err(e),
-        };
-        if result.is_err() {
-            let _ = tokio::fs::remove_file(&tmp).await;
         }
-        result
     }
 
     async fn run_vips(&self, src: &Path, tmp: &Path, preset: Preset) -> Result<(), ProcessError> {
@@ -233,7 +355,15 @@ impl Processor {
             format!("scale=w='min({n},iw)':h='min({n},ih)':force_original_aspect_ratio=decrease");
         let attempt = |seek: &'static str| {
             let mut cmd = Command::new(&self.ffmpeg);
-            cmd.args(["-nostdin", "-v", "error", "-ss", seek, "-i"])
+            cmd.args(["-nostdin", "-v", "error", "-ss", seek])
+                // Only plain files and ordinary container formats: no playlists, concat
+                // scripts or network protocols that a crafted file could abuse.
+                .args(["-protocol_whitelist", "file"])
+                .args([
+                    "-format_whitelist",
+                    "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi",
+                ])
+                .arg("-i")
                 .arg(src)
                 .args(["-frames:v", "1", "-vf"])
                 .arg(&filter)
@@ -241,14 +371,34 @@ impl Processor {
                 .arg(tmp);
             cmd
         };
+        // Both attempts share one timeout budget.
+        let deadline = Instant::now() + self.timeout;
         match run_tool(attempt("1"), "ffmpeg", self.timeout, tmp).await {
             Err(ProcessError::Unprocessable(reason)) if reason != "timeout" => {
                 // Shorter than one second: seeking past the end yields no frame.
-                run_tool(attempt("0"), "ffmpeg", self.timeout, tmp).await
+                let left = deadline.saturating_duration_since(Instant::now());
+                run_tool(attempt("0"), "ffmpeg", left, tmp).await
             }
             other => other,
         }
     }
+}
+
+/// Whether a tool's error output says it could not write (or read) files: the machine's
+/// problem, not the media file's.
+fn is_io_failure(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    [
+        "unable to open for write",
+        "unable to write",
+        "error opening output",
+        "permission denied",
+        "no space left",
+        "read-only file system",
+        "disk quota",
+    ]
+    .iter()
+    .any(|m| s.contains(m))
 }
 
 /// Runs `cmd` to completion within `timeout`. Success means exit status 0 and a non-empty
@@ -267,7 +417,7 @@ async fn run_tool(
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::error!(
-                "external tool `{name}` was not found; set it up or point its ASTERIA_* variable at it"
+                "external tool `{name}` was not found; install it or point its ASTERIA_* variable at it"
             );
             return Err(ProcessError::ToolMissing(name));
         }
@@ -307,6 +457,11 @@ async fn run_tool(
             .map(str::trim)
             .find(|l| !l.is_empty() && !l.contains("VIPS-WARNING"))
             .unwrap_or("no error output");
+        if is_io_failure(&stderr) {
+            return Err(ProcessError::Io(format!(
+                "{name} failed ({status}): {detail}"
+            )));
+        }
         return Err(ProcessError::Unprocessable(format!(
             "{name} failed ({status}): {detail}"
         )));

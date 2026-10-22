@@ -117,8 +117,25 @@ async fn thumb_before_hash_is_503_with_retry_after() {
 }
 
 #[tokio::test]
-async fn thumb_of_changed_file_is_503() {
+async fn original_of_changed_file_is_still_served() {
     let e = env();
+    let id = item_id(&e, "a.jpg");
+    std::fs::write(e.root.join("a.jpg"), b"changed after the scan").unwrap();
+    let (s, h, b) = get(
+        &e.app,
+        Some(&e.owner_token),
+        &format!("/media/{id}/original"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b, b"changed after the scan");
+    assert_eq!(h["x-content-type-options"], "nosniff");
+}
+
+#[tokio::test]
+async fn thumb_of_changed_file_is_503() {
+    let mut e = env();
     hash_all(&e);
     let id = item_id(&e, "a.jpg");
     // Same record, different file on disk: the stored hash describes older content.
@@ -132,6 +149,7 @@ async fn thumb_of_changed_file_is_503() {
     .await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(h["retry-after"], "2");
+    assert!(e._rescan_rx.try_recv().is_ok(), "a rescan was requested");
 }
 
 #[tokio::test]
@@ -146,6 +164,7 @@ async fn thumb_is_webp_and_cached() {
     let (s, h, b) = get(&e.app, Some(&e.owner_token), &uri, None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(h["content-type"], "image/webp");
+    assert_eq!(h["x-content-type-options"], "nosniff");
     assert!(webp(&b));
     assert_eq!(e.processor.renders_started(), 1);
 
@@ -178,7 +197,13 @@ async fn corrupt_image_is_422_and_not_retried() {
     }
     let e = env();
     let good = std::fs::read(e.root.join("a.jpg")).unwrap();
-    std::fs::write(e.root.join("bad.jpg"), &good[..good.len() / 2]).unwrap();
+    // A JPEG start-of-image marker followed by garbage: no decoder accepts it.
+    let _ = good;
+    std::fs::write(
+        e.root.join("bad.jpg"),
+        [0xFF, 0xD8, 0xFF, 0x00, 1, 2, 3, 4, 5, 6],
+    )
+    .unwrap();
     asteria_framework_server::scan(&e.lib, &e.cache, &Gallery).unwrap();
     hash_all(&e);
     let id = item_id(&e, "bad.jpg");

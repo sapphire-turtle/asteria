@@ -24,6 +24,14 @@ fn not_ready() -> Response {
     resp
 }
 
+fn nosniff(mut resp: Response) -> Response {
+    resp.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    resp
+}
+
 fn failure(status: StatusCode) -> Response {
     if status == StatusCode::SERVICE_UNAVAILABLE {
         not_ready()
@@ -32,9 +40,12 @@ fn failure(status: StatusCode) -> Response {
     }
 }
 
-/// The record and the file's absolute path, after checking the file still exists unchanged.
+/// The record, the file's absolute path and its current metadata; the file must exist.
 /// `Err` is the status to answer with instead (503 means "not ready").
-async fn resolve(state: &AppState, id: String) -> Result<(ItemRecord, PathBuf), StatusCode> {
+async fn resolve(
+    state: &AppState,
+    id: String,
+) -> Result<(ItemRecord, PathBuf, std::fs::Metadata), StatusCode> {
     let cache = state.cache().clone();
     let rec = tokio::task::spawn_blocking(move || cache.get_by_id(&ItemId(id)))
         .await
@@ -51,11 +62,7 @@ async fn resolve(state: &AppState, id: String) -> Result<(ItemRecord, PathBuf), 
     if !meta.is_file() {
         return Err(StatusCode::NOT_FOUND);
     }
-    // The record is out of date: whatever hash it holds describes other content.
-    if (meta.len(), mtime_ns(&meta)) != (rec.size, rec.mtime_ns) {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
-    Ok((rec, abs))
+    Ok((rec, abs, meta))
 }
 
 pub async fn media(
@@ -65,11 +72,13 @@ pub async fn media(
 ) -> Response {
     if what == "original" {
         return match resolve(&state, id).await {
-            Ok((_, abs)) => ServeFile::new(abs)
-                .oneshot(req)
-                .await
-                .map(|r| r.map(Body::new))
-                .into_response(),
+            Ok((_, abs, _)) => nosniff(
+                ServeFile::new(abs)
+                    .oneshot(req)
+                    .await
+                    .map(|r| r.map(Body::new))
+                    .into_response(),
+            ),
             Err(status) => failure(status),
         };
     }
@@ -77,7 +86,14 @@ pub async fn media(
         return StatusCode::NOT_FOUND.into_response();
     };
     match resolve(&state, id).await {
-        Ok((rec, abs)) => thumbnail(&state, rec, abs, preset, req).await,
+        Ok((rec, abs, meta)) => {
+            // The record is out of date: whatever hash it holds describes other content.
+            if (meta.len(), mtime_ns(&meta)) != (rec.size, rec.mtime_ns) {
+                let _ = state.rescan().try_send(());
+                return not_ready();
+            }
+            thumbnail(&state, rec, abs, preset, req).await
+        }
         Err(status) => failure(status),
     }
 }
@@ -139,11 +155,13 @@ async fn thumbnail(
 }
 
 async fn serve_thumb(path: PathBuf, req: Request) -> Response {
-    let mut resp = ServeFile::new_with_mime(path, &"image/webp".parse().expect("valid mime"))
-        .oneshot(req)
-        .await
-        .map(|r| r.map(Body::new))
-        .into_response();
+    let mut resp = nosniff(
+        ServeFile::new_with_mime(path, &"image/webp".parse().expect("valid mime"))
+            .oneshot(req)
+            .await
+            .map(|r| r.map(Body::new))
+            .into_response(),
+    );
     // The URL names an item, not a content hash: the thumbnail changes with the file.
     resp.headers_mut().insert(
         header::CACHE_CONTROL,
