@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 
 use crate::UserId;
+use crate::error::{Error, Result};
 use crate::hash::{ContentHash, HashScope};
 
 use super::xml;
@@ -57,8 +58,59 @@ impl Sidecar {
             || self.label.is_some()
     }
 
+    /// Sets `user`'s rating (`owner`'s goes to the main rating), last writer wins by `at`.
+    ///
+    /// An existing entry with a strictly newer `modified` wins; on equal timestamps the
+    /// greater value wins. Returns whether anything changed; out of range is `InvalidRating`.
+    pub fn apply_rating(
+        &mut self,
+        owner: UserId,
+        user: UserId,
+        value: i8,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        if !(-1..=5).contains(&value) {
+            return Err(Error::InvalidRating(value));
+        }
+        let new = RatingEntry {
+            value,
+            modified: Some(at),
+        };
+        let slot = if user == owner {
+            &mut self.rating
+        } else {
+            return Ok(match self.user_ratings.get_mut(&user) {
+                Some(e) => replace_if_newer(e, new),
+                None => {
+                    self.user_ratings.insert(user, new);
+                    true
+                }
+            });
+        };
+        Ok(match slot {
+            Some(e) => replace_if_newer(e, new),
+            None => {
+                *slot = Some(new);
+                true
+            }
+        })
+    }
+
     /// Whether the source file was wrapped in `<?xpacket ...?>`.
     pub fn has_xpacket_wrapper(&self) -> bool {
         self.doc.as_ref().is_some_and(|d| d.xpacket)
     }
+}
+
+/// Replaces `existing` unless it wins (newer time, then greater value); returns whether it changed.
+fn replace_if_newer(existing: &mut RatingEntry, new: RatingEntry) -> bool {
+    let wins = existing
+        .modified
+        .zip(new.modified)
+        .is_some_and(|(m, at)| m > at || (m == at && existing.value >= new.value));
+    if wins || *existing == new {
+        return false;
+    }
+    *existing = new;
+    true
 }

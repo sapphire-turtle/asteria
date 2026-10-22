@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use asteria_framework::journal::Journal;
 use asteria_framework::{Library, MediaKind, UserId};
 use asteria_framework_api::{ItemId, MediaUpdateParams};
 use asteria_framework_server::{
@@ -147,6 +148,7 @@ async fn control_chars_are_invalid() {
 async fn concurrent_updates_are_serialized() {
     let e = env();
     let owner = e.lib.owner();
+    let before = journal_len(&e);
     let mut hs = Vec::new();
     for i in 0..20 {
         let w = e.writer.clone();
@@ -162,6 +164,7 @@ async fn concurrent_updates_are_serialized() {
     let cached = e.cache.get_by_path("a.jpg").unwrap().unwrap().sidecar;
     assert_eq!(sc.label, cached.label);
     assert_eq!(sc.subjects.len(), 1);
+    assert_eq!(journal_len(&e), before + 20);
 }
 
 #[tokio::test]
@@ -189,21 +192,125 @@ async fn cached_hash_avoids_rehash() {
     assert_eq!(sc.content_hash.unwrap().0.to_string(), fake);
 }
 
+fn journal_len(e: &Env) -> usize {
+    Journal::new(&e.lib).read_all().unwrap().len()
+}
+
+fn fake_hash(e: &Env) -> String {
+    let rec = e.cache.get_by_path("a.jpg").unwrap().unwrap();
+    let fake = format!("blake3:{}", "cd".repeat(32));
+    e.cache
+        .set_hash(
+            "a.jpg",
+            Some(StoredHash {
+                hash: fake.clone(),
+                scope: "media-payload/1".into(),
+                size: rec.size,
+                mtime_ns: rec.mtime_ns,
+            }),
+        )
+        .unwrap();
+    fake
+}
+
 #[tokio::test]
-async fn shutdown_drains_and_stopped_writer_errors() {
+async fn rating_only_uses_cached_hash() {
+    let e = env();
+    let fake = fake_hash(&e);
+    let mut p = params(id(&e));
+    p.rating = Some(5);
+    e.writer.update(e.lib.owner(), p).await.unwrap();
+    let sc = e.lib.read_sidecar(Path::new("a.jpg")).unwrap().unwrap();
+    assert_eq!(sc.content_hash.unwrap().0.to_string(), fake);
+    assert_eq!(sc.rating.unwrap().value, 5);
+}
+
+#[tokio::test]
+async fn rating_and_label_is_one_journal_entry() {
+    let e = env();
+    let before = journal_len(&e);
+    let mut p = params(id(&e));
+    p.rating = Some(3);
+    p.label = Some(Some("x".into()));
+    e.writer.update(e.lib.owner(), p).await.unwrap();
+    assert_eq!(journal_len(&e), before + 1);
+}
+
+#[tokio::test]
+async fn stale_cached_hash_is_not_used() {
+    let e = env();
+    let fake = fake_hash(&e);
+    // Modify the file after scan and hashing: new size and mtime.
+    let mut bytes = fs::read(e.root.join("a.jpg")).unwrap();
+    bytes.push(0);
+    fs::write(e.root.join("a.jpg"), bytes).unwrap();
+    let mut p = params(id(&e));
+    p.label = Some(Some("x".into()));
+    e.writer.update(e.lib.owner(), p).await.unwrap();
+    let sc = e.lib.read_sidecar(Path::new("a.jpg")).unwrap().unwrap();
+    assert_ne!(sc.content_hash.unwrap().0.to_string(), fake);
+}
+
+#[tokio::test]
+async fn malformed_sidecar_at_write_time_sets_error() {
+    let e = env();
+    // Sidecar broken after the scan: the cache does not know yet.
+    fs::write(e.root.join("a.jpg.xmp"), b"<not xmp").unwrap();
+    let mut p = params(id(&e));
+    p.label = Some(Some("x".into()));
+    let r = e.writer.update(e.lib.owner(), p.clone()).await;
+    assert!(matches!(r, Err(WriteError::ReadOnly(_))), "{r:?}");
+    assert!(
+        e.cache
+            .get_by_path("a.jpg")
+            .unwrap()
+            .unwrap()
+            .sidecar_error
+            .is_some()
+    );
+    assert_eq!(fs::read(e.root.join("a.jpg.xmp")).unwrap(), b"<not xmp");
+}
+
+#[tokio::test]
+async fn sidecar_hash_is_synced_to_cache() {
+    let e = env();
+    let mut p = params(id(&e));
+    p.label = Some(Some("x".into()));
+    e.writer.update(e.lib.owner(), p).await.unwrap();
+    let h = e.cache.get_by_path("a.jpg").unwrap().unwrap().hash.unwrap();
+    let sc = e.lib.read_sidecar(Path::new("a.jpg")).unwrap().unwrap();
+    assert_eq!(sc.content_hash.unwrap().0.to_string(), h.hash);
+}
+
+#[tokio::test]
+async fn shutdown_drains_all_queued_jobs() {
     let e = env();
     let owner = e.lib.owner();
     let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone());
-    let mut p = params(id(&e));
-    p.label = Some(Some("q".into()));
-    let w2 = w.clone();
-    let pending = tokio::spawn(async move { w2.update(owner, p).await });
-    tokio::task::yield_now().await;
+    let mut tasks = Vec::new();
+    for i in 0..5 {
+        let w = w.clone();
+        let mut p = params(id(&e));
+        p.subjects = Some(vec![format!("t{i}")]);
+        tasks.push(tokio::spawn(async move { w.update(owner, p).await }));
+    }
+    // Let every task enqueue its job before dropping our handle.
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
     drop(w);
-    pending.await.unwrap().unwrap();
     h.await.unwrap();
-    let r = e.writer.relink_orphans().await;
-    assert!(r.is_ok());
+    for t in tasks {
+        t.await.unwrap().unwrap();
+    }
+    let sc = e.lib.read_sidecar(Path::new("a.jpg")).unwrap().unwrap();
+    assert_eq!(sc.subjects.len(), 1);
+    assert_eq!(journal_len(&e), 5);
+}
+
+#[tokio::test]
+async fn stopped_writer_errors() {
+    let e = env();
     let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone());
     h.abort();
     let _ = h.await;

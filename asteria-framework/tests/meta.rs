@@ -254,3 +254,34 @@ fn equal_timestamp_greater_value_wins_in_either_order() {
         }
     }
 }
+
+#[test]
+fn apply_rating_owner_non_owner_older_and_tie() {
+    use asteria_framework::Sidecar;
+    let owner = UserId(GrainId::random());
+    let other = UserId(GrainId::random());
+    let t = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let mut sc = Sidecar::new();
+    assert!(sc.apply_rating(owner, owner, 3, t).unwrap());
+    assert_eq!(sc.rating.as_ref().unwrap().value, 3);
+    assert!(sc.apply_rating(owner, other, 2, t).unwrap());
+    assert_eq!(sc.user_ratings[&other].value, 2);
+    assert_eq!(sc.rating.as_ref().unwrap().value, 3);
+    // older timestamp loses
+    let older = t - chrono::Duration::seconds(1);
+    assert!(!sc.apply_rating(owner, owner, 5, older).unwrap());
+    assert_eq!(sc.rating.as_ref().unwrap().value, 3);
+    // tie: greater value wins, lesser loses, same is no change
+    assert!(!sc.apply_rating(owner, owner, 2, t).unwrap());
+    assert!(!sc.apply_rating(owner, owner, 3, t).unwrap());
+    assert!(sc.apply_rating(owner, owner, 4, t).unwrap());
+    assert_eq!(sc.rating.as_ref().unwrap().value, 4);
+    // newer wins even with a lower value
+    let newer = t + chrono::Duration::seconds(1);
+    assert!(sc.apply_rating(owner, other, 1, newer).unwrap());
+    assert_eq!(sc.user_ratings[&other].value, 1);
+    assert!(matches!(
+        sc.apply_rating(owner, owner, 6, t),
+        Err(Error::InvalidRating(6))
+    ));
+}

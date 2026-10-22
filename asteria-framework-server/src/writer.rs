@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use asteria_framework::hash::{ContentHash, HashScope};
 use asteria_framework::journal::Actor;
 use asteria_framework::{Error as FwError, Library, UserId};
 use asteria_framework_api::{ItemId, MediaUpdateParams};
@@ -20,6 +21,7 @@ use tokio::task::JoinHandle;
 use crate::cache::{Cache, ItemRecord, SidecarSnapshot, StoredHash};
 use crate::error::ServerError;
 use crate::hashing::{RelinkReport, relink_orphans};
+use crate::scan::mtime_ns;
 
 const QUEUE: usize = 256;
 
@@ -55,7 +57,8 @@ pub struct Writer {
     tx: mpsc::Sender<Job>,
 }
 
-/// Starts the writer task. See the module docs for shutdown.
+/// Starts the writer task. Must be called inside a Tokio runtime (it uses `tokio::spawn`).
+/// See the module docs for shutdown.
 pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<Job>(QUEUE);
     let handle = tokio::spawn(async move {
@@ -179,15 +182,19 @@ fn validate(params: &MediaUpdateParams) -> Result<(), WriteError> {
     Ok(())
 }
 
-/// The cached hash, usable only if it was computed for the record's current size/mtime.
-fn usable_hash(
-    rec: &ItemRecord,
-) -> Option<(
-    asteria_framework::hash::ContentHash,
-    asteria_framework::hash::HashScope,
-)> {
+type Stamp = (u64, i128);
+
+fn stat(path: &Path) -> Option<Stamp> {
+    std::fs::metadata(path)
+        .ok()
+        .map(|m| (m.len(), mtime_ns(&m)))
+}
+
+/// The cached hash, usable only if the file's current (size, mtime) equal the ones it was
+/// computed for.
+fn usable_hash(rec: &ItemRecord, now: Option<Stamp>) -> Option<(ContentHash, HashScope)> {
     let h: &StoredHash = rec.hash.as_ref()?;
-    if h.size != rec.size || h.mtime_ns != rec.mtime_ns {
+    if now != Some((h.size, h.mtime_ns)) {
         return None;
     }
     Some((h.hash.parse().ok()?, h.scope.parse().ok()?))
@@ -209,51 +216,77 @@ fn do_update(
         return Err(WriteError::ReadOnly(e.clone()));
     }
     let rel = Path::new(&rec.path);
-    let actor = Actor::User(user);
+    let hash = usable_hash(&rec, stat(&library.root().join(rel)));
+    let owner = library.owner();
 
-    let has_fields = params.subjects.is_some()
-        || params.hierarchical_subjects.is_some()
-        || params.description.is_some()
-        || params.label.is_some();
-    // Fields first, so the pre-set cached hash is written along and the later
-    // set_rating finds a hash already present.
-    if has_fields {
-        let hash = usable_hash(&rec);
-        library
-            .update_sidecar(rel, actor, |sc| {
-                if sc.content_hash.is_none() {
-                    sc.content_hash = hash;
-                }
-                if let Some(v) = params.subjects {
-                    sc.subjects = v.into_iter().collect::<BTreeSet<_>>();
-                }
-                if let Some(v) = params.hierarchical_subjects {
-                    sc.hierarchical_subjects = v.into_iter().collect::<BTreeSet<_>>();
-                }
-                if let Some(v) = params.description {
-                    sc.description = v;
-                }
-                if let Some(v) = params.label {
-                    sc.label = v;
-                }
-            })
-            .map_err(map_fw)?;
-    }
-    if let Some(value) = params.rating {
-        library
-            .set_rating(rel, user, value, Utc::now(), actor)
-            .map_err(map_fw)?;
-    }
-
-    let snapshot = match library.read_sidecar(rel).map_err(map_fw)? {
-        Some(sc) => SidecarSnapshot::from(&sc),
-        None => SidecarSnapshot::default(),
+    // One closure: one sidecar write, one journal entry, no rehash when `hash` is set.
+    let written = library.update_sidecar(rel, Actor::User(user), |sc| {
+        if sc.content_hash.is_none() {
+            sc.content_hash = hash;
+        }
+        if let Some(v) = params.subjects {
+            sc.subjects = v.into_iter().collect::<BTreeSet<_>>();
+        }
+        if let Some(v) = params.hierarchical_subjects {
+            sc.hierarchical_subjects = v.into_iter().collect::<BTreeSet<_>>();
+        }
+        if let Some(v) = params.description {
+            sc.description = v;
+        }
+        if let Some(v) = params.label {
+            sc.label = v;
+        }
+        if let Some(value) = params.rating {
+            // Range was validated above.
+            let _ = sc.apply_rating(owner, user, value, Utc::now());
+        }
+    });
+    let written = match written {
+        Err(e @ (FwError::MediaNotFound(_) | FwError::InvalidPath(_))) => return Err(map_fw(e)),
+        other => other,
     };
-    cache
-        .set_sidecar(&rec.path, snapshot, None)
-        .map_err(internal)?;
+    // Refresh from disk after any write attempt, best effort.
+    if let Err(e) = refresh_cache(library, cache, &rec) {
+        tracing::warn!(error = %e, path = %rec.path, "cache refresh after write failed");
+    }
+    written.map_err(map_fw)?;
     cache
         .get_by_id(&id)
         .map_err(internal)?
         .ok_or(WriteError::NotFound)
+}
+
+fn refresh_cache(library: &Library, cache: &Cache, rec: &ItemRecord) -> Result<(), ServerError> {
+    let rel = Path::new(&rec.path);
+    let sc = match library.read_sidecar(rel) {
+        Ok(Some(sc)) => {
+            cache.set_sidecar(&rec.path, SidecarSnapshot::from(&sc), None)?;
+            Some(sc)
+        }
+        Ok(None) => {
+            cache.set_sidecar(&rec.path, SidecarSnapshot::default(), None)?;
+            None
+        }
+        Err(e @ FwError::MalformedSidecar { .. }) => {
+            cache.set_sidecar(&rec.path, rec.sidecar.clone(), Some(e.to_string()))?;
+            None
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if let Some((h, scope)) = sc.and_then(|s| s.content_hash)
+        && let Some((size, mtime_ns)) = stat(&library.root().join(rel))
+    {
+        let (hash, scope) = (h.to_string(), scope.to_string());
+        let stored = StoredHash {
+            hash,
+            scope,
+            size,
+            mtime_ns,
+        };
+        // set_hash itself checks size/mtime against the cached record.
+        if rec.hash.as_ref() != Some(&stored) {
+            cache.set_hash(&rec.path, Some(stored))?;
+        }
+    }
+    Ok(())
 }
