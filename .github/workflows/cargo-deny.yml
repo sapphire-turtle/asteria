@@ -1,0 +1,19 @@
+name: cargo-deny
+
+# A weekly run catches advisories filed against dependencies that did not change.
+on:
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/cargo-deny.yml"
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  cargo-deny:
+    uses: sapphire-turtle/sapphire-framework/.github/workflows/shared-cargo-deny.yml@main

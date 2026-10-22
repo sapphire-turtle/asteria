@@ -6,7 +6,7 @@
 
 **Architecture:** `asteria-framework` は I/O を持つ純粋なライブラリ crate にする（サーバーにもクライアントにも依存しない）。原本ファイルはすべて「一時ファイル → rename」で書く。ハッシュは形式ごとのモジュールで実装し、形式はマジックバイトで判定する。
 
-**Tech Stack:** Rust 1.99.0（edition 2024）、serde、toml、serde_json、blake3、xmltree、grain-id、chrono、thiserror、uuid。dev では tempfile と lofty を使う。
+**Tech Stack:** Rust 1.99.0（edition 2024）、serde、toml、serde_json、blake3、xml-rs 0.8、grain-id、chrono、thiserror、uuid。dev では tempfile と lofty を使う。
 
 **Spec:** `docs/superpowers/specs/2026-10-22-asteria-design.md`
 
@@ -75,7 +75,7 @@ spec は複数のサブシステムにまたがるので、次のように分割
   - `Cargo.toml`
     - `members` に上の4つの crate を入れる。`resolver = "3"`。
     - `[workspace.package]` は `version = "0.1.0"`、`edition = "2024"`、`license = "GPL-3.0-or-later"`、`repository = "https://github.com/sapphire-turtle/project-asteria"`。
-    - `[workspace.dependencies]` に入れるもの：serde（derive）、serde_json、toml、blake3、xmltree、`grain-id = { version = "0.15", features = ["serde"] }`、chrono（serde）、thiserror、`uuid = { version = "1", features = ["v4", "serde"] }`、tempfile、lofty。
+    - `[workspace.dependencies]` に入れるもの：serde（derive）、serde_json、toml、blake3、xml-rs（当初は xmltree だったが Task 7 で置き換え）、`grain-id = { version = "0.15", features = ["serde"] }`、chrono（serde）、thiserror、`uuid = { version = "1", features = ["v4", "serde"] }`、tempfile、lofty。
   - API crate は `version = "1.0.0"` を個別に指定し（ワークスペースのバージョンは使わない）、`license = "MIT OR Apache-2.0"`、`publish = false` とする。
   - `asteria-framework` はワークスペースのバージョンとライセンスを使い、`license-file` は使わず SPDX 表記にする。
   - `rust-toolchain.toml` は sapphire-journal のものをコメントごとコピーする。
@@ -439,7 +439,7 @@ SOI(FFD8) を確認し、ハッシュに入れる
         pub(crate) doc: Option<XmpDoc>,                        // 元の文書（知らない項目を保持するため）
     }
     ```
-  - `pub(crate) struct XmpDoc { root: xmltree::Element, xpacket: bool }`
+  - `pub(crate) struct XmpDoc { root: xml::Element, xpacket: bool }`（xml は sidecar/xml.rs の自前ツリー。xmltree は属性の名前空間を落とすため Task 7 で置き換えた）
   - `impl Sidecar { pub fn new() -> Self; pub fn parse(bytes: &[u8]) -> Result<Sidecar>; pub fn read(path: &Path) -> Result<Option<Sidecar>> }`：`read` はファイルがなければ `Ok(None)` を返す
   - Error に `MalformedSidecar { path: Option<PathBuf>, reason: String }` を追加する
 - 読み込みの規則
@@ -474,7 +474,7 @@ SOI(FFD8) を確認し、ハッシュに入れる
   Expected: コンパイルエラー
 
 - [ ] **Step 4: 実装する**
-  `xmltree` で読み込む。xpacket の有無は、パースの前にバイト列の先頭に `<?xpacket` があるかどうかで記録しておく。名前空間は URI で照合し、接頭辞（`xmp:` など）では判断しない。
+  xml-rs ベースの自前ツリー（sidecar/xml.rs）で読み込む。xpacket の有無は、パースの前にバイト列の先頭に `<?xpacket` があるかどうかで記録しておく。名前空間は URI で照合し、接頭辞（`xmp:` など）では判断しない。
 
 - [ ] **Step 5: 実行して成功を確認する**
   Run: `cargo test -p asteria-framework --test sidecar_read`

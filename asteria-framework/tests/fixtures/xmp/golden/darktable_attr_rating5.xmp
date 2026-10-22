@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 4.4.0-Exiv2">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description xmlns:darktable="http://darktable.sf.net/" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/" rdf:about="" xmpMM:DerivedFrom="IMG_0001.CR2" darktable:xmp_version="5" darktable:raw_params="0" darktable:auto_presets_applied="1" darktable:history_end="2" darktable:iop_order_version="2" xmp:Rating="5">
+   <darktable:history>
+    <rdf:Seq>
+     <rdf:li darktable:num="0" darktable:operation="exposure" darktable:enabled="1" darktable:modversion="6" darktable:params="00000000" darktable:multi_priority="0"/>
+    </rdf:Seq>
+   </darktable:history>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>

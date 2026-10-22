@@ -1,0 +1,2 @@
+# Test fixtures are compared byte-for-byte (golden files, hash pins); never convert line endings.
+asteria-framework/tests/fixtures/** -text
