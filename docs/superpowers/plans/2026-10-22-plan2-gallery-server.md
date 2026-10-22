@@ -26,7 +26,7 @@
 - 認証トークンはライブラリの中に置かない。サーバーの設定ファイルには、トークンの BLAKE3 ハッシュだけを書く（`blake3:<hex>`）。トークンそのものはログにも設定にも残さない。
 - キャッシュの場所は `<dirs::cache_dir()>/asteria-gallery/<ライブラリID>/`。中身は `cache.redb` と `thumbs/<プリセット>/<hex 先頭2文字>/<hex>.webp`。
 - 既定の待ち受けアドレスは `127.0.0.1:7810`（player は計画5で 7820 を使う）。
-- アイテム ID は `blake3("asteria-item-v1\0" + ライブラリ相対パス(UTF-8, 区切り "/"))` の先頭12バイトを小文字 hex にした24文字。パスから決まるので、キャッシュを作り直しても変わらない。
+- アイテム ID は UUID v5。名前空間はライブラリ ID（`library.toml` の UUID）、名前はライブラリ相対パス（UTF-8、区切り "/"）。表記はハイフン付き小文字の36文字。パスから決まるのでキャッシュを作り直しても変わらず、ライブラリが違えば同じパスでも別の ID になる。どの言語でも標準的な UUID ライブラリで同じ値を計算できる。
 - API に出すパスは、ライブラリ相対で区切りは `/`。UTF-8 にできない名前のファイルはスキャン対象外にし、警告を出す。
 - gallery が扱うアイテムは画像と動画だけ。サイドカー（`.xmp`）、`.asteria/` の中、`.` で始まるファイルとディレクトリは対象外。
 - 外部コマンド（vips、ffmpeg）を使うテストは、コマンドが見つからないときは理由を表示してスキップする。CI の Linux ジョブでは `linux-packages` でこれらを入れ、実際に実行する。
@@ -94,7 +94,7 @@
   - `RpcResponse<R> { jsonrpc, id, #[serde(flatten)] outcome: RpcOutcome<R> }`、`enum RpcOutcome<R> { #[serde(rename="result")] Ok(R), #[serde(rename="error")] Err(RpcError) }`
   - `RpcError { code: i32, message: String }` と、エラーコードの定数 `codes::{PARSE_ERROR=-32700, INVALID_REQUEST=-32600, METHOD_NOT_FOUND=-32601, INVALID_PARAMS=-32602, INTERNAL_ERROR=-32603, NOT_FOUND=-32001, INVALID_PATH=-32002, READ_ONLY=-32003, BUSY=-32004, API_MISMATCH=-32005}`
   - メソッド名の定数：`SERVER_INFO="server.info"`、`LIBRARY_INFO="library.info"`、`LIBRARY_RESCAN="library.rescan"`、`FOLDER_LIST="folder.list"`、`MEDIA_GET="media.get"`、`MEDIA_UPDATE="media.update"`
-  - `pub struct ItemId(pub String)`（serde transparent）
+  - `pub struct ItemId(pub String)`（serde transparent。中身は UUID v5 の文字列。api crate に uuid の依存を増やさないため String で持つ）
   - `MediaKind`（Task 1 で定義済み。そのまま使う）
   - `MediaItem { id: ItemId, path: String, kind: MediaKind, size: u64, modified: String /* RFC 3339 UTC */, rating: Option<i8> /* リクエストしたユーザー自身の評価 */, subjects: Vec<String>, hierarchical_subjects: Vec<String>, description: Option<String>, label: Option<String>, content_hash: Option<String>, read_only_reason: Option<String> }`
   - `LibraryInfo { library_id: String, owner: String, epoch: String, item_count: u64, scanning: bool }`
@@ -176,7 +176,7 @@
   - `pub struct ItemRecord { pub id: ItemId, pub path: String, pub kind: MediaKind, pub size: u64, pub mtime_ns: i128, pub hash: Option<StoredHash>, pub sidecar: SidecarSnapshot, pub sidecar_error: Option<String> }`（serde。値は serde_json のバイト列で保存する）
   - `pub struct StoredHash { pub hash: String, pub scope: String, pub size: u64, pub mtime_ns: i128 }`：(size, mtime) が今のファイルと一致するときだけ有効
   - `pub struct SidecarSnapshot { pub owner_rating: Option<i8>, pub user_ratings: BTreeMap<String, i8>, pub subjects: Vec<String>, pub hierarchical_subjects: Vec<String>, pub description: Option<String>, pub label: Option<String>, pub has_sidecar: bool }`。`From<&Sidecar>` を実装する
-  - `pub fn item_id_for(rel: &str) -> ItemId`（Global Constraints の規則で計算する）
+  - `pub fn item_id_for(library: &LibraryId, rel: &str) -> ItemId`：`Uuid::new_v5(&library.0, rel.as_bytes())` をハイフン付き小文字にしたもの（uuid crate の `v5` feature を使う）
   - `pub struct Cache`
     - `Cache::open(dir: &Path, library_id: &LibraryId) -> Result<Cache, ServerError>`：開けない、`meta.schema != CACHE_SCHEMA`、または `meta.library_id` が違う場合は、ファイルを消して作り直す。作り直すたびに新しい `epoch`（GrainId）を書く
     - `epoch(&self) -> String`
@@ -189,7 +189,11 @@
 - [ ] **Step 1: 失敗するテストを書く**
 
 ```rust
-#[test] fn item_id_is_stable_and_24_hex() { /* 同じパスは同じ ID、別のパスは別の ID。長さ 24 で [0-9a-f] だけ */ }
+#[test] fn item_id_is_uuid_v5_of_library_and_path() {
+    // 同じ (ライブラリ, パス) は同じ ID。パスが違えば別の ID。ライブラリが違えば同じパスでも別の ID
+    // Uuid::parse_str で読めて、get_version() == Some(Version::Sha1)
+    // 名前空間 6ba7b810-9dad-11d1-80b4-00c04fd430c8、パス "2025/京都旅行/a.jpg" の値は "b0a2f96c-dcb1-5b0a-b03e-4c229ab92971"（Python の uuid.uuid5 で計算した独立の値）と一致する
+}
 #[test] fn put_get_remove_roundtrip() { /* id でもパスでも引ける。remove のあとは両方 None */ }
 #[test] fn list_folder_pages_and_subfolders() {
     // "a.jpg", "x/b.jpg", "x/c.jpg", "x/y/d.jpg", "z/e.jpg"
