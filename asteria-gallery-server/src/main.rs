@@ -1,6 +1,7 @@
 //! The Asteria gallery server: `init`, `token add` and `serve`.
 
 use std::error::Error;
+use std::fs::{File, TryLockError};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Duration;
 
 use asteria_framework::fsutil::cleanup_tmp_files;
+use asteria_framework::paths::META_DIR;
 use asteria_framework::{Library, MediaKind, UserId};
 use asteria_framework_server::watch::{DEFAULT_DEBOUNCE, DEFAULT_PERIOD};
 use asteria_framework_server::{
@@ -24,6 +26,9 @@ type AnyResult<T> = Result<T, Box<dyn Error>>;
 const DEFAULT_LISTEN: &str = "127.0.0.1:7810";
 const RENDER_JOBS: usize = 2;
 const RENDER_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long open connections get to finish once shutdown starts.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+const LOCK_FILE: &str = "server.lock";
 
 #[derive(Parser)]
 #[command(version, about = "Asteria gallery server")]
@@ -180,6 +185,9 @@ fn serve(config_path: &Path, listen: Option<SocketAddr>) -> AnyResult<()> {
     let listen = listen.unwrap_or(cfg.listen);
     let root = cfg.library.canonicalize()?;
     let library = Arc::new(Library::open(&root)?);
+    // Before touching anything: another server may be writing to this library. Held until
+    // the process exits.
+    let _lock = lock_library(&root)?;
     let removed = cleanup_tmp_files(library.root())?;
     if removed > 0 {
         tracing::info!(removed, "removed leftover temporary files");
@@ -196,10 +204,34 @@ fn serve(config_path: &Path, listen: Option<SocketAddr>) -> AnyResult<()> {
     processor.sweep_tmp();
     let tokens = Arc::new(Tokens::from_config(&cfg));
 
-    tokio::runtime::Builder::new_multi_thread()
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?
-        .block_on(run(library, cache, processor, tokens, listen))
+        .build()?;
+    let result = rt.block_on(run(library, cache, processor, tokens, listen));
+    // Connections cut off after the grace period may still have tasks; do not wait for them.
+    rt.shutdown_timeout(Duration::from_secs(1));
+    result
+}
+
+/// Takes the exclusive lock `<library>/.asteria/server.lock`, so that one server at a time
+/// serves a library. The lock lasts as long as the returned file is open.
+fn lock_library(root: &Path) -> AnyResult<File> {
+    let path = root.join(META_DIR).join(LOCK_FILE);
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(format!(
+            "another asteria server is serving this library ({})",
+            root.display()
+        )
+        .into()),
+        Err(TryLockError::Error(e)) => Err(format!("cannot lock {}: {e}", path.display()).into()),
+    }
 }
 
 async fn run(
@@ -210,6 +242,7 @@ async fn run(
     listen: SocketAddr,
 ) -> AnyResult<()> {
     let (writer, writer_handle) = spawn_writer(library.clone(), cache.clone());
+    let closer = writer.clone();
     let scanning = Arc::new(AtomicBool::new(false));
     let (rescan_tx, rescan_rx) = mpsc::channel(1);
     let filter: Arc<dyn MediaFilter> = Arc::new(GalleryFilter);
@@ -276,13 +309,29 @@ async fn run(
         }
     }
     shutdown.cancel();
-    if !server_done && let Err(e) = flatten(server.await) {
-        failure.get_or_insert(e);
+    if !server_done {
+        match tokio::time::timeout(SHUTDOWN_GRACE, &mut server).await {
+            Ok(r) => {
+                if let Err(e) = flatten(r) {
+                    failure.get_or_insert(e);
+                }
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "connections still open after {}s; closing them",
+                    SHUTDOWN_GRACE.as_secs()
+                );
+                server.abort();
+            }
+        }
     }
     if !scan_done && let Err(e) = scan.await {
         failure.get_or_insert(e.into());
     }
-    // Every Writer clone is gone now (router/state and scan loop), so the queue drains.
+    // Connection tasks cut off above may still hold Writer clones: close the queue so it
+    // ends once the queued jobs are written.
+    closer.close().await;
+    drop(closer);
     if let Err(e) = writer_handle.await {
         failure.get_or_insert(e.into());
     }
@@ -315,4 +364,30 @@ async fn wait_for_signal() -> std::io::Result<()> {
     }
     #[cfg(not(unix))]
     tokio::signal::ctrl_c().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn library_lock_is_exclusive_until_released() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(META_DIR)).unwrap();
+        let first = lock_library(dir.path()).unwrap();
+        let err = lock_library(dir.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("another asteria server is serving this library"),
+            "{err}"
+        );
+        drop(first);
+        lock_library(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn library_lock_does_not_create_the_meta_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(lock_library(dir.path()).is_err());
+        assert!(!dir.path().join(META_DIR).exists());
+    }
 }

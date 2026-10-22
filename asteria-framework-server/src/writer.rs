@@ -4,7 +4,9 @@
 //!
 //! Shutdown: [`spawn_writer`] returns the [`Writer`] and the task's `JoinHandle`. Once
 //! every `Writer` clone is dropped the task finishes the queued jobs and ends, so
-//! `drop(writers); handle.await` drains the queue.
+//! `drop(writers); handle.await` drains the queue. When clones may outlive the shutdown
+//! (a connection task still holding the app state), [`Writer::close`] refuses new jobs and
+//! lets the task end after the queued ones.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -50,6 +52,8 @@ enum Job {
     Relink {
         reply: oneshot::Sender<Result<RelinkReport, WriteError>>,
     },
+    /// Refuse new jobs; finish the queued ones and end.
+    Close,
 }
 
 #[derive(Clone)]
@@ -83,6 +87,7 @@ pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHa
                     .await;
                     let _ = reply.send(r);
                 }
+                Job::Close => rx.close(),
             }
         }
     });
@@ -121,6 +126,13 @@ impl Writer {
             .await
             .map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?
+    }
+
+    /// Stops accepting jobs: later calls on any clone fail with "writer stopped", jobs
+    /// queued before this one still run, then the writer task ends.
+    pub async fn close(&self) {
+        // An error means the writer has stopped already.
+        let _ = self.tx.send(Job::Close).await;
     }
 
     pub async fn relink_orphans(&self) -> Result<RelinkReport, WriteError> {

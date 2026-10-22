@@ -12,6 +12,7 @@ fn e2e_skipped_on_this_platform() {
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use std::io::{Read, Write};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
@@ -364,7 +365,38 @@ mod linux {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-        // 8. the rating is on disk in the sidecar, and survives a restart with the cache deleted
+        // 8. a second server on the same library fails fast and touches nothing: an in-flight
+        // temporary file of the first one survives.
+        let inflight = lib.join("photos/.a.png.xmp.asteria-tmp");
+        std::fs::write(&inflight, "being written").unwrap();
+        let other = format!("127.0.0.1:{}", free_port());
+        let mut second = Server::start(&env, &config, &other);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = second.child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a second server kept running\n{}",
+                second.logs()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(!status.success());
+        assert!(
+            second
+                .logs()
+                .contains("another asteria server is serving this library"),
+            "{}",
+            second.logs()
+        );
+        drop(second);
+        assert!(inflight.exists(), "the first server's tmp file was removed");
+        assert_eq!(api.call("server.info", json!({}))["app"], "asteria-gallery");
+        std::fs::remove_file(&inflight).unwrap();
+
+        // 9. the rating is on disk in the sidecar, and survives a restart with the cache deleted
         // (a real scan rebuilds the index from the library).
         let sidecar = asteria_framework::paths::sidecar_path_for(&lib.join("photos/a.png"));
         let rating = |path: &Path| {
@@ -381,6 +413,32 @@ mod linux {
         api.wait_scanned(2);
         assert_eq!(api.list()[0]["rating"], 4);
         assert_eq!(rating(&sidecar), Some(4));
+
+        // 10. a client that stops reading a large original does not hold up shutdown for
+        // longer than the grace period (10 s).
+        let big = std::fs::File::create(lib.join("photos/c.mp4")).unwrap();
+        big.set_len(256 << 20).unwrap();
+        drop(big);
+        api.wait_scanned(3);
+        let big_id = api.list()[2]["id"].as_str().unwrap().to_owned();
+        let mut stalled = std::net::TcpStream::connect(&listen).unwrap();
+        write!(
+            stalled,
+            "GET /media/{big_id}/original HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {}\r\n\r\n",
+            api.token
+        )
+        .unwrap();
+        let mut head = [0u8; 1024];
+        stalled.read_exact(&mut head).unwrap();
+        assert!(head.starts_with(b"HTTP/1.1 200"));
+        let start = Instant::now();
         server.stop();
+        assert!(
+            start.elapsed() < Duration::from_secs(18),
+            "{:?}",
+            start.elapsed()
+        );
+        drop(stalled);
+        assert_eq!(rating(&sidecar), Some(4));
     }
 }

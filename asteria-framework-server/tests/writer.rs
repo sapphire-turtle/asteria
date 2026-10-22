@@ -317,3 +317,35 @@ async fn stopped_writer_errors() {
         Err(WriteError::Internal("writer stopped".into()))
     );
 }
+
+#[tokio::test]
+async fn close_drains_queued_jobs_while_clones_live() {
+    let e = env();
+    let owner = e.lib.owner();
+    let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone());
+    let mut tasks = Vec::new();
+    for i in 0..5 {
+        let w = w.clone();
+        let mut p = params(id(&e));
+        p.subjects = Some(vec![format!("t{i}")]);
+        tasks.push(tokio::spawn(async move { w.update(owner, p).await }));
+    }
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    // A clone that is never dropped, like one held by a stuck connection.
+    let lingering = w.clone();
+    w.close().await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), h)
+        .await
+        .expect("the writer ends although a clone is alive")
+        .unwrap();
+    for t in tasks {
+        t.await.unwrap().unwrap();
+    }
+    assert_eq!(journal_len(&e), 5);
+    assert_eq!(
+        lingering.relink_orphans().await,
+        Err(WriteError::Internal("writer stopped".into()))
+    );
+}
