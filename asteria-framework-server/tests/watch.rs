@@ -56,6 +56,10 @@ fn red(to: &Path) {
 /// Prepares the library with `setup`, then starts the loop (unless `gate_armed`, which
 /// arms the blocking filter before the first pass).
 fn start(setup: impl FnOnce(&Path), gate_armed: bool) -> Env {
+    start_with(setup, gate_armed, 1)
+}
+
+fn start_with(setup: impl FnOnce(&Path), gate_armed: bool, trigger_cap: usize) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("lib");
     fs::create_dir(&root).unwrap();
@@ -65,7 +69,7 @@ fn start(setup: impl FnOnce(&Path), gate_armed: bool) -> Env {
     let gate = Arc::new(Gate::default());
     gate.armed.store(gate_armed, Ordering::SeqCst);
     let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
-    let (tx, rx) = mpsc::channel(1);
+    let (tx, rx) = mpsc::channel(trigger_cap);
     let passes = Arc::new(AtomicUsize::new(0));
     let scanning = Arc::new(AtomicBool::new(false));
     let shutdown = CancellationToken::new();
@@ -149,11 +153,11 @@ async fn journal_writes_do_not_trigger_scans() {
 
 #[tokio::test]
 async fn triggers_coalesce() {
-    let e = start(|r| red(&r.join("a.jpg")), true);
+    let e = start_with(|r| red(&r.join("a.jpg")), true, 8);
     wait_for("scan in progress", || e.gate.entered.load(Ordering::SeqCst)).await;
     assert!(e.scanning.load(Ordering::SeqCst));
     for _ in 0..5 {
-        let _ = e.tx.try_send(());
+        e.tx.try_send(()).unwrap();
     }
     e.gate.armed.store(false, Ordering::SeqCst);
     *e.gate.release.lock().unwrap() = true;
@@ -212,4 +216,16 @@ async fn shutdown_stops_the_loop() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn reading_files_does_not_trigger_scans() {
+    let e = start(|r| red(&r.join("a.jpg")), false);
+    wait_for("first pass", || e.passes.load(Ordering::SeqCst) >= 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for _ in 0..3 {
+        let _ = fs::read(e.root.join("a.jpg")).unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(e.passes.load(Ordering::SeqCst), 1);
 }
