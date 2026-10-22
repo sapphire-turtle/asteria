@@ -6,7 +6,7 @@
 
 **Architecture:** `asteria-framework` は I/O を持つ純粋なライブラリ crate にする（サーバーにもクライアントにも依存しない）。原本ファイルはすべて「一時ファイル → rename」で書く。ハッシュは形式ごとのモジュールで実装し、形式はマジックバイトで判定する。
 
-**Tech Stack:** Rust 1.99.0（edition 2024）、serde、toml、serde_json、blake3、xmltree、grain-id、chrono、thiserror、uuid。dev では tempfile と lofty を使う。
+**Tech Stack:** Rust 1.99.0（edition 2024）、serde、toml、serde_json、blake3、xml-rs 0.8、grain-id、chrono、thiserror、uuid。dev では tempfile と lofty を使う。
 
 **Spec:** `docs/superpowers/specs/2026-10-22-asteria-design.md`
 
