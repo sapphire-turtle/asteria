@@ -1,7 +1,7 @@
 //! Append-only JSONL journal of file operations, one `YYYY-MM.jsonl` file per month (UTC).
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Utc};
@@ -166,23 +166,52 @@ fn read_file(file: &Path, out: &mut Vec<JournalEntry>) -> Result<()> {
 }
 
 fn repair_torn_tail(path: &Path) -> Result<()> {
-    let bytes = fs::read(path)?;
-    if bytes.is_empty() || bytes.ends_with(b"\n") {
+    let mut f = OpenOptions::new().read(true).write(true).open(path)?;
+    let len = f.metadata()?.len();
+    if len == 0 {
         return Ok(());
     }
-    let keep = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    f.seek(SeekFrom::Start(len - 1))?;
+    let mut last = [0u8; 1];
+    f.read_exact(&mut last)?;
+    if last[0] == b'\n' {
+        return Ok(());
+    }
+    // Torn: scan backwards in chunks for the last newline.
+    let mut keep = 0u64;
+    let mut end = len;
+    'scan: while end > 0 {
+        let start = end.saturating_sub(4096);
+        let mut buf = vec![0u8; (end - start) as usize];
+        f.seek(SeekFrom::Start(start))?;
+        f.read_exact(&mut buf)?;
+        if let Some(i) = buf.iter().rposition(|&b| b == b'\n') {
+            keep = start + i as u64 + 1;
+            break 'scan;
+        }
+        end = start;
+    }
+    let mut tail = vec![0u8; (len - keep) as usize];
+    f.seek(SeekFrom::Start(keep))?;
+    f.read_exact(&mut tail)?;
+    if serde_json::from_slice::<JournalEntry>(&tail).is_ok() {
+        // A complete entry that only lost its newline: keep it.
+        f.seek(SeekFrom::End(0))?;
+        f.write_all(b"\n")?;
+        f.sync_data()?;
+        return Ok(());
+    }
     let mut torn_name = path.as_os_str().to_owned();
     torn_name.push(".torn");
     let mut torn = OpenOptions::new()
         .append(true)
         .create(true)
         .open(PathBuf::from(torn_name))?;
-    torn.write_all(&bytes[keep..])?;
+    torn.write_all(&tail)?;
     torn.write_all(b"\n")?;
     torn.sync_data()?;
     tracing::warn!(file = %path.display(), "cut torn journal tail before appending");
-    let f = OpenOptions::new().write(true).open(path)?;
-    f.set_len(keep as u64)?;
+    f.set_len(keep)?;
     f.sync_data()?;
     Ok(())
 }

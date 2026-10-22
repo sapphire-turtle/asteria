@@ -193,3 +193,18 @@ fn plan_id_none_roundtrips() {
     j.append(&e).unwrap();
     assert_eq!(j.read_all().unwrap(), vec![e]);
 }
+
+#[test]
+fn append_after_missing_final_newline_keeps_complete_entry() {
+    let (d, lib, j) = setup();
+    let es: Vec<_> = (1..=3).map(|i| entry(&lib, day(10, i), json!(i))).collect();
+    j.append(&es[0]).unwrap();
+    j.append(&es[1]).unwrap();
+    let p = jfile(&d, "2026-10.jsonl");
+    let bytes = fs::read(&p).unwrap();
+    fs::write(&p, &bytes[..bytes.len() - 1]).unwrap();
+    assert_eq!(j.read_all().unwrap(), es[..2]);
+    j.append(&es[2]).unwrap();
+    assert_eq!(j.read_all().unwrap(), es);
+    assert!(!jfile(&d, "2026-10.jsonl.torn").exists());
+}
