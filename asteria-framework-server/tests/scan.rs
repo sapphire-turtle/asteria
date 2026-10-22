@@ -338,3 +338,28 @@ fn removing_more_than_one_batch_works() {
     assert_eq!(r.removed, 1100);
     assert!(paths(&e).is_empty());
 }
+
+#[test]
+fn missing_library_identity_aborts_without_removing() {
+    let e = env();
+    red(&e.root.join("a.jpg"));
+    run(&e);
+    // An unmounted library looks like an empty directory, or one without `.asteria`.
+    fs::rename(e.root.join(".asteria"), e.root.join("asteria-away")).unwrap();
+    fs::remove_file(e.root.join("a.jpg")).unwrap();
+    assert!(scan(&e.lib, &e.cache, &Gallery).is_err());
+    assert_eq!(paths(&e), ["a.jpg"]);
+}
+
+#[test]
+fn other_library_identity_aborts_without_removing() {
+    let e = env();
+    red(&e.root.join("a.jpg"));
+    run(&e);
+    // Another library mounted at the same place.
+    fs::remove_file(e.root.join("a.jpg")).unwrap();
+    fs::remove_dir_all(e.root.join(".asteria")).unwrap();
+    Library::init(&e.root, "someone else").unwrap();
+    assert!(scan(&e.lib, &e.cache, &Gallery).is_err());
+    assert_eq!(paths(&e), ["a.jpg"]);
+}

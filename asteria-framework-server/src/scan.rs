@@ -76,6 +76,7 @@ pub fn scan(
     let root = library.root();
     // Failing to read the root aborts the scan.
     std::fs::read_dir(root)?;
+    check_identity(library)?;
     let canonical_root = root.canonicalize()?;
     let lib_id = library.config().id;
 
@@ -233,6 +234,23 @@ pub fn scan(
     report.removed = gone.len();
     cache.flush()?;
     Ok(report)
+}
+
+/// The library's `.asteria/library.toml` must still be there and name the same library.
+/// Otherwise (an unmounted disk, another library in its place) the scan would see every
+/// item as vanished, so it stops before removing anything.
+fn check_identity(library: &Library) -> Result<(), ServerError> {
+    let on_disk = Library::open(library.root()).map_err(|e| {
+        tracing::error!(error = %e, "library metadata is missing or unreadable; not scanning");
+        ServerError::LibraryUnavailable("library metadata is missing or unreadable".into())
+    })?;
+    if on_disk.config().id != library.config().id {
+        tracing::error!("the library directory now holds another library; not scanning");
+        return Err(ServerError::LibraryUnavailable(
+            "the directory holds another library".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn under_any(path: &str, dirs: &[String]) -> bool {

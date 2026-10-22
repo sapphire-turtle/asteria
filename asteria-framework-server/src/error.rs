@@ -6,6 +6,9 @@ pub enum ServerError {
     Config(String),
     #[error("cache error: {0}")]
     Cache(String),
+    /// The library directory does not hold this library (unmounted, replaced, unreadable).
+    #[error("library unavailable: {0}")]
+    LibraryUnavailable(String),
     #[error("invalid path: {0}")]
     InvalidPath(String),
     #[error(transparent)]
