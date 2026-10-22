@@ -230,12 +230,12 @@ async fn run(
     let shutdown = CancellationToken::new();
     let app = router(state);
     let token = shutdown.clone();
-    let server = tokio::spawn(async move {
+    let mut server = tokio::spawn(async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(async move { token.cancelled().await })
             .await
     });
-    let scan = spawn_scan_loop(ScanLoop {
+    let mut scan = spawn_scan_loop(ScanLoop {
         library,
         cache: cache.clone(),
         filter,
@@ -248,14 +248,71 @@ async fn run(
         passes: Arc::new(AtomicUsize::new(0)),
     });
 
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("shutting down");
+    // What ended the wait; a signal is a clean stop, a finished task is a failure.
+    let mut failure: Option<Box<dyn Error>> = None;
+    let mut server_done = false;
+    let mut scan_done = false;
+    tokio::select! {
+        r = wait_for_signal() => {
+            if let Err(e) = r {
+                failure = Some(e.into());
+            }
+            tracing::info!("shutting down");
+        }
+        r = &mut server => {
+            server_done = true;
+            failure = Some(match r {
+                Ok(Ok(())) => "server stopped unexpectedly".into(),
+                Ok(Err(e)) => e.into(),
+                Err(e) => e.into(),
+            });
+        }
+        r = &mut scan => {
+            scan_done = true;
+            failure = Some(match r {
+                Ok(()) => "scan loop stopped unexpectedly".into(),
+                Err(e) => e.into(),
+            });
+        }
+    }
     shutdown.cancel();
-    server.await??;
-    scan.await?;
+    if !server_done && let Err(e) = flatten(server.await) {
+        failure.get_or_insert(e);
+    }
+    if !scan_done && let Err(e) = scan.await {
+        failure.get_or_insert(e.into());
+    }
     // Every Writer clone is gone now (router/state and scan loop), so the queue drains.
-    writer_handle.await?;
-    cache.flush()?;
-    tracing::info!("stopped");
-    Ok(())
+    if let Err(e) = writer_handle.await {
+        failure.get_or_insert(e.into());
+    }
+    if let Err(e) = cache.flush() {
+        failure.get_or_insert(e.into());
+    }
+    match failure {
+        Some(e) => Err(e),
+        None => {
+            tracing::info!("stopped");
+            Ok(())
+        }
+    }
+}
+
+fn flatten(r: Result<std::io::Result<()>, tokio::task::JoinError>) -> Result<(), Box<dyn Error>> {
+    r?.map_err(Into::into)
+}
+
+/// Resolves on Ctrl-C or (on Unix) SIGTERM.
+async fn wait_for_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate())?;
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r,
+            _ = term.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }

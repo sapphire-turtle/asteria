@@ -22,5 +22,4 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 reqwest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-asteria-framework = { path = "../asteria-framework" }
 grain-id.workspace = true
