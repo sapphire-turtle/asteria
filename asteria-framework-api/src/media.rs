@@ -138,6 +138,107 @@ mod tests {
         assert_eq!(serde_json::from_str::<MediaUpdateParams>(&json).unwrap(), p);
     }
 
+    fn item(full: bool) -> MediaItem {
+        MediaItem {
+            id: ItemId("0d6a6f6e-6b0e-5d3b-9a43-2f1b5c3e8a10".into()),
+            path: "2024/a.jpg".into(),
+            kind: MediaKind::Image,
+            size: 1234,
+            modified: "2024-05-01T12:00:00Z".into(),
+            rating: full.then_some(4),
+            subjects: if full { vec!["cat".into()] } else { vec![] },
+            hierarchical_subjects: if full {
+                vec!["pets|cat".into()]
+            } else {
+                vec![]
+            },
+            description: full.then(|| "desc".into()),
+            label: full.then(|| "Red".into()),
+            content_hash: full.then(|| "blake3:abcd".into()),
+            read_only_reason: full.then(|| "bad xml".into()),
+        }
+    }
+
+    const ITEM_EMPTY: &str = concat!(
+        r#"{"id":"0d6a6f6e-6b0e-5d3b-9a43-2f1b5c3e8a10","path":"2024/a.jpg","kind":"image","#,
+        r#""size":1234,"modified":"2024-05-01T12:00:00Z","rating":null,"subjects":[],"#,
+        r#""hierarchical_subjects":[],"description":null,"label":null,"content_hash":null,"#,
+        r#""read_only_reason":null}"#
+    );
+
+    const ITEM_FULL: &str = concat!(
+        r#"{"id":"0d6a6f6e-6b0e-5d3b-9a43-2f1b5c3e8a10","path":"2024/a.jpg","kind":"image","#,
+        r#""size":1234,"modified":"2024-05-01T12:00:00Z","rating":4,"subjects":["cat"],"#,
+        r#""hierarchical_subjects":["pets|cat"],"description":"desc","label":"Red","#,
+        r#""content_hash":"blake3:abcd","read_only_reason":"bad xml"}"#
+    );
+
+    #[test]
+    fn media_item_wire_format_with_nulls() {
+        let it = item(false);
+        assert_eq!(serde_json::to_string(&it).unwrap(), ITEM_EMPTY);
+        assert_eq!(serde_json::from_str::<MediaItem>(ITEM_EMPTY).unwrap(), it);
+    }
+
+    #[test]
+    fn media_item_wire_format_with_values() {
+        let it = item(true);
+        assert_eq!(serde_json::to_string(&it).unwrap(), ITEM_FULL);
+        assert_eq!(serde_json::from_str::<MediaItem>(ITEM_FULL).unwrap(), it);
+    }
+
+    #[test]
+    fn media_kind_wire_names() {
+        let names: Vec<String> = [
+            MediaKind::Image,
+            MediaKind::Video,
+            MediaKind::Audio,
+            MediaKind::Other,
+        ]
+        .iter()
+        .map(|k| serde_json::to_string(k).unwrap())
+        .collect();
+        assert_eq!(
+            names,
+            [r#""image""#, r#""video""#, r#""audio""#, r#""other""#]
+        );
+    }
+
+    #[test]
+    fn library_info_wire_format() {
+        let info = LibraryInfo {
+            library_id: "lib-1".into(),
+            owner: "user-1".into(),
+            epoch: "e1".into(),
+            item_count: 42,
+            scanning: true,
+        };
+        let json = r#"{"library_id":"lib-1","owner":"user-1","epoch":"e1","item_count":42,"scanning":true}"#;
+        assert_eq!(serde_json::to_string(&info).unwrap(), json);
+        assert_eq!(serde_json::from_str::<LibraryInfo>(json).unwrap(), info);
+    }
+
+    #[test]
+    fn folder_listing_wire_format() {
+        let empty = FolderListing {
+            folders: vec![],
+            items: vec![],
+            next_cursor: None,
+        };
+        let json = r#"{"folders":[],"items":[],"next_cursor":null}"#;
+        assert_eq!(serde_json::to_string(&empty).unwrap(), json);
+        assert_eq!(serde_json::from_str::<FolderListing>(json).unwrap(), empty);
+
+        let page = FolderListing {
+            folders: vec!["2024".into()],
+            items: vec![item(false)],
+            next_cursor: Some("c1".into()),
+        };
+        let json = format!(r#"{{"folders":["2024"],"items":[{ITEM_EMPTY}],"next_cursor":"c1"}}"#);
+        assert_eq!(serde_json::to_string(&page).unwrap(), json);
+        assert_eq!(serde_json::from_str::<FolderListing>(&json).unwrap(), page);
+    }
+
     #[test]
     fn item_id_is_transparent() {
         assert_eq!(

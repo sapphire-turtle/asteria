@@ -8,3 +8,6 @@ publish = false
 
 [dependencies]
 asteria-framework-api = { path = "../asteria-framework-api", version = "2.0.0" }
+
+[dev-dependencies]
+serde_json.workspace = true

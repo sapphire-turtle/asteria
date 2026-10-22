@@ -141,6 +141,14 @@ mod tests {
     }
 
     #[test]
+    fn server_info_wire_format() {
+        let s = server("asteria-gallery", 2);
+        let json = r#"{"app":"asteria-gallery","app_api":2,"server_version":"0.1.0","epoch":"e1"}"#;
+        assert_eq!(serde_json::to_string(&s).unwrap(), json);
+        assert_eq!(serde_json::from_str::<ServerInfo>(json).unwrap(), s);
+    }
+
+    #[test]
     fn server_info_json_roundtrip() {
         let s = server("asteria-gallery", 1);
         let json = serde_json::to_string(&s).unwrap();

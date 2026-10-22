@@ -32,6 +32,17 @@ mod tests {
 }
 
 #[cfg(test)]
+mod wire_tests {
+    #[test]
+    fn client_info_wire_format() {
+        assert_eq!(
+            serde_json::to_string(&super::client_info()).unwrap(),
+            r#"{"app":"asteria-gallery","app_api":2}"#
+        );
+    }
+}
+
+#[cfg(test)]
 mod major_tests {
     #[test]
     fn app_api_tracks_crate_major() {

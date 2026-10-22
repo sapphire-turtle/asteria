@@ -152,6 +152,7 @@ name = "asteria-gallery-api"
 version = "2.0.0"
 dependencies = [
  "asteria-framework-api",
+ "serde_json",
 ]
 
 [[package]]
