@@ -8,7 +8,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use asteria_framework::hash::content_hash;
+use asteria_framework::hash::{HashScope, content_hash, file_hash};
 use asteria_framework::journal::{Actor, Journal, JournalEntry, OpId, OpKind};
 use asteria_framework::paths::{is_sidecar, media_path_for_sidecar, sidecar_path_for};
 use asteria_framework::{Error as FwError, Library, Sidecar};
@@ -22,8 +22,8 @@ use crate::scan::{is_hidden, mtime_ns, rel_lossy, rel_string};
 
 const BATCH: usize = 64;
 
-/// Computes the content hash of every cached item whose stored hash is missing or no
-/// longer matches the file's (size, mtime). Returns how many hashes were stored.
+/// Computes the content hash and the whole-file hash of every cached item whose stored hash
+/// is missing or no longer matches the file's (size, mtime). Returns how many hashes were stored.
 /// Stops early (keeping what is done) once `cancel` is set. Per-file errors are logged
 /// and skipped; cache errors propagate. Only the `hash` field of a record is written, and
 /// only if the record's size/mtime still match the hash. A record whose size/mtime no
@@ -76,8 +76,15 @@ fn hash_pending_with(
         {
             continue;
         }
-        let outcome = match content_hash(&abs) {
-            Ok(o) => o,
+        let hashed = content_hash(&abs).and_then(|o| {
+            let whole = match o.scope {
+                HashScope::File1 => o.hash,
+                HashScope::MediaPayload1 => file_hash(&abs)?,
+            };
+            Ok((o, whole))
+        });
+        let (outcome, whole) = match hashed {
+            Ok(h) => h,
             Err(e) => {
                 tracing::warn!(%path, error = %e, "hashing failed; skipping");
                 continue;
@@ -94,6 +101,7 @@ fn hash_pending_with(
             Some(StoredHash {
                 hash: outcome.hash.to_string(),
                 scope: outcome.scope.to_string(),
+                file_hash: whole.to_string(),
                 size: stamp.0,
                 mtime_ns: stamp.1,
             }),

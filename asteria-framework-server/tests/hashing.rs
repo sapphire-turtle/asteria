@@ -91,6 +91,29 @@ fn hashes_missing_and_stale() {
 }
 
 #[test]
+fn metadata_only_edit_keeps_payload_hash_but_changes_file_hash() {
+    let e = env();
+    red(&e.root.join("a.jpg"));
+    fs::write(e.root.join("notes.bin"), b"not media").unwrap();
+    scan_all(&e);
+    hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
+    let h = e.cache.get_by_path("a.jpg").unwrap().unwrap().hash.unwrap();
+    let whole = asteria_framework::hash::file_hash(&e.root.join("a.jpg")).unwrap();
+    assert_eq!(h.file_hash, whole.to_string());
+    assert_ne!(h.file_hash, h.hash);
+
+    // Insert a COM segment after SOI: metadata only, so the payload hash stays.
+    let mut bytes = fs::read(e.root.join("a.jpg")).unwrap();
+    bytes.splice(2..2, [0xFF, 0xFE, 0x00, 0x05, b'h', b'i', b'!']);
+    fs::write(e.root.join("a.jpg"), &bytes).unwrap();
+    scan_all(&e);
+    hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
+    let h2 = e.cache.get_by_path("a.jpg").unwrap().unwrap().hash.unwrap();
+    assert_eq!(h2.hash, h.hash);
+    assert_ne!(h2.file_hash, h.file_hash);
+}
+
+#[test]
 fn cancel_stops_early() {
     let e = env();
     red(&e.root.join("a.jpg"));

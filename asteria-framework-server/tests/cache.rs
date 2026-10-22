@@ -278,6 +278,7 @@ fn set_hash_touches_only_hash_and_checks_size_mtime() {
     let h = |size, mtime_ns| asteria_framework_server::StoredHash {
         hash: "blake3:aa".into(),
         scope: "file/1".into(),
+        file_hash: "blake3:aa".into(),
         size,
         mtime_ns,
     };

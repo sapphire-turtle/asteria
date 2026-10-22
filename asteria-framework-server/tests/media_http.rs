@@ -174,7 +174,7 @@ async fn thumb_is_webp_and_cached() {
         .unwrap()
         .hash
         .unwrap()
-        .hash;
+        .file_hash;
     let path = e
         .processor
         .thumb_path(&hash, asteria_framework_server::Preset::Thumb)
@@ -336,7 +336,7 @@ async fn failure_after_the_request_left_is_still_marked_unprocessable() {
         .unwrap()
         .hash
         .unwrap()
-        .hash;
+        .file_hash;
     let mut marked = None;
     for _ in 0..100 {
         marked = e.cache.unprocessable(&hash, "thumb").unwrap();
@@ -425,6 +425,29 @@ async fn file_swapped_for_an_escaping_symlink_is_404() {
             assert_eq!(s, StatusCode::NOT_FOUND, "{id} {what}");
             assert!(b.is_empty());
         }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn file_swapped_for_a_symlink_to_a_sidecar_is_404() {
+    let e = env();
+    hash_all(&e);
+    let sidecar = e.root.join("a.jpg.xmp");
+    std::fs::write(&sidecar, "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>").unwrap();
+    let id = item_id(&e, "sub/b.jpg");
+    std::fs::remove_file(e.root.join("sub/b.jpg")).unwrap();
+    std::os::unix::fs::symlink(&sidecar, e.root.join("sub/b.jpg")).unwrap();
+    for what in ["original", "thumb"] {
+        let (s, _, b) = get(
+            &e.app,
+            Some(&e.owner_token),
+            &format!("/media/{id}/{what}"),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{what}");
+        assert!(b.is_empty());
     }
 }
 

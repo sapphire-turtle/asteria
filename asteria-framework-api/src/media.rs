@@ -34,6 +34,11 @@ pub struct MediaItem {
     pub description: Option<String>,
     pub label: Option<String>,
     pub content_hash: Option<String>,
+    /// BLAKE3 of the whole file (`blake3:<hex>`), `null` until computed. Changes whenever
+    /// any byte of the file changes, metadata included; derived media are keyed on it.
+    /// Absent from servers before API 2.1.
+    #[serde(default)]
+    pub file_hash: Option<String>,
     pub read_only_reason: Option<String>,
 }
 
@@ -155,6 +160,7 @@ mod tests {
             description: full.then(|| "desc".into()),
             label: full.then(|| "Red".into()),
             content_hash: full.then(|| "blake3:abcd".into()),
+            file_hash: full.then(|| "blake3:ef01".into()),
             read_only_reason: full.then(|| "bad xml".into()),
         }
     }
@@ -163,14 +169,14 @@ mod tests {
         r#"{"id":"0d6a6f6e-6b0e-5d3b-9a43-2f1b5c3e8a10","path":"2024/a.jpg","kind":"image","#,
         r#""size":1234,"modified":"2024-05-01T12:00:00Z","rating":null,"subjects":[],"#,
         r#""hierarchical_subjects":[],"description":null,"label":null,"content_hash":null,"#,
-        r#""read_only_reason":null}"#
+        r#""file_hash":null,"read_only_reason":null}"#
     );
 
     const ITEM_FULL: &str = concat!(
         r#"{"id":"0d6a6f6e-6b0e-5d3b-9a43-2f1b5c3e8a10","path":"2024/a.jpg","kind":"image","#,
         r#""size":1234,"modified":"2024-05-01T12:00:00Z","rating":4,"subjects":["cat"],"#,
         r#""hierarchical_subjects":["pets|cat"],"description":"desc","label":"Red","#,
-        r#""content_hash":"blake3:abcd","read_only_reason":"bad xml"}"#
+        r#""content_hash":"blake3:abcd","file_hash":"blake3:ef01","read_only_reason":"bad xml"}"#
     );
 
     #[test]
@@ -185,6 +191,16 @@ mod tests {
         let it = item(true);
         assert_eq!(serde_json::to_string(&it).unwrap(), ITEM_FULL);
         assert_eq!(serde_json::from_str::<MediaItem>(ITEM_FULL).unwrap(), it);
+    }
+
+    #[test]
+    fn media_item_from_api_2_0_server_has_no_file_hash() {
+        let old = ITEM_EMPTY.replace(r#""file_hash":null,"#, "");
+        assert!(!old.contains("file_hash"));
+        assert_eq!(
+            serde_json::from_str::<MediaItem>(&old).unwrap(),
+            item(false)
+        );
     }
 
     #[test]

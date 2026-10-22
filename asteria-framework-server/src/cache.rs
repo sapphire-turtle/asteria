@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::error::ServerError;
 
-pub const CACHE_SCHEMA: u32 = 1;
+pub const CACHE_SCHEMA: u32 = 2;
 
 const FILE_NAME: &str = "cache.redb";
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
@@ -26,12 +26,15 @@ const ITEMS: TableDefinition<&str, &[u8]> = TableDefinition::new("items");
 const IDS: TableDefinition<&str, &str> = TableDefinition::new("ids");
 const UNPROCESSABLE: TableDefinition<&str, &str> = TableDefinition::new("unprocessable");
 
-/// A content hash remembered with the (size, mtime) it was computed for.
-/// Valid only while both still match the file on disk.
+/// A content hash and the whole-file hash, remembered with the (size, mtime) they were
+/// computed for. Valid only while both still match the file on disk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredHash {
     pub hash: String,
     pub scope: String,
+    /// `file/1` hash of the whole file; keys derived media (thumbnails), so a metadata-only
+    /// edit such as an EXIF orientation change re-renders them.
+    pub file_hash: String,
     pub size: u64,
     pub mtime_ns: i128,
 }

@@ -90,24 +90,28 @@ async fn folder_list_and_media_get() {
     assert_eq!(v["result"]["path"], "a.jpg");
     assert_eq!(v["result"]["rating"], Value::Null);
     assert_eq!(v["result"]["content_hash"], Value::Null);
+    assert_eq!(v["result"]["file_hash"], Value::Null);
 
     // A stored hash is shown only while it matches the record's size and mtime.
     let rec = e.cache.get_by_path("a.jpg").unwrap().unwrap();
     let mut h = StoredHash {
         hash: "abc".into(),
         scope: "full".into(),
+        file_hash: "def".into(),
         size: rec.size,
         mtime_ns: rec.mtime_ns,
     };
     e.cache.set_hash("a.jpg", Some(h.clone())).unwrap();
     let v = call(&e.app, &e.owner_token, "media.get", json!({"id": id})).await;
     assert_eq!(v["result"]["content_hash"], "abc");
+    assert_eq!(v["result"]["file_hash"], "def");
     h.size += 1;
     let mut stale = rec.clone();
     stale.hash = Some(h);
     e.cache.put(&stale).unwrap();
     let v = call(&e.app, &e.owner_token, "media.get", json!({"id": id})).await;
     assert_eq!(v["result"]["content_hash"], Value::Null);
+    assert_eq!(v["result"]["file_hash"], Value::Null);
 
     let v = call(
         &e.app,
