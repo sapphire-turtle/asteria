@@ -181,6 +181,57 @@ async fn bracketed_file_name_is_not_read_as_loader_options() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn abandoned_queued_render_frees_its_place_without_a_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let hang = script(dir.path(), "hang.sh", "exec sleep 30");
+    let p = std::sync::Arc::new(Processor::with_tools(
+        dir.path().join("thumbs"),
+        1,
+        Duration::from_secs(60),
+        &hang,
+        "ffmpeg",
+    ));
+    let spawn = |hash: &'static str| {
+        let p = p.clone();
+        tokio::spawn(async move {
+            p.render(&red(), MediaKind::Image, hash, Preset::Thumb)
+                .await
+        })
+    };
+    let running = spawn("blake3:aaaa");
+    for _ in 0..100 {
+        if p.renders_started() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        p.renders_started(),
+        1,
+        "the first render holds the only slot"
+    );
+    let queued = spawn("blake3:bbbb");
+    for _ in 0..100 {
+        if p.renders_queued() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(p.renders_queued(), 2);
+    queued.abort();
+    for _ in 0..100 {
+        if p.renders_queued() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(p.renders_queued(), 1, "the abandoned render left the queue");
+    assert_eq!(p.renders_started(), 1);
+    running.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn dropped_request_does_not_kill_or_leak_a_render() {
     let dir = tempfile::tempdir().unwrap();
     // Writes a fake WebP to the `-o` argument (minus its `[...]` options) after a delay.

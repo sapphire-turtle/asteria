@@ -4,7 +4,7 @@
 //! and shared: concurrent requests for the same `(hash, preset)` wait for one render.
 //! At most `max_jobs * 32` renders are queued or running; beyond that a request gets
 //! [`ProcessError::Busy`]. A queued render whose requests have all gone away is dropped
-//! before it starts its tool.
+//! right away, freeing its queue place without waiting for a slot.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -202,7 +202,6 @@ impl Processor {
         removed
     }
 
-    /// How many renders actually ran a tool (not counting cache hits or shared waits).
     /// Sets what records an unprocessable result. It runs in the render task (on a blocking
     /// thread), before the result reaches any waiter, so it runs even when every request has
     /// gone away. Only the first call has an effect.
@@ -225,6 +224,7 @@ impl Processor {
         self.inner.inflight.lock().unwrap().len()
     }
 
+    /// How many renders actually ran a tool (not counting cache hits or shared waits).
     pub fn renders_started(&self) -> usize {
         self.inner.started.load(Ordering::SeqCst)
     }
@@ -318,23 +318,29 @@ async fn render_task(
         key: key.clone(),
         tx: tx.clone(),
     };
-    let permit = match inner.permits.acquire().await {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = tx.send(Some(Err(ProcessError::Io(e.to_string()))));
-            return;
+    // Wait for a slot, but give up as soon as nobody waits for the result, so an abandoned
+    // render does not hold its queue place until a slot frees up.
+    let permit = loop {
+        tokio::select! {
+            biased;
+            permit = inner.permits.acquire() => match permit {
+                Ok(p) => break p,
+                Err(e) => {
+                    tx.send_replace(Some(Err(ProcessError::Io(e.to_string()))));
+                    return;
+                }
+            },
+            () = tx.closed() => {
+                if abandon_if_unwatched(&inner, &key, &tx) {
+                    return;
+                }
+                // A request joined after the last one left; keep waiting for a slot.
+                tokio::task::yield_now().await;
+            }
         }
     };
-    {
-        // Waiters subscribe under this lock, so none can join after the check.
-        let mut map = inner.inflight.lock().unwrap();
-        if tx.receiver_count() == 0 {
-            if map.get(&key).is_some_and(|t| Arc::ptr_eq(t, &tx)) {
-                map.remove(&key);
-            }
-            tracing::debug!("dropping a queued render nobody waits for");
-            return;
-        }
+    if abandon_if_unwatched(&inner, &key, &tx) {
+        return;
     }
     let result = inner.render_once(&src, kind, &out, key.1).await;
     drop(permit);
@@ -352,8 +358,23 @@ async fn render_task(
             tracing::error!("recording an unprocessable thumbnail panicked");
         }
     }
-    // Nobody may be listening any more; that is fine.
-    let _ = tx.send(Some(result));
+    // `send_replace` stores the result even with no receiver: a request may subscribe after
+    // the last one left but before `Unregister` removes the entry, and must still see it.
+    tx.send_replace(Some(result));
+}
+
+/// Removes the render's entry and returns `true` if no request waits for it any more.
+fn abandon_if_unwatched(inner: &Inner, key: &(String, Preset), tx: &Pending) -> bool {
+    // Waiters subscribe under this lock, so none can join after the check.
+    let mut map = inner.inflight.lock().unwrap();
+    if tx.receiver_count() != 0 {
+        return false;
+    }
+    if map.get(key).is_some_and(|t| Arc::ptr_eq(t, tx)) {
+        map.remove(key);
+    }
+    tracing::debug!("dropping a queued render nobody waits for");
+    true
 }
 
 /// `try_exists`, with an error being an `Io` failure (logged) instead of "absent".
