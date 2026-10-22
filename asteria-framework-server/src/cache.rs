@@ -242,6 +242,74 @@ impl Cache {
         w.commit().map_err(ce)
     }
 
+    /// Sets only the `hash` of the record at `path`, re-reading the current record inside
+    /// the write transaction. A non-`None` hash is stored only if its size and mtime still
+    /// equal the record's. Returns whether anything was written.
+    pub fn set_hash(&self, path: &str, hash: Option<StoredHash>) -> Result<bool, ServerError> {
+        Ok(self.set_hash_many(&[(path.to_string(), hash)])? > 0)
+    }
+
+    /// [`Cache::set_hash`] for several paths in one transaction; returns how many were written.
+    pub fn set_hash_many(
+        &self,
+        updates: &[(String, Option<StoredHash>)],
+    ) -> Result<usize, ServerError> {
+        self.update_records(updates, |rec, hash| {
+            if hash
+                .as_ref()
+                .is_some_and(|h| h.size != rec.size || h.mtime_ns != rec.mtime_ns)
+            {
+                return false;
+            }
+            rec.hash = hash.clone();
+            true
+        })
+    }
+
+    /// Sets only the sidecar snapshot and sidecar error of the record at `path`.
+    /// Returns whether the record exists.
+    pub fn set_sidecar(
+        &self,
+        path: &str,
+        snapshot: SidecarSnapshot,
+        error: Option<String>,
+    ) -> Result<bool, ServerError> {
+        let n = self.update_records(&[(path.to_string(), (snapshot, error))], |rec, v| {
+            rec.sidecar = v.0.clone();
+            rec.sidecar_error = v.1.clone();
+            true
+        })?;
+        Ok(n > 0)
+    }
+
+    /// Re-reads each record in a single write transaction and applies `f` to it; `f`
+    /// returns whether to write it back. Missing or undecodable records are skipped.
+    fn update_records<T>(
+        &self,
+        updates: &[(String, T)],
+        f: impl Fn(&mut ItemRecord, &T) -> bool,
+    ) -> Result<usize, ServerError> {
+        let w = self.write_txn()?;
+        let mut n = 0;
+        {
+            let mut items = w.open_table(ITEMS).map_err(ce)?;
+            for (path, v) in updates {
+                let cur = items
+                    .get(path.as_str())
+                    .map_err(ce)?
+                    .and_then(|g| serde_json::from_slice::<ItemRecord>(g.value()).ok());
+                let Some(mut rec) = cur else { continue };
+                if f(&mut rec, v) {
+                    let bytes = serde_json::to_vec(&rec).map_err(ce)?;
+                    items.insert(path.as_str(), bytes.as_slice()).map_err(ce)?;
+                    n += 1;
+                }
+            }
+        }
+        w.commit().map_err(ce)?;
+        Ok(n)
+    }
+
     pub fn remove(&self, rel: &str) -> Result<(), ServerError> {
         self.remove_many(&[rel.to_string()])
     }

@@ -81,6 +81,9 @@ fn hashes_missing_and_stale() {
     f.set_modified(SystemTime::now() + Duration::from_secs(100))
         .unwrap();
     drop(f);
+    // Without a rescan the record's mtime is stale, so the new hash is refused.
+    assert_eq!(hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap(), 0);
+    scan_all(&e);
     assert_eq!(hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap(), 1);
     let h2 = e.cache.get_by_path("a.jpg").unwrap().unwrap().hash.unwrap();
     assert_ne!(h2.mtime_ns, h.mtime_ns);
@@ -200,7 +203,8 @@ fn target_with_existing_sidecar_is_not_overwritten() {
     scan_all(&e);
     hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
     let r = relink_orphans(&e.lib, &e.cache).unwrap();
-    assert!(r.relinked.is_empty());
+    assert!(r.relinked.is_empty() && r.ambiguous.is_empty() && r.unmatched.is_empty());
+    assert_eq!(r.conflicts, vec!["red.jpg.xmp".to_string()]);
     assert_eq!(fs::read(e.root.join("new.jpg.xmp")).unwrap(), b"existing");
     assert!(e.root.join("red.jpg.xmp").exists());
 }
@@ -214,4 +218,71 @@ fn hidden_and_meta_dirs_are_ignored() {
     scan_all(&e);
     let r = relink_orphans(&e.lib, &e.cache).unwrap();
     assert!(r.relinked.is_empty() && r.ambiguous.is_empty() && r.unmatched.is_empty());
+}
+
+#[test]
+fn two_orphans_one_target_are_both_ambiguous() {
+    let e = env();
+    red(&e.root.join("a.jpg"));
+    rate(&e, "a.jpg", 4);
+    fs::copy(e.root.join("a.jpg.xmp"), e.root.join("b.jpg.xmp")).unwrap();
+    fs::rename(e.root.join("a.jpg"), e.root.join("new.jpg")).unwrap();
+    scan_all(&e);
+    hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    assert!(r.relinked.is_empty() && r.conflicts.is_empty());
+    let mut a = r.ambiguous.clone();
+    a.sort();
+    assert_eq!(a, vec!["a.jpg.xmp", "b.jpg.xmp"]);
+    assert!(e.root.join("a.jpg.xmp").exists() && e.root.join("b.jpg.xmp").exists());
+    assert!(!e.root.join("new.jpg.xmp").exists());
+}
+
+#[test]
+fn target_modified_after_hashing_is_not_moved() {
+    let e = env();
+    red(&e.root.join("red.jpg"));
+    rate(&e, "red.jpg", 4);
+    fs::rename(e.root.join("red.jpg"), e.root.join("new.jpg")).unwrap();
+    scan_all(&e);
+    hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
+    let f = fs::OpenOptions::new()
+        .write(true)
+        .open(e.root.join("new.jpg"))
+        .unwrap();
+    f.set_modified(SystemTime::now() + Duration::from_secs(100))
+        .unwrap();
+    drop(f);
+    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    assert!(r.relinked.is_empty());
+    assert_eq!(r.conflicts, vec!["red.jpg.xmp".to_string()]);
+    assert!(e.root.join("red.jpg.xmp").exists());
+    assert!(!e.root.join("new.jpg.xmp").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupted_relink_is_completed() {
+    let e = env();
+    red(&e.root.join("red.jpg"));
+    rate(&e, "red.jpg", 4);
+    fs::rename(e.root.join("red.jpg"), e.root.join("new.jpg")).unwrap();
+    // Simulate a crash after the link but before removing the old name.
+    fs::hard_link(e.root.join("red.jpg.xmp"), e.root.join("new.jpg.xmp")).unwrap();
+    scan_all(&e);
+    hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    assert_eq!(
+        r.relinked,
+        vec![("red.jpg.xmp".to_string(), "new.jpg".to_string())]
+    );
+    assert!(!e.root.join("red.jpg.xmp").exists());
+    assert!(e.root.join("new.jpg.xmp").exists());
+    let n = Journal::new(&e.lib)
+        .read_all()
+        .unwrap()
+        .iter()
+        .filter(|j| j.kind == OpKind::RelinkSidecar)
+        .count();
+    assert_eq!(n, 1);
 }

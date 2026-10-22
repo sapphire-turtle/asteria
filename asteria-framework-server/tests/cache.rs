@@ -266,3 +266,49 @@ fn invalid_folder_arguments_rejected() {
     }
     assert!(c.list_folder("", None, 10).is_ok());
 }
+
+#[test]
+fn set_hash_touches_only_hash_and_checks_size_mtime() {
+    let d = tempfile::tempdir().unwrap();
+    let l = lib();
+    let c = Cache::open(d.path(), &l).unwrap();
+    let mut r = rec(&l, "a.jpg");
+    r.sidecar.label = Some("keep".into());
+    c.put(&r).unwrap();
+    let h = |size, mtime_ns| asteria_framework_server::StoredHash {
+        hash: "blake3:aa".into(),
+        scope: "file/1".into(),
+        size,
+        mtime_ns,
+    };
+    // Stale (size/mtime differ from the record): not written.
+    assert!(!c.set_hash("a.jpg", Some(h(11, 1))).unwrap());
+    assert!(c.get_by_path("a.jpg").unwrap().unwrap().hash.is_none());
+    assert!(c.set_hash("a.jpg", Some(h(10, 1))).unwrap());
+    let got = c.get_by_path("a.jpg").unwrap().unwrap();
+    assert_eq!(got.hash, Some(h(10, 1)));
+    assert_eq!(got.sidecar.label.as_deref(), Some("keep"));
+    assert!(!c.set_hash("missing.jpg", None).unwrap());
+}
+
+#[test]
+fn set_sidecar_touches_only_sidecar_fields() {
+    let d = tempfile::tempdir().unwrap();
+    let l = lib();
+    let c = Cache::open(d.path(), &l).unwrap();
+    c.put(&rec(&l, "a.jpg")).unwrap();
+    let snap = SidecarSnapshot {
+        owner_rating: Some(5),
+        has_sidecar: true,
+        ..Default::default()
+    };
+    assert!(
+        c.set_sidecar("a.jpg", snap.clone(), Some("e".into()))
+            .unwrap()
+    );
+    let got = c.get_by_path("a.jpg").unwrap().unwrap();
+    assert_eq!(got.sidecar, snap);
+    assert_eq!(got.sidecar_error.as_deref(), Some("e"));
+    assert_eq!(got.size, 10);
+    assert!(!c.set_sidecar("nope.jpg", snap, None).unwrap());
+}

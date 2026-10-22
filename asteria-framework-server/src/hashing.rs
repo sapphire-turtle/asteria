@@ -3,6 +3,8 @@
 //! Both functions are synchronous. `relink_orphans` writes to the library (it moves a
 //! sidecar), so in production it must be called from the library's write queue.
 
+use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -14,7 +16,7 @@ use chrono::Utc;
 use grain_id::GrainId;
 use walkdir::WalkDir;
 
-use crate::cache::{Cache, ItemRecord, SidecarSnapshot, StoredHash};
+use crate::cache::{Cache, SidecarSnapshot, StoredHash};
 use crate::error::ServerError;
 use crate::scan::{is_hidden, mtime_ns, rel_lossy, rel_string};
 
@@ -23,31 +25,49 @@ const BATCH: usize = 64;
 /// Computes the content hash of every cached item whose stored hash is missing or no
 /// longer matches the file's (size, mtime). Returns how many hashes were stored.
 /// Stops early (keeping what is done) once `cancel` is set. Per-file errors are logged
-/// and skipped; cache errors propagate.
+/// and skipped; cache errors propagate. Only the `hash` field of a record is written, and
+/// only if the record's size/mtime still match the hash.
 pub fn hash_pending(
     library: &Library,
     cache: &Cache,
     cancel: &AtomicBool,
 ) -> Result<usize, ServerError> {
+    hash_pending_with(library, cache, cancel, &mut |_| {})
+}
+
+/// `hook` runs after a file was hashed and before it is re-stat'ed (test seam).
+fn hash_pending_with(
+    library: &Library,
+    cache: &Cache,
+    cancel: &AtomicBool,
+    hook: &mut dyn FnMut(&str),
+) -> Result<usize, ServerError> {
     let mut done = 0;
-    let mut pending: Vec<ItemRecord> = Vec::new();
+    let mut pending: Vec<(String, Option<StoredHash>)> = Vec::new();
     for path in cache.all_paths()? {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let Some(mut rec) = cache.get_by_path(&path)? else {
+        let Some(rec) = cache.get_by_path(&path)? else {
             continue;
         };
         let abs = library.root().join(&path);
-        let Ok(before) = std::fs::metadata(&abs) else {
-            tracing::debug!(%path, "file vanished before hashing");
-            continue;
+        let before = match std::fs::metadata(&abs) {
+            Ok(m) => m,
+            Err(e) => {
+                if e.kind() == ErrorKind::NotFound {
+                    tracing::debug!(%path, "file vanished before hashing");
+                } else {
+                    tracing::warn!(%path, error = %e, "cannot stat file; skipping");
+                }
+                continue;
+            }
         };
-        let (size, mtime) = (before.len(), mtime_ns(&before));
+        let stamp = (before.len(), mtime_ns(&before));
         if rec
             .hash
             .as_ref()
-            .is_some_and(|h| h.size == size && h.mtime_ns == mtime)
+            .is_some_and(|h| (h.size, h.mtime_ns) == stamp)
         {
             continue;
         }
@@ -58,47 +78,58 @@ pub fn hash_pending(
                 continue;
             }
         };
+        hook(&path);
         // The file may have changed (or vanished) while we read it: leave it for next run.
-        match std::fs::metadata(&abs) {
-            Ok(after) if after.len() == size && mtime_ns(&after) == mtime => {}
-            _ => {
-                tracing::debug!(%path, "file changed while hashing; not storing hash");
-                continue;
-            }
+        if !unchanged_since(&abs, stamp) {
+            tracing::debug!(%path, "file changed while hashing; not storing hash");
+            continue;
         }
-        rec.hash = Some(StoredHash {
-            hash: outcome.hash.to_string(),
-            scope: outcome.scope.to_string(),
-            size,
-            mtime_ns: mtime,
-        });
-        pending.push(rec);
-        done += 1;
+        pending.push((
+            path,
+            Some(StoredHash {
+                hash: outcome.hash.to_string(),
+                scope: outcome.scope.to_string(),
+                size: stamp.0,
+                mtime_ns: stamp.1,
+            }),
+        ));
         if pending.len() >= BATCH {
-            cache.put_many(&pending)?;
+            done += cache.set_hash_many(&pending)?;
             pending.clear();
         }
     }
     if !pending.is_empty() {
-        cache.put_many(&pending)?;
+        done += cache.set_hash_many(&pending)?;
     }
     cache.flush()?;
     Ok(done)
+}
+
+/// Whether the file at `path` still has the given (size, mtime_ns).
+fn unchanged_since(path: &Path, stamp: (u64, i128)) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| (m.len(), mtime_ns(&m)) == stamp)
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RelinkReport {
     /// `(old sidecar path, new media path)`.
     pub relinked: Vec<(String, String)>,
-    /// Orphan sidecars whose hash matches two or more cached items (left in place).
+    /// Orphan sidecars whose hash matches two or more cached items, or that compete with
+    /// another orphan for the same single target (all left in place).
     pub ambiguous: Vec<String>,
-    /// Orphan sidecars with no usable match (left in place).
+    /// Orphan sidecars with no usable match: malformed, no hash, no cached item, or the
+    /// matched item's file is gone (all left in place).
     pub unmatched: Vec<String>,
+    /// Orphan sidecars with exactly one match that cannot be used: the target already has a
+    /// sidecar on disk, or the target file changed since it was hashed (left in place).
+    pub conflicts: Vec<String>,
 }
 
 /// Moves each orphaned sidecar (its media file is gone) next to the one cached item with
-/// the same content hash and scope, provided that item has no sidecar on disk. The move
-/// is journaled and the item's cached sidecar snapshot refreshed.
+/// the same content hash and scope, provided that item has no sidecar on disk and its file
+/// still matches the stored hash's size/mtime. Orphans are grouped first: several orphans
+/// claiming one target are all `ambiguous` and nothing is moved. A move is journaled and
+/// the item's cached sidecar snapshot refreshed.
 pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, ServerError> {
     let root = library.root();
     let mut orphans: Vec<String> = Vec::new();
@@ -133,10 +164,13 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
             tracing::warn!(path = %rel_lossy(root, entry.path()), "skipping sidecar whose name is not valid UTF-8");
             continue;
         };
-        if let Some(media) = media_path_for_sidecar(entry.path())
-            && media.symlink_metadata().is_err()
-        {
-            orphans.push(rel);
+        let Some(media) = media_path_for_sidecar(entry.path()) else {
+            continue;
+        };
+        match media.symlink_metadata() {
+            Err(e) if e.kind() == ErrorKind::NotFound => orphans.push(rel),
+            Err(e) => tracing::warn!(sidecar = %rel, error = %e, "cannot stat media; skipping"),
+            Ok(_) => {}
         }
     }
 
@@ -145,8 +179,8 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
         return Ok(report);
     }
 
-    // (hash, scope) -> media paths, from records whose stored hash is still current.
-    let mut index: std::collections::HashMap<(String, String), Vec<String>> = Default::default();
+    // (hash, scope) -> items whose stored hash is still current for their record.
+    let mut index: HashMap<(String, String), Vec<(String, StoredHash)>> = HashMap::new();
     for path in cache.all_paths()? {
         let Some(rec) = cache.get_by_path(&path)? else {
             continue;
@@ -155,15 +189,22 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
             && h.size == rec.size
             && h.mtime_ns == rec.mtime_ns
         {
-            index.entry((h.hash, h.scope)).or_default().push(path);
+            index
+                .entry((h.hash.clone(), h.scope.clone()))
+                .or_default()
+                .push((path, h));
         }
     }
 
-    let journal = Journal::new(library);
+    // Phase 1: classify without moving anything.
+    let mut single: Vec<(String, String, StoredHash)> = Vec::new(); // (orphan, target, hash)
     for old in orphans {
         let sc = match Sidecar::read(&root.join(&old)) {
             Ok(Some(sc)) => sc,
-            Ok(None) => continue,
+            Ok(None) => {
+                tracing::debug!(sidecar = %old, "orphan sidecar vanished");
+                continue;
+            }
             Err(e) => {
                 tracing::warn!(sidecar = %old, error = %e, "unreadable orphan sidecar; not moving it");
                 report.unmatched.push(old);
@@ -174,30 +215,72 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
             report.unmatched.push(old);
             continue;
         };
-        let candidates = index
+        match index
             .get(&(hash.to_string(), scope.to_string()))
             .map(Vec::as_slice)
-            .unwrap_or_default();
-        let target = match candidates {
-            [] => {
+            .unwrap_or_default()
+        {
+            [] => report.unmatched.push(old),
+            [(target, h)] => single.push((old, target.clone(), h.clone())),
+            _ => report.ambiguous.push(old),
+        }
+    }
+    let mut claims: HashMap<&str, usize> = HashMap::new();
+    for (_, target, _) in &single {
+        *claims.entry(target.as_str()).or_default() += 1;
+    }
+    let contested: Vec<bool> = single
+        .iter()
+        .map(|(_, t, _)| claims[t.as_str()] > 1)
+        .collect();
+    let mut uncontested = Vec::new();
+    for ((old, target, h), c) in single.into_iter().zip(contested) {
+        if c {
+            report.ambiguous.push(old);
+        } else {
+            uncontested.push((old, target, h));
+        }
+    }
+
+    // Phase 2: move.
+    let journal = Journal::new(library);
+    for (old, target, stored) in uncontested {
+        let target_abs = root.join(&target);
+        match std::fs::metadata(&target_abs) {
+            Ok(m) if (m.len(), mtime_ns(&m)) == (stored.size, stored.mtime_ns) => {}
+            Ok(_) => {
+                tracing::warn!(sidecar = %old, %target, "target changed since it was hashed; not relinking");
+                report.conflicts.push(old);
+                continue;
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {
                 report.unmatched.push(old);
                 continue;
             }
-            [one] => one.clone(),
-            _ => {
-                report.ambiguous.push(old);
+            Err(e) => {
+                tracing::warn!(sidecar = %old, %target, error = %e, "cannot stat target; not relinking");
+                report.conflicts.push(old);
                 continue;
             }
-        };
-        let new_sidecar_abs = sidecar_path_for(&root.join(&target));
+        }
+        let new_sidecar_abs = sidecar_path_for(&target_abs);
         let new_sidecar = rel_lossy(root, &new_sidecar_abs);
+        let old_abs = root.join(&old);
         // Check the filesystem, not the cached snapshot: the sidecar may be newer than the scan.
         if new_sidecar_abs.symlink_metadata().is_ok() {
-            tracing::warn!(sidecar = %old, %target, "target already has a sidecar; not relinking");
-            report.unmatched.push(old);
-            continue;
-        }
-        if let Err(e) = move_no_clobber(&root.join(&old), &new_sidecar_abs) {
+            if same_file(&old_abs, &new_sidecar_abs) {
+                // A crash between link and remove of an earlier relink: finish the move.
+                if let Err(e) = std::fs::remove_file(&old_abs) {
+                    tracing::warn!(sidecar = %old, error = %e, "could not finish interrupted relink");
+                    report.conflicts.push(old);
+                    continue;
+                }
+            } else {
+                tracing::warn!(sidecar = %old, %target, "target already has a sidecar; not relinking");
+                report.conflicts.push(old);
+                continue;
+            }
+        } else if let Err(e) = move_no_clobber(&old_abs, &new_sidecar_abs) {
             tracing::warn!(sidecar = %old, %target, error = %e, "could not move sidecar");
             report.unmatched.push(old);
             continue;
@@ -212,8 +295,6 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
             after: serde_json::json!({ "path": new_sidecar }),
         })?;
         refresh_snapshot(library, cache, &target)?;
-        // Another orphan with the same hash must not claim this target again; the
-        // filesystem check above also guards it, this just keeps the report accurate.
         report.relinked.push((old, target));
     }
     cache.flush()?;
@@ -221,45 +302,149 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
 }
 
 fn refresh_snapshot(library: &Library, cache: &Cache, media: &str) -> Result<(), ServerError> {
-    let Some(mut rec) = cache.get_by_path(media)? else {
-        return Ok(());
+    let (snap, err) = match library.read_sidecar(Path::new(media)) {
+        Ok(Some(sc)) => (SidecarSnapshot::from(&sc), None),
+        Ok(None) => (SidecarSnapshot::default(), None),
+        Err(e) => (SidecarSnapshot::default(), Some(e.to_string())),
     };
-    match library.read_sidecar(Path::new(media)) {
-        Ok(Some(sc)) => {
-            rec.sidecar = SidecarSnapshot::from(&sc);
-            rec.sidecar_error = None;
-        }
-        Ok(None) => {
-            rec.sidecar = SidecarSnapshot::default();
-            rec.sidecar_error = None;
-        }
-        Err(e) => {
-            rec.sidecar = SidecarSnapshot::default();
-            rec.sidecar_error = Some(e.to_string());
+    cache.set_sidecar(media, snap, err)?;
+    Ok(())
+}
+
+/// Whether both paths are hard links to the same file (unix; `false` elsewhere).
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            _ => false,
         }
     }
-    cache.put(&rec)
+    #[cfg(not(unix))]
+    {
+        let _ = (a, b);
+        false
+    }
 }
 
 /// Moves `from` to `to` without ever replacing an existing `to`.
 ///
-/// On unix this is `hard_link` (which fails if `to` exists) followed by removing `from`,
-/// so a racing creator of `to` is never overwritten. If the filesystem cannot hard-link,
-/// it falls back to check-then-`rename`, which is acceptable because all library writes go
-/// through the single write queue.
+/// Uses `hard_link` (fails if `to` exists, so a racing creator is never overwritten)
+/// followed by removing `from`. Only if the filesystem reports hard links as unsupported
+/// does it fall back to check-then-`rename`, which is acceptable because all library
+/// writes go through the single write queue.
 fn move_no_clobber(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
     match std::fs::hard_link(from, to) {
         Ok(()) => {
             return std::fs::remove_file(from).inspect_err(|_| {
-                let _ = std::fs::remove_file(to);
+                if let Err(e) = std::fs::remove_file(to) {
+                    tracing::warn!(from = %from.display(), to = %to.display(), error = %e,
+                        "rollback failed: both link names remain");
+                }
             });
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
-        Err(_) => {}
+        Err(e) if e.kind() == ErrorKind::Unsupported => {}
+        Err(e) => return Err(e),
     }
     if to.symlink_metadata().is_ok() {
-        return Err(std::io::ErrorKind::AlreadyExists.into());
+        return Err(ErrorKind::AlreadyExists.into());
     }
     std::fs::rename(from, to)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scan::{MediaFilter, scan};
+    use asteria_framework::MediaKind;
+    use std::time::{Duration, SystemTime};
+
+    struct All;
+    impl MediaFilter for All {
+        fn accepts(&self, _: MediaKind) -> bool {
+            true
+        }
+    }
+
+    fn setup(names: &[&str]) -> (tempfile::TempDir, Library, Cache) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        std::fs::create_dir(&root).unwrap();
+        let lib = Library::init(&root, "o").unwrap();
+        let cache = Cache::open(&dir.path().join("c"), &lib.config().id).unwrap();
+        for (i, n) in names.iter().enumerate() {
+            std::fs::write(root.join(n), format!("content {i}")).unwrap();
+        }
+        scan(&lib, &cache, &All).unwrap();
+        (dir, lib, cache)
+    }
+
+    fn touch(p: &Path) {
+        let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+        f.set_modified(SystemTime::now() + Duration::from_secs(500))
+            .unwrap();
+    }
+
+    #[test]
+    fn cancel_midway_stops_further_hashing() {
+        let (_d, lib, cache) = setup(&["a.bin", "b.bin", "c.bin"]);
+        let cancel = AtomicBool::new(false);
+        let n = hash_pending_with(&lib, &cache, &cancel, &mut |_| {
+            cancel.store(true, Ordering::Relaxed)
+        })
+        .unwrap();
+        assert_eq!(n, 1);
+        let hashed = ["a.bin", "b.bin", "c.bin"]
+            .iter()
+            .filter(|p| cache.get_by_path(p).unwrap().unwrap().hash.is_some())
+            .count();
+        assert_eq!(hashed, 1);
+    }
+
+    #[test]
+    fn file_changed_during_hashing_is_not_stored() {
+        let (_d, lib, cache) = setup(&["a.bin", "b.bin"]);
+        let root = lib.root().to_path_buf();
+        let n = hash_pending_with(&lib, &cache, &AtomicBool::new(false), &mut |p| {
+            if p == "a.bin" {
+                touch(&root.join(p));
+            }
+        })
+        .unwrap();
+        assert_eq!(n, 1);
+        assert!(cache.get_by_path("a.bin").unwrap().unwrap().hash.is_none());
+        assert!(cache.get_by_path("b.bin").unwrap().unwrap().hash.is_some());
+    }
+
+    #[test]
+    fn write_does_not_clobber_concurrent_snapshot_change() {
+        let (_d, lib, cache) = setup(&["a.bin"]);
+        let snap = SidecarSnapshot {
+            owner_rating: Some(3),
+            has_sidecar: true,
+            ..Default::default()
+        };
+        let n = hash_pending_with(&lib, &cache, &AtomicBool::new(false), &mut |p| {
+            cache.set_sidecar(p, snap.clone(), None).unwrap();
+        })
+        .unwrap();
+        assert_eq!(n, 1);
+        let rec = cache.get_by_path("a.bin").unwrap().unwrap();
+        assert!(rec.hash.is_some());
+        assert_eq!(rec.sidecar, snap);
+    }
+
+    #[test]
+    fn unchanged_since_compares_size_and_mtime() {
+        let (_d, lib, _c) = setup(&["a.bin"]);
+        let p = lib.root().join("a.bin");
+        let m = std::fs::metadata(&p).unwrap();
+        let stamp = (m.len(), mtime_ns(&m));
+        assert!(unchanged_since(&p, stamp));
+        assert!(!unchanged_since(&p, (stamp.0 + 1, stamp.1)));
+        touch(&p);
+        assert!(!unchanged_since(&p, stamp));
+        assert!(!unchanged_since(&lib.root().join("missing"), stamp));
+    }
 }
