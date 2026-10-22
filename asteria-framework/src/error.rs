@@ -31,6 +31,8 @@ pub enum Error {
         path: Option<PathBuf>,
         reason: String,
     },
+    #[error("malformed journal entry at {}:{line}", .file.display())]
+    MalformedJournal { file: PathBuf, line: usize },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

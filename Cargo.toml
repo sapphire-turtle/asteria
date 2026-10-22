@@ -26,3 +26,4 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 tempfile = "3"
 lofty = "0.22"
+tracing = "0.1"

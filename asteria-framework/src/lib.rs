@@ -4,6 +4,7 @@ pub mod error;
 pub mod fsutil;
 pub mod hash;
 pub mod ids;
+pub mod journal;
 pub mod library;
 pub mod paths;
 pub mod sidecar;
