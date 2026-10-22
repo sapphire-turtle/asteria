@@ -137,7 +137,7 @@ fn map_fw(e: FwError) -> WriteError {
     match e {
         FwError::MediaNotFound(_) => WriteError::NotFound,
         FwError::InvalidPath(p) => WriteError::InvalidPath(p.display().to_string()),
-        e @ FwError::MalformedSidecar { .. } => WriteError::ReadOnly(e.to_string()),
+        FwError::MalformedSidecar { reason, .. } => WriteError::ReadOnly(reason),
         e @ FwError::TmpExists(_) => WriteError::Busy(e.to_string()),
         e @ FwError::InvalidRating(_) => WriteError::Invalid(e.to_string()),
         e @ FwError::UnsafeSidecarWrite(_) => {
@@ -266,8 +266,8 @@ fn refresh_cache(library: &Library, cache: &Cache, rec: &ItemRecord) -> Result<(
         Ok(None) => {
             cache.set_sidecar(&rec.path, SidecarSnapshot::default(), None)?;
         }
-        Err(e @ FwError::MalformedSidecar { .. }) => {
-            cache.set_sidecar(&rec.path, rec.sidecar.clone(), Some(e.to_string()))?;
+        Err(FwError::MalformedSidecar { reason, .. }) => {
+            cache.set_sidecar(&rec.path, rec.sidecar.clone(), Some(reason))?;
         }
         Err(e) => return Err(e.into()),
     }

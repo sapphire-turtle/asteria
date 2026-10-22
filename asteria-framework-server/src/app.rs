@@ -1,7 +1,7 @@
 //! The axum router and its bearer-token authentication.
 
 use axum::Router;
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -10,11 +10,16 @@ use axum::routing::post;
 use crate::rpc::rpc;
 use crate::state::AppState;
 
+/// Largest accepted request body. Bigger bodies get 413 before reaching `/rpc`: the only
+/// non-200 answer from `/rpc` besides the 401 of the auth layer.
+const BODY_LIMIT: usize = 64 * 1024;
+
 /// Builds the app. The auth layer wraps every route added before it, so routes added later
 /// must be registered before the `layer` call below.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/rpc", post(rpc))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state)
 }
@@ -27,7 +32,7 @@ async fn authenticate(State(state): State<AppState>, mut req: Request, next: Nex
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(bearer_token)
         .and_then(|token| state.tokens().verify(token));
     match user {
         Some(user) => {
@@ -36,4 +41,10 @@ async fn authenticate(State(state): State<AppState>, mut req: Request, next: Nex
         }
         None => StatusCode::UNAUTHORIZED.into_response(),
     }
+}
+
+/// The token of a `Bearer <token>` value; the scheme is case-insensitive (RFC 7235).
+fn bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("Bearer").then_some(token)
 }

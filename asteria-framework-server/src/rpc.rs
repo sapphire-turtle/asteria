@@ -1,4 +1,5 @@
-//! `POST /rpc`: one JSON-RPC 2.0 request per body, always answered with HTTP 200.
+//! `POST /rpc`: one JSON-RPC 2.0 request per body, answered with HTTP 200 (the body limit in
+//! `app.rs` adds 413 for oversized bodies, and the auth layer 401).
 
 use std::sync::atomic::Ordering;
 
@@ -117,8 +118,18 @@ fn write_err(e: WriteError) -> RpcError {
     match e {
         WriteError::NotFound => err(codes::NOT_FOUND, "not found"),
         WriteError::InvalidPath(p) => err(codes::INVALID_PATH, format!("invalid path: {p}")),
-        WriteError::ReadOnly(m) => err(codes::READ_ONLY, m),
-        WriteError::Busy(m) => err(codes::BUSY, m),
+        // Details can carry server paths, so they are logged, never sent.
+        WriteError::ReadOnly(m) => {
+            tracing::warn!(detail = %m, "write refused: read-only");
+            err(
+                codes::READ_ONLY,
+                "sidecar is malformed; fix or remove it to edit",
+            )
+        }
+        WriteError::Busy(m) => {
+            tracing::warn!(detail = %m, "write refused: busy");
+            err(codes::BUSY, "another write is in progress; retry")
+        }
         WriteError::Invalid(m) => err(codes::INVALID_PARAMS, m),
         WriteError::Internal(m) => internal(m),
     }

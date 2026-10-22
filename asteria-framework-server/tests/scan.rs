@@ -108,7 +108,9 @@ fn malformed_sidecar_is_listed_with_error() {
     fs::write(e.root.join("red.jpg.xmp"), b"<not xml").unwrap();
     run(&e);
     let rec = e.cache.get_by_path("red.jpg").unwrap().unwrap();
-    assert!(rec.sidecar_error.is_some());
+    let reason = rec.sidecar_error.unwrap();
+    assert!(!reason.is_empty());
+    assert!(!reason.contains(e.root.to_str().unwrap()), "{reason}");
     assert!(!rec.sidecar.has_sidecar);
 }
 

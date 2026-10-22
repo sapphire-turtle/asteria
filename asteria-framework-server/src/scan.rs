@@ -183,8 +183,9 @@ pub fn scan(
         let (sidecar, sidecar_error) = match library.read_sidecar(Path::new(&rel)) {
             Ok(Some(sc)) => (SidecarSnapshot::from(&sc), None),
             Ok(None) => (SidecarSnapshot::default(), None),
-            Err(e @ FrameworkError::MalformedSidecar { .. }) => {
-                (SidecarSnapshot::default(), Some(e.to_string()))
+            Err(FrameworkError::MalformedSidecar { reason, .. }) => {
+                // Only the reason: the Display form carries the absolute sidecar path.
+                (SidecarSnapshot::default(), Some(reason))
             }
             Err(e) => {
                 // Keep the path out of the removal pass: we could not look at it.

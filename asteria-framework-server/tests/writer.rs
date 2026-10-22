@@ -260,14 +260,13 @@ async fn malformed_sidecar_at_write_time_sets_error() {
     p.label = Some(Some("x".into()));
     let r = e.writer.update(e.lib.owner(), p.clone()).await;
     assert!(matches!(r, Err(WriteError::ReadOnly(_))), "{r:?}");
-    assert!(
-        e.cache
-            .get_by_path("a.jpg")
-            .unwrap()
-            .unwrap()
-            .sidecar_error
-            .is_some()
-    );
+    let Err(WriteError::ReadOnly(msg)) = &r else {
+        unreachable!()
+    };
+    assert!(!msg.contains(e.root.to_str().unwrap()), "{msg}");
+    let cached = e.cache.get_by_path("a.jpg").unwrap().unwrap();
+    let reason = cached.sidecar_error.unwrap();
+    assert!(!reason.contains(e.root.to_str().unwrap()), "{reason}");
     assert_eq!(fs::read(e.root.join("a.jpg.xmp")).unwrap(), b"<not xmp");
 }
 

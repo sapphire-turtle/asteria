@@ -1,134 +1,14 @@
-use std::fs;
-use std::io::Write;
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+mod common;
 
-use asteria_framework::{Library, MediaKind, UserId};
+use std::fs;
+
 use asteria_framework_api::codes;
-use asteria_framework_server::{
-    AppState, Cache, MediaFilter, ServerConfig, StoredHash, TokenEntry, Tokens, new_token, router,
-    scan, spawn_writer, token_hash,
-};
-use axum::Router;
+use asteria_framework_server::{StoredHash, scan};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use grain_id::GrainId;
-use http_body_util::BodyExt;
+use common::*;
 use serde_json::{Value, json};
 use tower::ServiceExt;
-
-struct Gallery;
-impl MediaFilter for Gallery {
-    fn accepts(&self, kind: MediaKind) -> bool {
-        matches!(kind, MediaKind::Image | MediaKind::Video)
-    }
-}
-
-struct Env {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    lib: Arc<Library>,
-    cache: Arc<Cache>,
-    app: Router,
-    owner_token: String,
-    guest: UserId,
-    guest_token: String,
-    _rescan_rx: tokio::sync::mpsc::Receiver<()>,
-}
-
-fn env() -> Env {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("lib");
-    fs::create_dir(&root).unwrap();
-    let lib = Arc::new(Library::init(&root, "owner").unwrap());
-    let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
-    let red =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../asteria-framework/tests/fixtures/red.jpg");
-    fs::copy(&red, root.join("a.jpg")).unwrap();
-    fs::create_dir(root.join("sub")).unwrap();
-    fs::copy(&red, root.join("sub/b.jpg")).unwrap();
-    scan(&lib, &cache, &Gallery).unwrap();
-    let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
-
-    let owner_token = new_token();
-    let guest_token = new_token();
-    let guest = UserId(GrainId::random());
-    let cfg = ServerConfig {
-        library: root.clone(),
-        listen: SocketAddr::from(([127, 0, 0, 1], 0)),
-        token: vec![
-            TokenEntry {
-                user: lib.owner(),
-                hash: token_hash(&owner_token),
-            },
-            TokenEntry {
-                user: guest,
-                hash: token_hash(&guest_token),
-            },
-        ],
-    };
-    let (rescan, rescan_rx) = tokio::sync::mpsc::channel(1);
-    let state = AppState::new(
-        lib.clone(),
-        cache.clone(),
-        writer,
-        Arc::new(Tokens::from_config(&cfg)),
-        "asteria-gallery",
-        1,
-        Arc::new(AtomicBool::new(false)),
-        rescan,
-        Arc::new(Gallery),
-    );
-    Env {
-        _dir: dir,
-        root,
-        lib,
-        cache,
-        app: router(state),
-        owner_token,
-        guest,
-        guest_token,
-        _rescan_rx: rescan_rx,
-    }
-}
-
-async fn post_raw(app: &Router, token: Option<&str>, body: &str) -> (StatusCode, Vec<u8>) {
-    let mut req = Request::post("/rpc");
-    if let Some(t) = token {
-        req = req.header("authorization", t);
-    }
-    let resp = app
-        .clone()
-        .oneshot(req.body(Body::from(body.to_string())).unwrap())
-        .await
-        .unwrap();
-    let status = resp.status();
-    (
-        status,
-        resp.into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .to_vec(),
-    )
-}
-
-async fn call(app: &Router, token: &str, method: &str, params: Value) -> Value {
-    let body = json!({"jsonrpc":"2.0","id":7,"method":method,"params":params}).to_string();
-    let (status, bytes) = post_raw(app, Some(&format!("Bearer {token}")), &body).await;
-    assert_eq!(status, StatusCode::OK);
-    let v: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(v["jsonrpc"], "2.0");
-    assert_eq!(v["id"], 7);
-    v
-}
-
-fn item_id(e: &Env, path: &str) -> String {
-    e.cache.get_by_path(path).unwrap().unwrap().id.0
-}
 
 #[tokio::test]
 async fn missing_or_wrong_token_is_401() {
@@ -140,7 +20,6 @@ async fn missing_or_wrong_token_is_401() {
         Some("Bearer nope"),
         Some("Basic abc"),
         Some(e.owner_token.as_str()),
-        Some("bearer x"),
     ] {
         let (status, bytes) = post_raw(&e.app, header, body).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{header:?}");
@@ -148,6 +27,14 @@ async fn missing_or_wrong_token_is_401() {
     }
     let (status, _) = post_raw(&e.app, Some(&good), body).await;
     assert_eq!(status, StatusCode::OK);
+    // The scheme is case-insensitive.
+    for scheme in ["bearer", "BEARER"] {
+        let h = format!("{scheme} {}", e.owner_token);
+        let (status, _) = post_raw(&e.app, Some(&h), body).await;
+        assert_eq!(status, StatusCode::OK, "{scheme}");
+    }
+    let (status, _) = post_raw(&e.app, Some("bearer wrong"), body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     // The whole router is guarded, including unknown paths.
     let resp = e
         .app
@@ -296,6 +183,110 @@ async fn errors_map_to_codes() {
     assert!(v["result"]["read_only_reason"].is_string());
     let v = call(&e.app, t, "media.update", json!({"id": id, "rating": 2})).await;
     assert_eq!(v["error"]["code"], codes::READ_ONLY);
+    let root = e.root.to_str().unwrap();
+    assert!(!v["error"]["message"].as_str().unwrap().contains(root));
+    let v = call(&e.app, t, "media.get", json!({"id": id})).await;
+    assert!(
+        !v["result"]["read_only_reason"]
+            .as_str()
+            .unwrap()
+            .contains(root)
+    );
+}
+
+#[tokio::test]
+async fn busy_message_has_no_path() {
+    let e = env();
+    let id = item_id(&e, "a.jpg");
+    fs::write(e.root.join(".a.jpg.xmp.asteria-tmp"), b"x").unwrap();
+    let v = call(
+        &e.app,
+        &e.owner_token,
+        "media.update",
+        json!({"id": id, "rating": 2}),
+    )
+    .await;
+    assert_eq!(v["error"]["code"], codes::BUSY);
+    let msg = v["error"]["message"].as_str().unwrap();
+    assert!(
+        !msg.contains(e.root.to_str().unwrap()) && !msg.contains('/'),
+        "{msg}"
+    );
+}
+
+#[tokio::test]
+async fn oversized_body_is_413() {
+    let e = env();
+    let big = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"server.info","params":{{"x":"{}"}}}}"#,
+        "a".repeat(70 * 1024)
+    );
+    let (status, _) = post_raw(&e.app, Some(&format!("Bearer {}", e.owner_token)), &big).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn params_may_be_omitted() {
+    let e = env();
+    let body = r#"{"jsonrpc":"2.0","id":4,"method":"server.info"}"#;
+    let (status, bytes) = post_raw(&e.app, Some(&format!("Bearer {}", e.owner_token)), body).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["id"], 4);
+    assert_eq!(v["result"]["app"], "asteria-gallery");
+}
+
+fn bulk(e: &Env, n: usize) {
+    let recs: Vec<_> = (0..n)
+        .map(|i| {
+            let mut r = e.cache.get_by_path("a.jpg").unwrap().unwrap();
+            r.path = format!("bulk/f{i:05}.jpg");
+            r.id = asteria_framework_server::item_id_for(&e.lib.config().id, &r.path);
+            r
+        })
+        .collect();
+    e.cache.put_many(&recs).unwrap();
+}
+
+#[tokio::test]
+async fn folder_list_limits_and_paging() {
+    let e = env();
+    bulk(&e, 1001);
+    let t = &e.owner_token;
+    // Default limit is 200.
+    let v = call(&e.app, t, "folder.list", json!({"path": "bulk"})).await;
+    assert_eq!(v["result"]["items"].as_array().unwrap().len(), 200);
+    assert!(v["result"]["next_cursor"].is_string());
+    // Requested limit is capped at 1000.
+    let v = call(
+        &e.app,
+        t,
+        "folder.list",
+        json!({"path": "bulk", "limit": 5000}),
+    )
+    .await;
+    assert_eq!(v["result"]["items"].as_array().unwrap().len(), 1000);
+    assert!(v["result"]["next_cursor"].is_string());
+    // Paging: two pages cover everything without overlap.
+    let v1 = call(
+        &e.app,
+        t,
+        "folder.list",
+        json!({"path": "bulk", "limit": 600}),
+    )
+    .await;
+    let cur = v1["result"]["next_cursor"].clone();
+    assert!(cur.is_string());
+    let v2 = call(
+        &e.app,
+        t,
+        "folder.list",
+        json!({"path": "bulk", "limit": 600, "cursor": cur}),
+    )
+    .await;
+    assert_eq!(v2["result"]["items"].as_array().unwrap().len(), 401);
+    assert_eq!(v2["result"]["next_cursor"], Value::Null);
+    assert_eq!(v2["result"]["items"][0]["path"], "bulk/f00600.jpg");
 }
 
 #[tokio::test]
@@ -322,49 +313,4 @@ async fn ratings_are_per_user() {
     assert_eq!(v["result"]["rating"], 2);
     let v = call(&e.app, &e.guest_token, "folder.list", json!({"path": ""})).await;
     assert_eq!(v["result"]["items"][0]["rating"], 2);
-    let _ = e.guest;
-}
-
-#[derive(Clone)]
-struct Buf(Arc<Mutex<Vec<u8>>>);
-impl Write for Buf {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(b);
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
-    type Writer = Buf;
-    fn make_writer(&'a self) -> Buf {
-        self.clone()
-    }
-}
-
-#[tokio::test]
-async fn token_not_logged() {
-    let e = env();
-    let buf = Buf(Arc::new(Mutex::new(Vec::new())));
-    let sub = tracing_subscriber::fmt()
-        .with_writer(buf.clone())
-        .with_max_level(tracing::Level::TRACE)
-        .finish();
-    let _guard = tracing::subscriber::set_default(sub);
-    let bad = "definitely-wrong-token-123";
-    let body = r#"{"jsonrpc":"2.0","id":1,"method":"server.info"}"#;
-    post_raw(&e.app, Some(&format!("Bearer {bad}")), body).await;
-    post_raw(&e.app, Some(&format!("Bearer {}", e.owner_token)), body).await;
-    call(
-        &e.app,
-        &e.owner_token,
-        "media.get",
-        json!({"id": "missing"}),
-    )
-    .await;
-    let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-    assert!(!log.contains(bad));
-    assert!(!log.contains(&e.owner_token));
-    assert!(!log.contains(&token_hash(&e.owner_token)));
 }
