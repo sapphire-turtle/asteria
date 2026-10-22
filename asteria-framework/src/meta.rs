@@ -26,7 +26,7 @@ fn checked_rel(media_rel: &Path) -> Result<()> {
     if ok {
         Ok(())
     } else {
-        Err(Error::MediaNotFound(media_rel.to_path_buf()))
+        Err(Error::InvalidPath(media_rel.to_path_buf()))
     }
 }
 
@@ -62,9 +62,14 @@ impl Library {
 
     /// Applies `f` to the sidecar of `media_rel`, creating it only when it gains content.
     ///
-    /// `media_rel` must be plain components: absolute paths, `..`, a leading `./`, paths under
-    /// `.asteria` and sidecar paths are rejected with `MediaNotFound`. A change that only adds
-    /// the content hash to an existing sidecar is not written.
+    /// `media_rel` must be plain components: empty and absolute paths, `..`, a leading `./`,
+    /// paths under `.asteria` and sidecar paths are rejected with `InvalidPath`; a valid path
+    /// that does not name an existing file is `MediaNotFound`. A change that only adds the
+    /// content hash to an existing sidecar is not written.
+    ///
+    /// When `sc.content_hash` is `None` after `f` runs, the media file is hashed before writing.
+    /// Callers that already know the hash can set `sc.content_hash` inside `f` to avoid hashing
+    /// large files on the write path.
     ///
     /// Returns `Ok(true)` when a sidecar was written, `Ok(false)` when nothing needed writing.
     pub fn update_sidecar(
@@ -113,7 +118,10 @@ impl Library {
         Ok(true)
     }
 
-    /// Sets `user`'s rating; an existing entry with a strictly newer `modified` wins.
+    /// Sets `user`'s rating (last writer wins by `at`).
+    ///
+    /// An existing entry with a strictly newer `modified` wins; on equal timestamps the greater
+    /// value wins, so concurrent edits merge the same way in any order.
     pub fn set_rating(
         &self,
         media_rel: &Path,
@@ -130,18 +138,10 @@ impl Library {
             if user == owner {
                 apply(&mut sc.rating, value, at);
             } else {
-                let newer = sc
-                    .user_ratings
-                    .get(&user)
-                    .is_some_and(|e| newer_wins(e, at));
-                if !newer {
-                    sc.user_ratings.insert(
-                        user,
-                        RatingEntry {
-                            value,
-                            modified: Some(at),
-                        },
-                    );
+                let mut slot = sc.user_ratings.remove(&user);
+                apply(&mut slot, value, at);
+                if let Some(e) = slot {
+                    sc.user_ratings.insert(user, e);
                 }
             }
         })?;
@@ -149,12 +149,15 @@ impl Library {
     }
 }
 
-fn newer_wins(existing: &RatingEntry, at: DateTime<Utc>) -> bool {
-    existing.modified.is_some_and(|m| m > at)
+/// Whether `existing` beats a new `(value, at)`: newer time wins, then the greater value.
+fn existing_wins(existing: &RatingEntry, value: i8, at: DateTime<Utc>) -> bool {
+    existing
+        .modified
+        .is_some_and(|m| m > at || (m == at && existing.value >= value))
 }
 
 fn apply(slot: &mut Option<RatingEntry>, value: i8, at: DateTime<Utc>) {
-    if slot.as_ref().is_some_and(|e| newer_wins(e, at)) {
+    if slot.as_ref().is_some_and(|e| existing_wins(e, value, at)) {
         return;
     }
     *slot = Some(RatingEntry {

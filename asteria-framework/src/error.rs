@@ -31,6 +31,10 @@ pub enum Error {
         path: Option<PathBuf>,
         reason: String,
     },
+    #[error(
+        "invalid media path (must be relative plain components outside .asteria, not a sidecar): {0}"
+    )]
+    InvalidPath(PathBuf),
     #[error("media file not found: {0}")]
     MediaNotFound(PathBuf),
     #[error("rating out of range (-1..=5): {0}")]

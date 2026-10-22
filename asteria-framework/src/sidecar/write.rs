@@ -333,7 +333,7 @@ fn collect_other_langs(prop: &Element, out: &mut Vec<Element>) {
 }
 
 fn fmt_time(t: DateTime<Utc>) -> String {
-    t.to_rfc3339_opts(SecondsFormat::Secs, true)
+    t.to_rfc3339_opts(SecondsFormat::AutoSi, true)
 }
 
 fn fill(

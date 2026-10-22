@@ -6,7 +6,7 @@ use std::path::Path;
 use asteria_framework::hash::{HashScope, content_hash};
 use asteria_framework::journal::{Actor, Journal, OpKind};
 use asteria_framework::{Error, Library, UserId};
-use chrono::{TimeZone, Utc};
+use chrono::{TimeZone, Timelike, Utc};
 use grain_id::GrainId;
 
 fn setup(rel: &str) -> (tempfile::TempDir, Library) {
@@ -88,12 +88,6 @@ fn older_rating_does_not_overwrite_newer() {
         lib.read_sidecar(p).unwrap().unwrap().rating.unwrap().value,
         4
     );
-    // Equal timestamp overwrites.
-    lib.set_rating(p, owner, 3, t(2), a).unwrap();
-    assert_eq!(
-        lib.read_sidecar(p).unwrap().unwrap().rating.unwrap().value,
-        3
-    );
 }
 
 #[test]
@@ -168,8 +162,8 @@ fn path_escape_is_rejected() {
         let err = lib
             .update_sidecar(p, a, |s| s.label = Some("x".into()))
             .unwrap_err();
-        assert!(matches!(err, Error::MediaNotFound(_)), "{p:?}");
-        assert!(matches!(lib.read_sidecar(p), Err(Error::MediaNotFound(_))));
+        assert!(matches!(err, Error::InvalidPath(_)), "{p:?}");
+        assert!(matches!(lib.read_sidecar(p), Err(Error::InvalidPath(_))));
     }
     assert!(!outer.path().join("outside.jpg.xmp").exists());
     assert!(!root.join("sub/red.jpg.xmp").exists());
@@ -179,11 +173,18 @@ fn path_escape_is_rejected() {
 fn meta_dir_and_sidecar_paths_are_rejected() {
     let (dir, lib) = setup("red.jpg");
     let a = Actor::User(lib.owner());
-    for p in [".asteria/library.toml", "red.jpg.xmp"] {
+    for p in [".asteria/library.toml", "red.jpg.xmp", "./red.jpg", ""] {
         let err = lib
             .update_sidecar(Path::new(p), a, |s| s.label = Some("x".into()))
             .unwrap_err();
-        assert!(matches!(err, Error::MediaNotFound(_)), "{p}");
+        assert!(
+            matches!(&err, Error::InvalidPath(q) if q == Path::new(p)),
+            "{p}: {err:?}"
+        );
+        assert!(matches!(
+            lib.read_sidecar(Path::new(p)),
+            Err(Error::InvalidPath(_))
+        ));
     }
     assert!(!dir.path().join("red.jpg.xmp").exists());
     assert!(!dir.path().join(".asteria/library.toml.xmp").exists());
@@ -212,7 +213,44 @@ fn older_non_owner_rating_does_not_overwrite_newer() {
     lib.set_rating(p, other, 2, t(1), a).unwrap();
     let sc = lib.read_sidecar(p).unwrap().unwrap();
     assert_eq!(sc.user_ratings[&other].value, 4);
-    lib.set_rating(p, other, 3, t(2), a).unwrap();
+}
+
+#[test]
+fn sub_second_now_rating_round_trips_for_owner_and_non_owner() {
+    let (_dir, lib) = setup("red.jpg");
+    let owner = lib.owner();
+    let other = UserId(GrainId::random());
+    let p = Path::new("red.jpg");
+    // A fixed fractional time, so the test does not depend on the clock landing off a second.
+    let frac = Utc::now().with_nanosecond(123_456_789).unwrap();
+    lib.set_rating(p, owner, 4, frac, Actor::User(owner))
+        .unwrap();
+    let now = Utc::now();
+    lib.set_rating(p, other, 2, now, Actor::User(other))
+        .unwrap();
     let sc = lib.read_sidecar(p).unwrap().unwrap();
-    assert_eq!(sc.user_ratings[&other].value, 3);
+    assert_eq!(sc.rating.unwrap().modified, Some(frac));
+    assert_eq!(sc.user_ratings[&other].modified, Some(now));
+}
+
+#[test]
+fn equal_timestamp_greater_value_wins_in_either_order() {
+    let owner_and_other = |lib: &Library| [lib.owner(), UserId(GrainId::random())];
+    for (first, second) in [(2, 5), (5, 2)] {
+        let (_dir, lib) = setup("red.jpg");
+        let p = Path::new("red.jpg");
+        for user in owner_and_other(&lib) {
+            let a = Actor::User(user);
+            lib.set_rating(p, user, first, t(3), a).unwrap();
+            lib.set_rating(p, user, second, t(3), a).unwrap();
+            let sc = lib.read_sidecar(p).unwrap().unwrap();
+            let got = if user == lib.owner() {
+                sc.rating.unwrap()
+            } else {
+                sc.user_ratings[&user].clone()
+            };
+            assert_eq!(got.value, 5, "{first} then {second}");
+            assert_eq!(got.modified, Some(t(3)));
+        }
+    }
 }
