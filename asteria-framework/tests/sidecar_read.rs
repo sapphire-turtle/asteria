@@ -273,3 +273,64 @@ fn element_form_values_on_their_own_lines_are_trimmed() {
     let u: UserId = "123abcd".parse().unwrap();
     assert_eq!(sc.user_ratings[&u].value, 5);
 }
+
+#[test]
+fn unknown_hash_scope_is_absent_but_bad_hash_with_known_scope_is_malformed() {
+    let good = "ab".repeat(32);
+    let sc = parse_desc(&format!(
+        r#"asteria:ContentHash="blake3:{good}" asteria:HashScope="media-payload/2">"#
+    ))
+    .unwrap();
+    assert!(sc.content_hash.is_none());
+    assert!(is_malformed(parse_desc(
+        r#"asteria:ContentHash="blake3:zz" asteria:HashScope="media-payload/1">"#
+    )));
+}
+
+/// A valid sidecar whose deepest element sits at `depth` (rdf:RDF is depth 1).
+fn nested(depth: usize) -> String {
+    let inner = depth - 2; // rdf:RDF and rdf:Description
+    format!(
+        r#"{HEAD}<rdf:Description xmlns:ex="urn:ex" xmp:Rating="2">{}{}</rdf:Description></rdf:RDF>"#,
+        "<ex:a>".repeat(inner),
+        "</ex:a>".repeat(inner)
+    )
+}
+
+#[test]
+fn element_depth_is_capped() {
+    let ok = Sidecar::parse(nested(100).as_bytes()).unwrap();
+    assert_eq!(ok.rating.unwrap().value, 2);
+    match Sidecar::parse(nested(129).as_bytes()) {
+        Err(Error::MalformedSidecar { reason, .. }) => {
+            assert!(reason.contains("depth"), "{reason}")
+        }
+        Err(e) => panic!("unexpected error: {e:?}"),
+        Ok(_) => panic!("depth 129 was accepted"),
+    }
+    // Far deeper input is rejected instead of overflowing the stack.
+    assert!(is_malformed(Sidecar::parse(nested(60_000).as_bytes())));
+}
+
+#[test]
+fn oversize_file_is_malformed() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("big.jpg.xmp");
+    let mut body = nested(3).into_bytes();
+    // Pad with trailing whitespace (still well-formed XML) to one byte over 16 MiB.
+    body.resize(16 * 1024 * 1024 + 1, b' ');
+    std::fs::write(&p, &body).unwrap();
+    match Sidecar::read(&p) {
+        Err(Error::MalformedSidecar {
+            path: Some(_),
+            reason,
+        }) => {
+            assert!(reason.contains("too large"), "{reason}")
+        }
+        Err(e) => panic!("unexpected error: {e:?}"),
+        Ok(_) => panic!("oversize file was accepted"),
+    }
+    body.truncate(16 * 1024 * 1024);
+    std::fs::write(&p, &body).unwrap();
+    assert!(Sidecar::read(&p).unwrap().is_some());
+}

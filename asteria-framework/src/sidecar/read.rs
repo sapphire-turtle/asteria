@@ -1,4 +1,6 @@
 use std::collections::btree_map::Entry;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -12,25 +14,35 @@ use super::xml::{self, Element};
 
 type R<T> = std::result::Result<T, String>;
 
+/// Largest sidecar file `Sidecar::read` accepts (16 MiB).
+const MAX_SIDECAR_BYTES: u64 = 16 * 1024 * 1024;
+
 impl Sidecar {
     /// Parse sidecar bytes.
     pub fn parse(bytes: &[u8]) -> Result<Sidecar> {
         parse_inner(bytes).map_err(|reason| Error::MalformedSidecar { path: None, reason })
     }
 
-    /// Read a sidecar file; `Ok(None)` if it does not exist.
+    /// Read a sidecar file; `Ok(None)` if it does not exist. A file larger than 16 MiB is
+    /// malformed and is not read in full.
     pub fn read(path: &Path) -> Result<Option<Sidecar>> {
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
+        let malformed = |reason| Error::MalformedSidecar {
+            path: Some(path.to_path_buf()),
+            reason,
+        };
+        let file = match File::open(path) {
+            Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        parse_inner(&bytes)
-            .map(Some)
-            .map_err(|reason| Error::MalformedSidecar {
-                path: Some(path.to_path_buf()),
-                reason,
-            })
+        let mut bytes = Vec::new();
+        file.take(MAX_SIDECAR_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_SIDECAR_BYTES {
+            return Err(malformed(format!(
+                "file too large (over {MAX_SIDECAR_BYTES} bytes)"
+            )));
+        }
+        parse_inner(&bytes).map(Some).map_err(malformed)
     }
 }
 
@@ -176,11 +188,12 @@ pub(super) fn extract(root: &Element) -> R<Sidecar> {
     let hash = simple(&descs, ns::ASTERIA, "ContentHash");
     let scope = simple(&descs, ns::ASTERIA, "HashScope");
     sc.content_hash = match (hash, scope) {
-        (Some(h), Some(s)) => Some((
-            h.parse::<ContentHash>().map_err(|e| e.to_string())?,
-            s.parse::<HashScope>().map_err(|e| e.to_string())?,
-        )),
-        (None, None) => None,
+        // A scope this build does not know (e.g. written by a newer one) is treated like half a
+        // hash: its digest cannot be interpreted here, so it is neither validated nor kept.
+        (Some(h), Some(s)) => match s.parse::<HashScope>() {
+            Ok(scope) => Some((h.parse::<ContentHash>().map_err(|e| e.to_string())?, scope)),
+            Err(_) => None,
+        },
         // Half a hash is useless but recomputable, so treat it as absent.
         _ => None,
     };

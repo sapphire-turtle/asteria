@@ -423,18 +423,18 @@ fn fill(
 
     let desc_dirty = has(dirty, ns::DC, "description");
     let desc = sc.description.as_deref().filter(|s| !s.is_empty());
-    if desc_dirty && (desc.is_some() || !other_langs.is_empty()) {
+    // Clearing the description removes the whole property, other languages included, so the
+    // file reads back as having none.
+    if let Some(t) = desc.filter(|_| desc_dirty) {
         let (p, r) = (pfx!(dc, ns::DC, "dc"), pfx!(rdf, ns::RDF, "rdf"));
         let mut alt = new_element(ns::RDF, &r, "Alt");
-        if let Some(t) = desc {
-            let mut li = new_element(ns::RDF, &r, "li");
-            li.attributes.push(Attribute {
-                name: qname(ns::XML, "xml", "lang"),
-                value: "x-default".to_string(),
-            });
-            li.children.push(Node::Text(t.to_string()));
-            alt.children.push(Node::Element(li));
-        }
+        let mut li = new_element(ns::RDF, &r, "li");
+        li.attributes.push(Attribute {
+            name: qname(ns::XML, "xml", "lang"),
+            value: "x-default".to_string(),
+        });
+        li.children.push(Node::Text(t.to_string()));
+        alt.children.push(Node::Element(li));
         for mut li in other_langs {
             bind_prefixes(&mut li, scope);
             alt.children.push(Node::Element(li));

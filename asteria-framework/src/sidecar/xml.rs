@@ -107,6 +107,10 @@ fn convert_name(n: &xml::name::OwnedName) -> Name {
     }
 }
 
+/// Deepest element nesting `parse` accepts (the root is depth 1). The tree is walked
+/// recursively (serialize, clone, drop, searches), so the cap also bounds stack use.
+pub(crate) const MAX_DEPTH: usize = 128;
+
 /// Parse a document into its root element. Root-level comments and processing instructions
 /// (including `<?xpacket?>`) are not kept.
 pub(crate) fn parse(bytes: &[u8]) -> Result<Element, String> {
@@ -127,6 +131,9 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Element, String> {
                 attributes,
                 namespace,
             } => {
+                if stack.len() >= MAX_DEPTH {
+                    return Err(format!("element depth exceeds {MAX_DEPTH}"));
+                }
                 let empty = BTreeMap::new();
                 let is_root = ns_stack.is_empty();
                 let parent = ns_stack.last().unwrap_or(&empty);
@@ -301,6 +308,14 @@ mod tests {
         assert!(parse(b"<r><a></r>").is_err());
         assert!(parse(b"<r>").is_err());
         assert!(parse(b"").is_err());
+    }
+
+    #[test]
+    fn depth_cap_is_inclusive_at_max_depth() {
+        let doc = |d: usize| format!("{}{}", "<a>".repeat(d), "</a>".repeat(d));
+        assert!(parse(doc(MAX_DEPTH).as_bytes()).is_ok());
+        let err = parse(doc(MAX_DEPTH + 1).as_bytes()).unwrap_err();
+        assert!(err.contains("depth"), "{err}");
     }
 
     #[test]

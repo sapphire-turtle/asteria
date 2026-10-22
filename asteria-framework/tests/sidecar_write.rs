@@ -368,3 +368,22 @@ fn write_refuses_unsafe_output_and_leaves_target_untouched() {
     assert_eq!(std::fs::read(&p).unwrap(), before);
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
+
+#[test]
+fn clearing_description_removes_all_languages() {
+    let mut sc = load("multi_description.xmp");
+    assert_eq!(sc.description.as_deref(), Some("A cat"));
+    sc.description = None;
+    let out = text(&sc);
+    assert!(!out.contains("description"), "{out}");
+    assert!(!out.contains("Ein Kater"), "{out}");
+    assert_eq!(reparse(&sc).description, None);
+    // Unrelated properties are untouched.
+    assert_eq!(reparse(&sc).subjects, sc.subjects);
+
+    let mut de = Sidecar::parse(DE_ONLY.as_bytes()).unwrap();
+    de.description = Some("A cat".into());
+    let mut back = reparse(&de);
+    back.description = None;
+    assert_eq!(reparse(&back).description, None);
+}
