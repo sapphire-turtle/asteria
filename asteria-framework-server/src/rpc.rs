@@ -217,10 +217,11 @@ fn media_item(rec: ItemRecord, user: UserId, owner: UserId) -> MediaItem {
     } else {
         rec.sidecar.user_ratings.get(&user.to_string()).copied()
     };
-    let content_hash = rec
+    let (content_hash, file_hash) = rec
         .hash
         .filter(|h| h.size == rec.size && h.mtime_ns == rec.mtime_ns)
-        .map(|h| h.hash);
+        .map(|h| (h.hash, h.file_hash))
+        .unzip();
     let secs = rec.mtime_ns.div_euclid(1_000_000_000);
     let nanos = rec.mtime_ns.rem_euclid(1_000_000_000) as u32;
     let modified = i64::try_from(secs)
@@ -240,6 +241,7 @@ fn media_item(rec: ItemRecord, user: UserId, owner: UserId) -> MediaItem {
         description: rec.sidecar.description,
         label: rec.sidecar.label,
         content_hash,
+        file_hash,
         read_only_reason: rec.sidecar_error,
     }
 }

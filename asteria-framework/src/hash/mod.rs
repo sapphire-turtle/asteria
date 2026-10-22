@@ -20,7 +20,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub use detect::{detect_format, detect_format_file};
-pub(crate) use file::file_hash;
+pub use file::file_hash;
 
 use crate::{Error, Result};
 

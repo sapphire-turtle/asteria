@@ -6,7 +6,8 @@ use std::path::Path;
 use super::ContentHash;
 use crate::Result;
 
-pub(crate) fn file_hash(path: &Path) -> Result<ContentHash> {
+/// BLAKE3 over every byte of the file at `path`.
+pub fn file_hash(path: &Path) -> Result<ContentHash> {
     let mut file = File::open(path)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update_reader(&mut file)?;

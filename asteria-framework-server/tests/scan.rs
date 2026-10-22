@@ -160,6 +160,7 @@ fn hash_survives_unchanged_rescan_and_is_dropped_on_change() {
     rec.hash = Some(StoredHash {
         hash: "h".into(),
         scope: "s".into(),
+        file_hash: "f".into(),
         size: rec.size,
         mtime_ns: rec.mtime_ns,
     });

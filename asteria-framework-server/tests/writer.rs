@@ -179,6 +179,7 @@ async fn cached_hash_avoids_rehash() {
                 Some(StoredHash {
                     hash: fake.clone(),
                     scope: "media-payload/1".into(),
+                    file_hash: fake.clone(),
                     size: rec.size,
                     mtime_ns: rec.mtime_ns,
                 }),
@@ -205,6 +206,7 @@ fn fake_hash(e: &Env) -> String {
             Some(StoredHash {
                 hash: fake.clone(),
                 scope: "media-payload/1".into(),
+                file_hash: fake.clone(),
                 size: rec.size,
                 mtime_ns: rec.mtime_ns,
             }),

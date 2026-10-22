@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use asteria_framework::MediaKind;
+use asteria_framework::paths::is_sidecar;
 use asteria_framework_api::ItemId;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
@@ -43,7 +44,7 @@ fn failure(status: StatusCode) -> Response {
 
 /// The record, the file's absolute path and its current metadata; the file must exist and,
 /// with symlinks resolved now (a file may have been swapped for a link since the scan), lie
-/// inside the library outside any `.`-named directory. `Err` is the status to answer with
+/// inside the library outside any `.`-named directory and not be an XMP sidecar. `Err` is the status to answer with
 /// instead (503 means "not ready").
 async fn resolve(
     state: &AppState,
@@ -65,8 +66,8 @@ async fn resolve(
     let inside = real
         .strip_prefix(state.canonical_root())
         .is_ok_and(|rel| !rel.components().any(|c| is_hidden(c.as_os_str())));
-    if !inside {
-        tracing::warn!(path = %rec.path, "item resolves outside the library; not serving it");
+    if !inside || is_sidecar(&real) {
+        tracing::warn!(path = %rec.path, "item resolves outside the library or to a sidecar; not serving it");
         return Err(StatusCode::NOT_FOUND);
     }
     let abs = real;
@@ -123,11 +124,12 @@ async fn thumbnail(
         return StatusCode::NOT_FOUND.into_response();
     }
     // `resolve` checked the record against the file, so a hash with the record's stamp
-    // is the hash of the current content.
+    // is the hash of the current content. Thumbnails are keyed on the whole-file hash so a
+    // metadata-only edit (EXIF orientation, ICC) re-renders them.
     let Some(hash) = rec
         .hash
         .filter(|h| h.size == rec.size && h.mtime_ns == rec.mtime_ns)
-        .map(|h| h.hash)
+        .map(|h| h.file_hash)
     else {
         return not_ready();
     };
