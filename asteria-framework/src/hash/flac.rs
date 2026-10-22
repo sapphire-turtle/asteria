@@ -1,12 +1,14 @@
 //! `media-payload/1` for FLAC: BLAKE3 over every byte after the metadata
-//! blocks (all of them, STREAMINFO included) up to the end of the file. A
-//! leading ID3v2 tag is skipped. At least one audio byte is required.
+//! blocks (all of them, STREAMINFO included) up to the start of any trailing
+//! ID3v1 / APEv2 tag (see `trailer`) or the end of the file. A leading ID3v2
+//! tag is skipped. At least one audio byte is required.
 
 use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 
 use super::id3::id3v2_total_len;
 use super::sink::{Sink, skip};
+use super::trailer::audio_end;
 use super::{ContentHash, MediaFormat};
 use crate::{Error, Result};
 
@@ -25,10 +27,12 @@ fn io_err(e: io::Error) -> Error {
 }
 
 pub(crate) fn flac_payload_hash(f: &mut File) -> Result<ContentHash> {
-    flac_hash(&mut BufReader::new(f))
+    flac_hash(f)
 }
 
-fn flac_hash(r: &mut impl Read) -> Result<ContentHash> {
+fn flac_hash<R: Read + Seek>(r: &mut R) -> Result<ContentHash> {
+    let len = r.seek(SeekFrom::End(0))?;
+    r.seek(SeekFrom::Start(0))?;
     let mut magic = [0u8; 4];
     r.read_exact(&mut magic).map_err(io_err)?;
     if magic.starts_with(b"ID3") {
@@ -53,30 +57,24 @@ fn flac_hash(r: &mut impl Read) -> Result<ContentHash> {
         }
     }
 
-    let mut hasher = blake3::Hasher::new();
-    let mut sink = Sink::new(&mut hasher);
-    let mut chunk = [0u8; 8192];
-    let mut total = 0u64;
-    loop {
-        match r.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                sink.push(&chunk[..n]);
-                total += n as u64;
-            }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(Error::Io(e)),
-        }
-    }
-    if total == 0 {
+    let start = r.stream_position()?;
+    let end = audio_end(r, start, len)
+        .map_err(io_err)?
+        .map_err(malformed)?;
+    if end <= start {
         return Err(malformed("no audio frames"));
     }
+    r.seek(SeekFrom::Start(start))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut sink = Sink::new(&mut hasher);
+    sink.copy_from(r, end - start).map_err(io_err)?;
     sink.flush();
     Ok(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::trailer::test_util::{ape, id3v1};
     use super::*;
 
     fn block(last: bool, kind: u8, data: &[u8]) -> Vec<u8> {
@@ -87,7 +85,7 @@ mod tests {
     }
 
     fn hash(bytes: &[u8]) -> Result<ContentHash> {
-        flac_hash(&mut &bytes[..])
+        flac_hash(&mut std::io::Cursor::new(bytes))
     }
 
     fn blake(bytes: &[u8]) -> ContentHash {
@@ -109,6 +107,17 @@ mod tests {
         input.extend(block(true, 1, &[])); // empty PADDING, last
         input.extend_from_slice(&[0xFF, 0xF8, 0xAA, 0xBB]);
         assert_eq!(hash(&input).unwrap(), blake(&[0xFF, 0xF8, 0xAA, 0xBB]));
+    }
+
+    #[test]
+    fn trailing_ape_and_id3v1_are_excluded() {
+        let audio = [0xFF, 0xF8, 0x01, 0x02, 0x03];
+        let mut input = b"fLaC".to_vec();
+        input.extend(block(true, 0, &[1, 2]));
+        input.extend_from_slice(&audio);
+        input.extend(ape(9, true));
+        input.extend(id3v1());
+        assert_eq!(hash(&input).unwrap(), blake(&audio));
     }
 
     #[test]
@@ -149,12 +158,18 @@ mod tests {
         // ID3v2 length past EOF; bad syncsafe size
         assert!(is_malformed(hash(b"ID3\x04\x00\x00\x00\x00\x7F\x7FfLaC")));
         assert!(is_malformed(hash(b"ID3\x04\x00\x00\x80\x00\x00\x00fLaC")));
-        // every truncation of a valid file is malformed or hashes some audio
+        // trailer that consumes all audio
+        let mut v = b"fLaC".to_vec();
+        v.extend(block(true, 0, &[1]));
+        v.extend(id3v1());
+        assert!(is_malformed(hash(&v)));
+        // every truncation shorter than the first audio byte is malformed
         let mut full = b"fLaC".to_vec();
         full.extend(block(true, 0, &[1, 2]));
         full.push(9);
         for cut in 0..full.len() {
             assert!(is_malformed(hash(&full[..cut])), "cut {cut}");
         }
+        assert_eq!(hash(&full).unwrap(), blake(&[9]));
     }
 }

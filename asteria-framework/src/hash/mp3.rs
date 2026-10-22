@@ -1,17 +1,13 @@
 //! `media-payload/1` for MP3: BLAKE3 over the file minus a leading ID3v2 tag
-//! and trailing ID3v1 (last 128 bytes starting `TAG`) and APEv2 (footer
-//! `APETAGEX` just before the ID3v1 tag, or the end of file) tags.
+//! and trailing ID3v1 / APEv2 tags (see `trailer`).
 
 use std::io::{self, Read, Seek, SeekFrom};
 
 use super::id3::id3v2_total_len;
 use super::sink::Sink;
+use super::trailer::audio_end;
 use super::{ContentHash, MediaFormat};
 use crate::{Error, Result};
-
-const ID3V1_LEN: u64 = 128;
-const APE_FOOTER_LEN: u64 = 32;
-const APE_HAS_HEADER: u32 = 1 << 31;
 
 fn malformed(reason: &str) -> Error {
     Error::MalformedMedia {
@@ -44,36 +40,9 @@ pub(crate) fn mp3_payload_hash<R: Read + Seek>(f: &mut R) -> Result<ContentHash>
         return Err(malformed("ID3v2 tag extends past end of file"));
     }
 
-    let mut end = len;
-    if end - start >= ID3V1_LEN {
-        let mut tag = [0u8; 3];
-        f.seek(SeekFrom::Start(end - ID3V1_LEN))?;
-        f.read_exact(&mut tag).map_err(io_err)?;
-        if &tag == b"TAG" {
-            end -= ID3V1_LEN;
-        }
-    }
-    if end - start >= APE_FOOTER_LEN {
-        let mut footer = [0u8; APE_FOOTER_LEN as usize];
-        f.seek(SeekFrom::Start(end - APE_FOOTER_LEN))?;
-        f.read_exact(&mut footer).map_err(io_err)?;
-        if footer.starts_with(b"APETAGEX") {
-            // Tag size counts the items and the footer, not the header.
-            let size = u64::from(u32::from_le_bytes([
-                footer[12], footer[13], footer[14], footer[15],
-            ]));
-            let flags = u32::from_le_bytes([footer[20], footer[21], footer[22], footer[23]]);
-            let header = if flags & APE_HAS_HEADER != 0 {
-                APE_FOOTER_LEN
-            } else {
-                0
-            };
-            if size < APE_FOOTER_LEN || size + header > end - start {
-                return Err(malformed("APE tag size out of range"));
-            }
-            end -= size + header;
-        }
-    }
+    let end = audio_end(f, start, len)
+        .map_err(io_err)?
+        .map_err(malformed)?;
     if end <= start {
         return Err(malformed("no audio data"));
     }
@@ -91,6 +60,8 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    use super::super::trailer::test_util::{ape, id3v1};
+
     fn hash(bytes: &[u8]) -> Result<ContentHash> {
         mp3_payload_hash(&mut Cursor::new(bytes))
     }
@@ -101,31 +72,6 @@ mod tests {
 
     fn is_malformed(r: Result<ContentHash>) -> bool {
         matches!(r, Err(Error::MalformedMedia { .. }))
-    }
-
-    fn id3v1() -> Vec<u8> {
-        let mut v = b"TAG".to_vec();
-        v.resize(128, b'x');
-        v
-    }
-
-    /// APEv2 tag: optional header, `body_len` item bytes, footer.
-    fn ape(body_len: usize, with_header: bool) -> Vec<u8> {
-        let size = u32::try_from(body_len + 32).unwrap();
-        let flags: u32 = if with_header { 1 << 31 } else { 0 };
-        let mut out = Vec::new();
-        if with_header {
-            out.extend_from_slice(b"APETAGEX");
-            out.extend_from_slice(&[0xAA; 24]);
-        }
-        out.extend(std::iter::repeat_n(0xCC, body_len));
-        out.extend_from_slice(b"APETAGEX");
-        out.extend_from_slice(&2000u32.to_le_bytes());
-        out.extend_from_slice(&size.to_le_bytes());
-        out.extend_from_slice(&1u32.to_le_bytes());
-        out.extend_from_slice(&flags.to_le_bytes());
-        out.extend_from_slice(&[0; 8]);
-        out
     }
 
     const AUDIO: [u8; 6] = [0xFF, 0xFB, 0x90, 0x00, 0x11, 0x22];
@@ -152,6 +98,16 @@ mod tests {
         let mut input = b"ID3\x03\x00\x10\x00\x00\x00\x02ab".to_vec();
         input.extend_from_slice(&AUDIO);
         assert_eq!(hash(&input).unwrap(), blake(&AUDIO));
+    }
+
+    #[test]
+    fn ape_header_at_eof_is_not_a_footer() {
+        // 32 bytes with the is-header flag (bit 29) set must not be stripped.
+        let mut hdr = ape(0, false);
+        hdr[20..24].copy_from_slice(&(1u32 << 29).to_le_bytes());
+        let mut input = AUDIO.to_vec();
+        input.extend_from_slice(&hdr);
+        assert_eq!(hash(&input).unwrap(), blake(&input));
     }
 
     #[test]

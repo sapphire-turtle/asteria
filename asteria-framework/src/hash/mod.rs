@@ -8,6 +8,7 @@ mod jpeg;
 mod mp3;
 mod png;
 mod sink;
+mod trailer;
 mod webp;
 
 use std::fmt;

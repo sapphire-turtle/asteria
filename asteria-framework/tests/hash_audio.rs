@@ -71,6 +71,19 @@ fn flac_hash_ignores_leading_id3v2() {
 }
 
 #[test]
+fn flac_hash_ignores_appended_id3v1() {
+    let mut bytes = std::fs::read(fixture("sine440.flac")).unwrap();
+    bytes.extend_from_slice(b"TAG");
+    bytes.resize(bytes.len() + 125, b'x');
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("v1.flac");
+    std::fs::write(&p, &bytes).unwrap();
+    let out = content_hash(&p).unwrap();
+    assert_eq!(out.scope, HashScope::MediaPayload1);
+    assert_eq!(out.hash, hash_fixture("sine440.flac").hash);
+}
+
+#[test]
 fn flac_hash_differs_for_different_audio() {
     assert_ne!(
         hash_fixture("sine440.flac").hash,
@@ -160,8 +173,9 @@ fn tag_only_mp3_falls_back() {
 
 #[test]
 fn fixture_hashes_equal_blake3_of_known_audio_ranges() {
-    // sine440.flac: fLaC + STREAMINFO + VORBIS_COMMENT end at byte 8256 (checked
-    // independently by walking the block headers); sine440.mp3 has no tags.
+    // sine440.flac: fLaC + STREAMINFO + VORBIS_COMMENT + an 8192-byte PADDING
+    // (last) block end at byte 8256 (checked independently by walking the block
+    // headers); sine440.mp3 has no tags.
     let flac = std::fs::read(fixture("sine440.flac")).unwrap();
     let expect = |b: &[u8]| format!("blake3:{}", blake3::hash(b).to_hex());
     assert_eq!(
