@@ -1,0 +1,60 @@
+//! Media format detection by magic bytes (never by extension).
+
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
+
+use super::MediaFormat;
+use crate::Result;
+
+/// Detects the format from the first 16 bytes. A FLAC stream behind an ID3v2
+/// tag is reported as `Mp3` here; use [`detect_format_file`] to see through it.
+pub fn detect_format(head: &[u8]) -> MediaFormat {
+    if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        MediaFormat::Jpeg
+    } else if head.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        MediaFormat::Png
+    } else if head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WEBP" {
+        MediaFormat::WebP
+    } else if head.starts_with(b"fLaC") {
+        MediaFormat::Flac
+    } else if head.starts_with(b"ID3") || (head.len() >= 2 && head[0] == 0xFF && head[1] >= 0xE0) {
+        MediaFormat::Mp3
+    } else {
+        MediaFormat::Unknown
+    }
+}
+
+/// Like [`detect_format`], but also recognises FLAC after an ID3v2 tag.
+pub fn detect_format_file(path: &Path) -> Result<MediaFormat> {
+    let mut file = File::open(path)?;
+    let mut head = [0u8; 16];
+    let n = read_up_to(&mut file, &mut head)?;
+    let head = &head[..n];
+    let format = detect_format(head);
+    if format == MediaFormat::Mp3 && head.starts_with(b"ID3") && head.len() >= 10 {
+        let size = head[6..10]
+            .iter()
+            .fold(0u64, |acc, b| (acc << 7) | u64::from(b & 0x7F));
+        let footer = if head[5] & 0x10 != 0 { 10 } else { 0 };
+        file.seek(SeekFrom::Start(10 + size + footer))?;
+        let mut magic = [0u8; 4];
+        if read_up_to(&mut file, &mut magic)? == 4 && &magic == b"fLaC" {
+            return Ok(MediaFormat::Flac);
+        }
+    }
+    Ok(format)
+}
+
+fn read_up_to(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut total = 0;
+    while total < buf.len() {
+        match r.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(total)
+}

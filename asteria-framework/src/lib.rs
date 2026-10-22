@@ -1,6 +1,7 @@
 //! Shared framework for the asteria applications.
 
 pub mod error;
+pub mod hash;
 pub mod ids;
 pub mod library;
 pub mod paths;
