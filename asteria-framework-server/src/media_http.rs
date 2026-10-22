@@ -13,7 +13,7 @@ use tower_http::services::ServeFile;
 
 use crate::cache::ItemRecord;
 use crate::process::{Preset, ProcessError};
-use crate::scan::mtime_ns;
+use crate::scan::{is_hidden, mtime_ns};
 use crate::state::AppState;
 
 /// 503 telling the client to come back shortly (the content hash is not ready, a tool is
@@ -41,8 +41,10 @@ fn failure(status: StatusCode) -> Response {
     }
 }
 
-/// The record, the file's absolute path and its current metadata; the file must exist.
-/// `Err` is the status to answer with instead (503 means "not ready").
+/// The record, the file's absolute path and its current metadata; the file must exist and,
+/// with symlinks resolved now (a file may have been swapped for a link since the scan), lie
+/// inside the library outside any `.`-named directory. `Err` is the status to answer with
+/// instead (503 means "not ready").
 async fn resolve(
     state: &AppState,
     id: String,
@@ -57,6 +59,17 @@ async fn resolve(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
     let abs = state.library().root().join(&rec.path);
+    let real = tokio::fs::canonicalize(&abs)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let inside = real
+        .strip_prefix(state.canonical_root())
+        .is_ok_and(|rel| !rel.components().any(|c| is_hidden(c.as_os_str())));
+    if !inside {
+        tracing::warn!(path = %rec.path, "item resolves outside the library; not serving it");
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let abs = real;
     let meta = tokio::fs::metadata(&abs)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;

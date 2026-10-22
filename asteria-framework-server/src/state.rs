@@ -1,5 +1,6 @@
 //! Shared state handed to every request handler.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -16,6 +17,8 @@ use crate::writer::Writer;
 #[derive(Clone)]
 pub struct AppState {
     library: Arc<Library>,
+    /// The library root with symlinks resolved, computed once.
+    canonical_root: Arc<PathBuf>,
     cache: Arc<Cache>,
     writer: Writer,
     tokens: Arc<Tokens>,
@@ -49,7 +52,12 @@ impl AppState {
                 tracing::error!("could not record an unprocessable thumbnail: {e}");
             }
         });
+        let canonical_root = library.root().canonicalize().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "cannot resolve the library root; using it as given");
+            library.root().to_path_buf()
+        });
         AppState {
+            canonical_root: Arc::new(canonical_root),
             library,
             cache,
             writer,
@@ -65,6 +73,10 @@ impl AppState {
 
     pub fn library(&self) -> &Arc<Library> {
         &self.library
+    }
+    /// The library root with symlinks resolved.
+    pub fn canonical_root(&self) -> &std::path::Path {
+        &self.canonical_root
     }
     pub fn cache(&self) -> &Arc<Cache> {
         &self.cache

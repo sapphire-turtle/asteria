@@ -394,3 +394,54 @@ async fn full_render_queue_is_503_with_retry_after() {
         w.abort();
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn file_swapped_for_an_escaping_symlink_is_404() {
+    let e = env();
+    hash_all(&e);
+    let outside = e._dir.path().join("outside.jpg");
+    std::fs::copy(e.root.join("a.jpg"), &outside).unwrap();
+    let id_a = item_id(&e, "a.jpg");
+    let id_b = item_id(&e, "sub/b.jpg");
+    // No rescan: the records still describe the regular files.
+    std::fs::remove_file(e.root.join("a.jpg")).unwrap();
+    std::os::unix::fs::symlink(&outside, e.root.join("a.jpg")).unwrap();
+    std::fs::remove_file(e.root.join("sub/b.jpg")).unwrap();
+    std::os::unix::fs::symlink(
+        e.root.join(".asteria/library.toml"),
+        e.root.join("sub/b.jpg"),
+    )
+    .unwrap();
+    for id in [&id_a, &id_b] {
+        for what in ["original", "thumb"] {
+            let (s, _, b) = get(
+                &e.app,
+                Some(&e.owner_token),
+                &format!("/media/{id}/{what}"),
+                None,
+            )
+            .await;
+            assert_eq!(s, StatusCode::NOT_FOUND, "{id} {what}");
+            assert!(b.is_empty());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn symlink_inside_the_library_is_served() {
+    let e = env();
+    std::fs::remove_file(e.root.join("sub/b.jpg")).unwrap();
+    std::os::unix::fs::symlink(e.root.join("a.jpg"), e.root.join("sub/b.jpg")).unwrap();
+    let id = item_id(&e, "sub/b.jpg");
+    let (s, _, b) = get(
+        &e.app,
+        Some(&e.owner_token),
+        &format!("/media/{id}/original"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b, std::fs::read(e.root.join("a.jpg")).unwrap());
+}
