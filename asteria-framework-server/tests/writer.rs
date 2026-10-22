@@ -272,14 +272,13 @@ async fn malformed_sidecar_at_write_time_sets_error() {
 }
 
 #[tokio::test]
-async fn sidecar_hash_is_synced_to_cache() {
+async fn writer_does_not_touch_cached_hash() {
     let e = env();
     let mut p = params(id(&e));
     p.label = Some(Some("x".into()));
-    e.writer.update(e.lib.owner(), p).await.unwrap();
-    let h = e.cache.get_by_path("a.jpg").unwrap().unwrap().hash.unwrap();
-    let sc = e.lib.read_sidecar(Path::new("a.jpg")).unwrap().unwrap();
-    assert_eq!(sc.content_hash.unwrap().0.to_string(), h.hash);
+    let rec = e.writer.update(e.lib.owner(), p).await.unwrap();
+    assert_eq!(rec.hash, None);
+    assert_eq!(e.cache.get_by_path("a.jpg").unwrap().unwrap().hash, None);
 }
 
 #[tokio::test]

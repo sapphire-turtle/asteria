@@ -258,35 +258,18 @@ fn do_update(
 
 fn refresh_cache(library: &Library, cache: &Cache, rec: &ItemRecord) -> Result<(), ServerError> {
     let rel = Path::new(&rec.path);
-    let sc = match library.read_sidecar(rel) {
+    // The cache's StoredHash is filled only by hash_pending, never from the sidecar.
+    match library.read_sidecar(rel) {
         Ok(Some(sc)) => {
             cache.set_sidecar(&rec.path, SidecarSnapshot::from(&sc), None)?;
-            Some(sc)
         }
         Ok(None) => {
             cache.set_sidecar(&rec.path, SidecarSnapshot::default(), None)?;
-            None
         }
         Err(e @ FwError::MalformedSidecar { .. }) => {
             cache.set_sidecar(&rec.path, rec.sidecar.clone(), Some(e.to_string()))?;
-            None
         }
         Err(e) => return Err(e.into()),
-    };
-    if let Some((h, scope)) = sc.and_then(|s| s.content_hash)
-        && let Some((size, mtime_ns)) = stat(&library.root().join(rel))
-    {
-        let (hash, scope) = (h.to_string(), scope.to_string());
-        let stored = StoredHash {
-            hash,
-            scope,
-            size,
-            mtime_ns,
-        };
-        // set_hash itself checks size/mtime against the cached record.
-        if rec.hash.as_ref() != Some(&stored) {
-            cache.set_hash(&rec.path, Some(stored))?;
-        }
     }
     Ok(())
 }
