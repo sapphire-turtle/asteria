@@ -257,3 +257,69 @@ fn unchanged_properties_stay_in_their_original_description() {
     assert!(out.contains("<dublin:subject xmlns:dublin"), "{out}");
     assert_eq!(reparse(&sc).subjects, sc.subjects);
 }
+
+fn two_desc(second_attrs: &str, li: &str) -> String {
+    format!(
+        r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="1"/><rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" {second_attrs}><dc:description><rdf:Alt>{li}</rdf:Alt></dc:description></rdf:Description></rdf:RDF></x:xmpmeta>"#
+    )
+}
+
+fn moved(src: &str) -> (String, Sidecar) {
+    let mut sc = Sidecar::parse(src.as_bytes()).unwrap();
+    sc.description = Some("A cat".into());
+    let out = text(&sc);
+    let back = Sidecar::parse(out.as_bytes()).unwrap_or_else(|e| panic!("{e}\n{out}"));
+    assert_eq!(back.description.as_deref(), Some("A cat"));
+    (out, sc)
+}
+
+fn find(out: &str, needle: &str) {
+    assert!(out.contains(needle), "missing {needle} in {out}");
+}
+
+#[test]
+fn moved_li_keeps_attribute_prefix_declared_elsewhere() {
+    let src = two_desc(
+        r#"xmlns:q="urn:q""#,
+        r#"<rdf:li xml:lang="de" q:extra="1">Kater</rdf:li>"#,
+    );
+    let (out, _) = moved(&src);
+    find(&out, "q:extra=\"1\"");
+    find(&out, "xmlns:q=\"urn:q\"");
+}
+
+#[test]
+fn moved_li_keeps_non_canonical_rdf_prefix() {
+    let src = two_desc(
+        r#"xmlns:R="http://www.w3.org/1999/02/22-rdf-syntax-ns#""#,
+        r#"<R:li xml:lang="de">Kater</R:li>"#,
+    );
+    let (out, _) = moved(&src);
+    find(&out, "<R:li ");
+    find(&out, "Kater");
+}
+
+#[test]
+fn moved_li_keeps_child_element_prefix() {
+    let src = two_desc(
+        r#"xmlns:q="urn:q""#,
+        r#"<rdf:li xml:lang="de">Kater<q:note>n</q:note></rdf:li>"#,
+    );
+    let (out, _) = moved(&src);
+    find(&out, "<q:note>n</q:note>");
+    find(&out, "xmlns:q=\"urn:q\"");
+}
+
+#[test]
+fn moved_li_keeps_default_namespace_of_unprefixed_children() {
+    let src = two_desc(
+        r#"xmlns="urn:d""#,
+        r#"<rdf:li xml:lang="de">Kater<note/></rdf:li>"#,
+    );
+    let (out, _) = moved(&src);
+    find(&out, "<note/>");
+    find(&out, "xmlns=\"urn:d\"");
+    // the namespace of <note/> is intact: re-read and re-write keeps the declaration
+    let again = Sidecar::parse(out.as_bytes()).unwrap();
+    find(&text(&again), "xmlns=\"urn:d\"");
+}

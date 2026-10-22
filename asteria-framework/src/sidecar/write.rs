@@ -5,8 +5,8 @@ use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 
-use crate::Result;
 use crate::fsutil::atomic_write;
+use crate::{Error, Result};
 
 use super::model::{RatingEntry, Sidecar};
 use super::ns;
@@ -42,8 +42,14 @@ impl Sidecar {
     }
 
     /// Atomically write the sidecar to `path`.
+    ///
+    /// The serialized bytes are parsed back first; if that fails, or the managed properties read
+    /// back differ from `self`, nothing is written and an error is returned, so a serializer bug
+    /// can never replace a valid sidecar with a corrupt one.
     pub fn write(&self, path: &Path) -> Result<()> {
-        atomic_write(path, &self.to_bytes())
+        let bytes = self.to_bytes();
+        verify_output(self, &bytes).map_err(Error::UnsafeSidecarWrite)?;
+        atomic_write(path, &bytes)
     }
 }
 
@@ -97,6 +103,43 @@ fn dirty_props(sc: &Sidecar, orig: Option<&Sidecar>) -> Vec<Prop> {
         &[(ns::ASTERIA, "ContentHash"), (ns::ASTERIA, "HashScope")],
     );
     d
+}
+
+/// Check that `bytes` parses and reads back as the managed properties of `sc`. Values are
+/// compared the way the reader sees them (trimmed, empty ones absent).
+fn verify_output(sc: &Sidecar, bytes: &[u8]) -> std::result::Result<(), String> {
+    let back = Sidecar::parse(bytes).map_err(|e| format!("output does not parse: {e}"))?;
+    let clean = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+    let set = |s: &std::collections::BTreeSet<String>| -> std::collections::BTreeSet<String> {
+        s.iter().filter_map(|v| clean(v)).collect()
+    };
+    let mut bad = Vec::new();
+    let mut check = |name: &str, same: bool| {
+        if !same {
+            bad.push(name.to_string());
+        }
+    };
+    check("rating", sc.rating == back.rating);
+    check("userRatings", sc.user_ratings == back.user_ratings);
+    check("subject", set(&sc.subjects) == back.subjects);
+    check(
+        "hierarchicalSubject",
+        set(&sc.hierarchical_subjects) == back.hierarchical_subjects,
+    );
+    check("label", sc.label.as_deref().and_then(clean) == back.label);
+    check("contentHash", sc.content_hash == back.content_hash);
+    // Other-language items may legitimately stand in for an absent description.
+    if let Some(d) = sc.description.as_deref().and_then(clean) {
+        check("description", Some(d) == back.description);
+    }
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "output reads back differently for: {}",
+            bad.join(", ")
+        ))
+    }
 }
 
 fn is_dirty(dirty: &[Prop], ns: Option<&str>, local: &str) -> bool {
@@ -373,8 +416,10 @@ fn fill(
             li.children.push(Node::Text(t.to_string()));
             alt.children.push(Node::Element(li));
         }
-        alt.children
-            .extend(other_langs.into_iter().map(Node::Element));
+        for mut li in other_langs {
+            bind_prefixes(&mut li, scope);
+            alt.children.push(Node::Element(li));
+        }
         let mut prop = new_element(ns::DC, &p, "description");
         prop.children.push(Node::Element(alt));
         props.push(prop);
@@ -461,4 +506,75 @@ fn indent(e: &mut Element, depth: usize) {
     }
     out.push(newline(depth));
     e.children = out;
+}
+
+/// An element moved under a different `rdf:Description` must still resolve every prefix (and the
+/// default namespace) to the same URI. Declare, on `li`, whatever the target scope lacks, taking
+/// the URI from the names themselves.
+fn bind_prefixes(li: &mut Element, target: &Scope) {
+    let mut needs: Vec<(String, String)> = Vec::new();
+    let mut local: Vec<(String, String)> = Vec::new();
+    collect_needs(li, target, &mut local, &mut needs);
+    for n in needs {
+        if !li.declarations.contains(&n) {
+            li.declarations.push(n);
+        }
+    }
+}
+
+fn collect_needs(
+    e: &Element,
+    target: &Scope,
+    local: &mut Vec<(String, String)>,
+    needs: &mut Vec<(String, String)>,
+) {
+    let mark = local.len();
+    local.extend(e.declarations.iter().cloned());
+    let mut need = |prefix: &str, uri: &str| {
+        let bound_locally = local.iter().any(|(p, _)| p == prefix);
+        if !bound_locally
+            && target.resolve(prefix) != Some(uri)
+            && !needs.iter().any(|(p, u)| p == prefix && u == uri)
+        {
+            needs.push((prefix.to_string(), uri.to_string()));
+        }
+    };
+    match (&e.name.prefix, &e.name.ns) {
+        (Some(p), Some(u)) => need(p, u),
+        (None, Some(u)) => need("", u),
+        _ => {}
+    }
+    for a in &e.attributes {
+        if let (Some(p), Some(u)) = (&a.name.prefix, &a.name.ns)
+            && p != "xml"
+        {
+            need(p, u);
+        }
+    }
+    for c in e.child_elements() {
+        collect_needs(c, target, local, needs);
+    }
+    local.truncate(mark);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_accepts_matching_and_rejects_corrupt_or_different_output() {
+        let mut sc = Sidecar::new();
+        sc.label = Some("Red".into());
+        sc.subjects.insert(" a ".into());
+        let good = sc.to_bytes();
+        assert!(verify_output(&sc, &good).is_ok());
+
+        let mut other = sc.clone();
+        other.label = Some("Blue".into());
+        let err = verify_output(&other, &good).unwrap_err();
+        assert!(err.contains("label"), "{err}");
+
+        assert!(verify_output(&sc, &good[..good.len() / 2]).is_err());
+        assert!(verify_output(&sc, b"<x:unbound/>").is_err());
+    }
 }

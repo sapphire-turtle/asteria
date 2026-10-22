@@ -9,6 +9,8 @@
 //!   same URI (checked against every outer level, even if a level in between shadowed it).
 //! - Content outside the root element (comments, PIs, doctype) is dropped.
 //! - The XML declaration is normalised to `<?xml version="1.0" encoding="UTF-8"?>`.
+//! - xml-rs writes `xmlns` declarations before other attributes, so attribute order can change on
+//!   the first rewrite of an element that carries declarations.
 //! - An xpacket wrapper is rewritten with the standard `begin`/`id` and `end="w"`.
 
 use std::borrow::Cow;

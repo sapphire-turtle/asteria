@@ -12,6 +12,8 @@ pub enum Error {
     AlreadyInitialized(PathBuf),
     #[error("temporary file already exists (concurrent writer or crash leftover): {0}")]
     TmpExists(PathBuf),
+    #[error("refusing to write sidecar: {0}")]
+    UnsafeSidecarWrite(String),
     #[error("required file is missing: {0}")]
     MissingFile(PathBuf),
     #[error("unsupported library format: {0}")]
