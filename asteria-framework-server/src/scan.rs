@@ -97,8 +97,8 @@ pub fn scan(
                     return Err(ServerError::Io(e.into()));
                 }
                 let path = e.path().map(|p| p.to_path_buf()).unwrap_or_default();
-                let rel =
-                    rel_string(root, &path).unwrap_or_else(|| path.to_string_lossy().into_owned());
+                let rel = rel_lossy(root, &path);
+                tracing::warn!(path = %rel, error = %e, "unreadable subtree; keeping its cached records");
                 unreadable.push(rel.clone());
                 report.skipped.push((rel, e.to_string()));
                 continue;

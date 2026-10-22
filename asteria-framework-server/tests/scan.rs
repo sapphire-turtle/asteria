@@ -293,23 +293,33 @@ fn symlinked_directory_is_not_followed() {
 #[test]
 fn records_under_unreadable_subtree_are_retained() {
     use std::os::unix::fs::PermissionsExt;
+    // Restores permissions even if an assertion panics, so the tempdir can be cleaned up.
+    struct Restore(PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
     let e = env();
-    fs::create_dir(e.root.join("sub")).unwrap();
-    red(&e.root.join("sub/a.jpg"));
+    fs::create_dir_all(e.root.join("outer/sub")).unwrap();
+    red(&e.root.join("outer/sub/a.jpg"));
     red(&e.root.join("b.jpg"));
     run(&e);
-    let sub = e.root.join("sub");
+    let sub = e.root.join("outer/sub");
+    let _guard = Restore(sub.clone());
     fs::set_permissions(&sub, fs::Permissions::from_mode(0o000)).unwrap();
     if fs::read_dir(&sub).is_ok() {
         // Running as root: permissions are not enforced.
-        fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
         return;
     }
     let r = run(&e);
-    fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(r.removed, 0);
-    assert!(r.skipped.iter().any(|(p, _)| p == "sub"), "{:?}", r.skipped);
-    assert_eq!(paths(&e), vec!["b.jpg", "sub/a.jpg"]);
+    assert!(
+        r.skipped.iter().any(|(p, _)| p == "outer/sub"),
+        "{:?}",
+        r.skipped
+    );
+    assert_eq!(paths(&e), vec!["b.jpg", "outer/sub/a.jpg"]);
 }
 
 #[test]
