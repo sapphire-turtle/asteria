@@ -47,6 +47,8 @@ pub(crate) fn png_payload_hash(r: &mut impl Read) -> Result<ContentHash> {
         return Err(malformed("bad signature"));
     }
 
+    let mut first = true;
+    let mut saw_image = false;
     loop {
         let mut head = [0u8; 8];
         read_exact(r, &mut head)?;
@@ -55,6 +57,11 @@ pub(crate) fn png_payload_hash(r: &mut impl Read) -> Result<ContentHash> {
             return Err(malformed("chunk length too large"));
         }
         let kind = [head[4], head[5], head[6], head[7]];
+        if first && &kind != b"IHDR" {
+            return Err(malformed("IHDR is not the first chunk"));
+        }
+        first = false;
+        saw_image |= matches!(&kind, b"IDAT" | b"fdAT");
         if is_payload(&kind) {
             sink.push(&kind);
             sink.copy_from(r, u64::from(len)).map_err(io_err)?;
@@ -65,6 +72,9 @@ pub(crate) fn png_payload_hash(r: &mut impl Read) -> Result<ContentHash> {
         if &kind == b"IEND" {
             break;
         }
+    }
+    if !saw_image {
+        return Err(malformed("no image data"));
     }
     sink.flush();
     Ok(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
@@ -125,7 +135,11 @@ mod tests {
 
     #[test]
     fn data_after_iend_ignored() {
-        let base = png(&[chunk(b"IHDR", &[1]), chunk(b"IEND", &[])]);
+        let base = png(&[
+            chunk(b"IHDR", &[1]),
+            chunk(b"IDAT", &[2]),
+            chunk(b"IEND", &[]),
+        ]);
         let mut padded = base.clone();
         padded.extend_from_slice(&[0xFF; 50]);
         assert_eq!(hash(&padded).unwrap(), hash(&base).unwrap());
@@ -154,10 +168,29 @@ mod tests {
         assert!(is_malformed(hash(b"NOTAPNGATALL....")));
         assert!(is_malformed(hash(&SIGNATURE))); // no chunks
         // missing IEND
-        assert!(is_malformed(hash(&png(&[chunk(b"IHDR", &[1])]))));
-        // truncated mid-header, mid-data, mid-CRC
-        let full = png(&[chunk(b"IHDR", &[1, 2]), chunk(b"IEND", &[])]);
-        for cut in [10, 18, 21, 24] {
+        assert!(is_malformed(hash(&png(&[
+            chunk(b"IHDR", &[1]),
+            chunk(b"IDAT", &[2])
+        ]))));
+        // signature + IEND only; IHDR not first; no IDAT/fdAT
+        assert!(is_malformed(hash(&png(&[chunk(b"IEND", &[])]))));
+        assert!(is_malformed(hash(&png(&[
+            chunk(b"IDAT", &[2]),
+            chunk(b"IHDR", &[1]),
+            chunk(b"IEND", &[])
+        ]))));
+        assert!(is_malformed(hash(&png(&[
+            chunk(b"IHDR", &[1]),
+            chunk(b"IEND", &[])
+        ]))));
+        // truncated at every length of a complete file: this covers cuts in
+        // the signature, chunk headers, IHDR data, IDAT data and CRCs
+        let full = png(&[
+            chunk(b"IHDR", &[1, 2]),
+            chunk(b"IDAT", &[3, 4, 5]),
+            chunk(b"IEND", &[]),
+        ]);
+        for cut in 0..full.len() {
             assert!(is_malformed(hash(&full[..cut])), "cut {cut}");
         }
         // length far past EOF, on included and excluded chunks
