@@ -50,3 +50,14 @@ fn truncated_jpeg_falls_back_without_panic() {
     assert_eq!(out.scope, HashScope::File1);
     assert!(out.fallback_reason.is_some());
 }
+
+#[test]
+fn red_jpg_payload_hash_is_pinned() {
+    // Persisted in sidecars: changing this value breaks re-linking.
+    let out = hash_bytes(&red());
+    assert_eq!(out.scope, HashScope::MediaPayload1);
+    assert_eq!(
+        out.hash.to_string(),
+        "blake3:47804b280c53cf08cab26f0c7c9e2d07f4e0ed089402511cd81d73f18f9cfeec"
+    );
+}
