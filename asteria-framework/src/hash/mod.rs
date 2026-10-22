@@ -2,7 +2,10 @@
 
 mod detect;
 mod file;
+mod flac;
+mod id3;
 mod jpeg;
+mod mp3;
 mod png;
 mod sink;
 mod webp;
@@ -132,7 +135,9 @@ fn payload_hash(path: &Path, format: MediaFormat) -> Result<Option<ContentHash>>
         MediaFormat::WebP => {
             webp::webp_payload_hash(&mut BufReader::new(File::open(path)?)).map(Some)
         }
-        MediaFormat::Flac | MediaFormat::Mp3 | MediaFormat::Unknown => Ok(None),
+        MediaFormat::Flac => flac::flac_payload_hash(&mut File::open(path)?).map(Some),
+        MediaFormat::Mp3 => mp3::mp3_payload_hash(&mut File::open(path)?).map(Some),
+        MediaFormat::Unknown => Ok(None),
     }
 }
 

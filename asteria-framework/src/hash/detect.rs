@@ -5,6 +5,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use super::MediaFormat;
+use super::id3::id3v2_total_len;
 use crate::Result;
 
 /// Detects the format from the first 16 bytes. A FLAC stream behind an ID3v2
@@ -33,14 +34,13 @@ pub fn detect_format_file(path: &Path) -> Result<MediaFormat> {
     let head = &head[..n];
     let format = detect_format(head);
     if format == MediaFormat::Mp3 && head.starts_with(b"ID3") && head.len() >= 10 {
-        let size = head[6..10]
-            .iter()
-            .fold(0u64, |acc, b| (acc << 7) | u64::from(b & 0x7F));
-        let footer = if head[5] & 0x10 != 0 { 10 } else { 0 };
-        file.seek(SeekFrom::Start(10 + size + footer))?;
-        let mut magic = [0u8; 4];
-        if read_up_to(&mut file, &mut magic)? == 4 && &magic == b"fLaC" {
-            return Ok(MediaFormat::Flac);
+        let id3_head: &[u8; 10] = head[..10].try_into().expect("length checked");
+        if let Some(total) = id3v2_total_len(id3_head) {
+            file.seek(SeekFrom::Start(total))?;
+            let mut magic = [0u8; 4];
+            if read_up_to(&mut file, &mut magic)? == 4 && &magic == b"fLaC" {
+                return Ok(MediaFormat::Flac);
+            }
         }
     }
     Ok(format)

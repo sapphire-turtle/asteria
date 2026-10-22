@@ -92,6 +92,13 @@ fn detects_flac_behind_id3v2() {
     std::fs::write(&p, &data).unwrap();
     assert_eq!(detect_format_file(&p).unwrap(), MediaFormat::Flac);
 
+    // v2.3 with the 0x10 bit set has no footer
+    let mut data = b"ID3\x03\x00\x10\x00\x00\x00\x05".to_vec();
+    data.extend_from_slice(&[0; 5]);
+    data.extend_from_slice(b"fLaC\x00\x00\x00\x22");
+    std::fs::write(&p, &data).unwrap();
+    assert_eq!(detect_format_file(&p).unwrap(), MediaFormat::Flac);
+
     // ID3 followed by something else stays Mp3
     let mut data = b"ID3\x03\x00\x00\x00\x00\x00\x05".to_vec();
     data.extend_from_slice(&[0; 5]);
