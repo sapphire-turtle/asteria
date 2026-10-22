@@ -67,3 +67,32 @@ fn sidecar_path_keeps_extension_and_japanese() {
     );
     assert!(is_sidecar(Path::new("a.jpg.xmp")) && !is_sidecar(Path::new("a.jpg")));
 }
+
+#[test]
+fn failed_init_can_be_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    // A previous init died after creating the directory but before writing library.toml.
+    std::fs::create_dir_all(dir.path().join(".asteria")).unwrap();
+    std::fs::write(dir.path().join(".asteria/users.toml"), "stale").unwrap();
+    let lib = Library::init(dir.path(), "a").unwrap();
+    assert_eq!(Library::open(dir.path()).unwrap().owner(), lib.owner());
+}
+
+#[test]
+fn missing_users_file_names_the_path() {
+    let dir = tempfile::tempdir().unwrap();
+    Library::init(dir.path(), "a").unwrap();
+    std::fs::remove_file(dir.path().join(".asteria/users.toml")).unwrap();
+    match Library::open(dir.path()) {
+        Err(Error::MissingFile(p)) => assert!(p.ends_with(".asteria/users.toml")),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn users_file_without_users_is_empty_list() {
+    let dir = tempfile::tempdir().unwrap();
+    Library::init(dir.path(), "a").unwrap();
+    std::fs::write(dir.path().join(".asteria/users.toml"), "").unwrap();
+    assert!(Library::open(dir.path()).unwrap().users().user.is_empty());
+}

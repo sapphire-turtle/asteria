@@ -5,6 +5,7 @@ use grain_id::GrainId;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::fsutil::atomic_write;
 use crate::ids::{LibraryId, UserId};
 use crate::paths::META_DIR;
 
@@ -27,6 +28,7 @@ pub struct User {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Users {
+    #[serde(default)]
     pub user: Vec<User>,
 }
 
@@ -40,7 +42,9 @@ pub struct Library {
 impl Library {
     pub fn init(root: &Path, owner_name: &str) -> Result<Library> {
         let meta = root.join(META_DIR);
-        if meta.exists() {
+        // library.toml is written last, so its presence means a complete init; a directory left
+        // behind by a failed init can be initialized again.
+        if meta.join(LIBRARY_FILE).exists() {
             return Err(Error::AlreadyInitialized(root.to_path_buf()));
         }
         fs::create_dir_all(&meta)?;
@@ -56,14 +60,17 @@ impl Library {
                 name: owner_name.to_owned(),
             }],
         };
-        // Plain writes for now; Task 8 switches these to fsutil::atomic_write.
-        fs::write(
-            meta.join(LIBRARY_FILE),
-            toml::to_string(&config).map_err(|e| Error::Toml(e.to_string()))?,
+        atomic_write(
+            &meta.join(USERS_FILE),
+            toml::to_string(&users)
+                .map_err(|e| Error::Toml(e.to_string()))?
+                .as_bytes(),
         )?;
-        fs::write(
-            meta.join(USERS_FILE),
-            toml::to_string(&users).map_err(|e| Error::Toml(e.to_string()))?,
+        atomic_write(
+            &meta.join(LIBRARY_FILE),
+            toml::to_string(&config)
+                .map_err(|e| Error::Toml(e.to_string()))?
+                .as_bytes(),
         )?;
         Ok(Library {
             root: root.to_path_buf(),
@@ -86,8 +93,15 @@ impl Library {
         if config.format != FORMAT {
             return Err(Error::UnsupportedFormat(config.format));
         }
-        let users: Users = toml::from_str(&fs::read_to_string(meta.join(USERS_FILE))?)
-            .map_err(|e| Error::Toml(e.to_string()))?;
+        let users_path = meta.join(USERS_FILE);
+        let users_text = match fs::read_to_string(&users_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Error::MissingFile(users_path));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let users: Users = toml::from_str(&users_text).map_err(|e| Error::Toml(e.to_string()))?;
         Ok(Library {
             root: root.to_path_buf(),
             config,

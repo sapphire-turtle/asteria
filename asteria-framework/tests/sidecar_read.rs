@@ -263,3 +263,13 @@ fn element_form_modified_and_hash() {
     assert_eq!(hash.to_string(), format!("blake3:{h}"));
     assert_eq!(scope, HashScope::File1);
 }
+
+#[test]
+fn element_form_values_on_their_own_lines_are_trimmed() {
+    let xmp = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  <rdf:Description xmlns:asteria=\"https://sapphire-turtle.github.io/ns/asteria/1.0/\">\n   <asteria:ContentHash>\n    blake3:abababababababababababababababababababababababababababababababab\n   </asteria:ContentHash>\n   <asteria:HashScope>\n    file/1\n   </asteria:HashScope>\n   <asteria:UserRatings><rdf:Bag><rdf:li>\n    <asteria:User>\n     123abcd\n    </asteria:User>\n    <asteria:Rating>\n     5\n    </asteria:Rating>\n   </rdf:li></rdf:Bag></asteria:UserRatings>\n  </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>";
+    let sc = Sidecar::parse(xmp.as_bytes()).unwrap();
+    let (_, scope) = sc.content_hash.unwrap();
+    assert_eq!(scope, HashScope::File1);
+    let u: UserId = "123abcd".parse().unwrap();
+    assert_eq!(sc.user_ratings[&u].value, 5);
+}

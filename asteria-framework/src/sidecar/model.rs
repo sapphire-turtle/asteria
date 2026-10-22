@@ -18,7 +18,6 @@ pub struct RatingEntry {
 /// The parsed document, kept so unknown content can be written back.
 #[derive(Debug, Clone)]
 pub(crate) struct XmpDoc {
-    #[allow(dead_code)] // read by the writer
     pub(crate) root: xml::Element,
     pub(crate) xpacket: bool,
 }

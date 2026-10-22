@@ -1,14 +1,18 @@
 //! Minimal namespace-aware XML tree.
 //!
 //! Unlike `xmltree`, attributes keep their namespace URI and prefix, and each element keeps the
-//! namespace declarations made on it, so a later serializer can write the document back without
-//! losing information. Only parsing lives here for now.
-// The prefix/declaration/comment fields exist for the serializer added in a later task.
-#![allow(dead_code)]
+//! namespace declarations made on it, so the serializer can write the document back without
+//! losing information.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
+use xml::attribute::Attribute as XmlAttribute;
+use xml::common::XmlVersion;
+use xml::name::Name as XmlName;
+use xml::namespace::Namespace;
 use xml::reader::{EventReader, ParserConfig, XmlEvent};
+use xml::writer::{EmitterConfig, EventWriter, XmlEvent as WriteEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Name {
@@ -65,15 +69,20 @@ impl Element {
         self.child_elements().find(|e| e.is(ns, local))
     }
 
-    /// Concatenated text and CDATA children, trimmed.
-    pub fn text(&self) -> String {
+    /// Concatenated text and CDATA children, as they are.
+    pub fn raw_text(&self) -> String {
         let mut out = String::new();
         for n in &self.children {
             if let Node::Text(t) | Node::CData(t) = n {
                 out.push_str(t);
             }
         }
-        out.trim().to_string()
+        out
+    }
+
+    /// Concatenated text and CDATA children, trimmed.
+    pub fn text(&self) -> String {
+        self.raw_text().trim().to_string()
     }
 }
 
@@ -169,6 +178,80 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Element, String> {
     root.ok_or_else(|| "no root element".to_string())
 }
 
+const XPACKET_BEGIN: &str = "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>";
+const XPACKET_END: &str = "<?xpacket end=\"w\"?>";
+
+/// Write `root` as UTF-8, keeping prefixes, declarations, and child order. Text is written as it
+/// is in the tree (no pretty-printing). With `xpacket`, the document is wrapped in
+/// `<?xpacket?>` instructions and has no XML declaration (it could not come after them).
+pub(crate) fn serialize(root: &Element, xpacket: bool) -> Vec<u8> {
+    let mut w = EmitterConfig::new()
+        .write_document_declaration(false)
+        .autopad_comments(false)
+        .pad_self_closing(false)
+        .create_writer(Vec::new());
+    const OK: &str = "writing to a Vec cannot fail";
+    if xpacket {
+        w.inner_mut().extend_from_slice(XPACKET_BEGIN.as_bytes());
+        w.inner_mut().push(b'\n');
+    } else {
+        w.write(WriteEvent::StartDocument {
+            version: XmlVersion::Version10,
+            encoding: Some("UTF-8"),
+            standalone: None,
+        })
+        .expect(OK);
+        w.inner_mut().push(b'\n');
+    }
+    write_element(&mut w, root).expect(OK);
+    w.inner_mut().push(b'\n');
+    if xpacket {
+        w.inner_mut().extend_from_slice(XPACKET_END.as_bytes());
+        w.inner_mut().push(b'\n');
+    }
+    w.into_inner()
+}
+
+fn xml_name(n: &Name) -> XmlName<'_> {
+    XmlName {
+        local_name: &n.local,
+        namespace: n.ns.as_deref(),
+        prefix: n.prefix.as_deref(),
+    }
+}
+
+fn write_element(w: &mut EventWriter<Vec<u8>>, e: &Element) -> xml::writer::Result<()> {
+    let mut namespace = Namespace::empty();
+    for (p, u) in &e.declarations {
+        namespace.put(p.as_str(), u.as_str());
+    }
+    let attributes: Vec<XmlAttribute<'_>> = e
+        .attributes
+        .iter()
+        .map(|a| XmlAttribute::new(xml_name(&a.name), &a.value))
+        .collect();
+    w.write(WriteEvent::StartElement {
+        name: xml_name(&e.name),
+        attributes: Cow::Owned(attributes),
+        namespace: Cow::Owned(namespace),
+    })?;
+    for n in &e.children {
+        match n {
+            Node::Element(c) => write_element(w, c)?,
+            Node::Text(t) => w.write(WriteEvent::Characters(t))?,
+            Node::CData(t) => w.write(WriteEvent::CData(t))?,
+            Node::Comment(t) => w.write(WriteEvent::Comment(t))?,
+            Node::ProcessingInstruction { name, data } => {
+                w.write(WriteEvent::ProcessingInstruction {
+                    name,
+                    data: data.as_deref(),
+                })?;
+            }
+        }
+    }
+    w.write(WriteEvent::end_element())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +293,39 @@ mod tests {
     #[test]
     fn second_root_element_is_error() {
         assert!(parse(b"<a/><b/>").is_err());
+    }
+
+    #[test]
+    fn serialize_keeps_prefixes_declarations_and_nodes() {
+        let x = r#"<a:r xmlns:a="urn:a" xmlns="urn:d"><!--c--><b x="1 &amp; &quot;2&quot;" a:y="3"><k:z xmlns:k="urn:k"/>t &lt; u<![CDATA[<d>]]><?pi x?></b><e/></a:r>"#;
+        let e = parse(x.as_bytes()).unwrap();
+        let out = String::from_utf8(serialize(&e, false)).unwrap();
+        assert_eq!(parse(out.as_bytes()).unwrap(), e);
+        for needle in [
+            "<a:r ",
+            "xmlns:a=\"urn:a\"",
+            "xmlns=\"urn:d\"",
+            "<k:z xmlns:k=\"urn:k\"/>",
+            "<!--c-->",
+            "<![CDATA[<d>]]>",
+            "<?pi x?>",
+            "<e/>",
+        ] {
+            assert!(out.contains(needle), "missing {needle} in {out}");
+        }
+    }
+
+    #[test]
+    fn serialize_xpacket_wraps_without_xml_declaration() {
+        let e = parse(b"<r/>").unwrap();
+        let out = String::from_utf8(serialize(&e, true)).unwrap();
+        assert!(out.starts_with("<?xpacket begin=\"\u{feff}\""));
+        assert!(!out.contains("<?xml"));
+        assert!(out.trim_end().ends_with("<?xpacket end=\"w\"?>"));
+        assert!(
+            String::from_utf8(serialize(&e, false))
+                .unwrap()
+                .starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+        );
     }
 }

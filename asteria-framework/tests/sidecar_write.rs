@@ -1,0 +1,222 @@
+use std::path::PathBuf;
+
+use asteria_framework::hash::{ContentHash, HashScope};
+use asteria_framework::{RatingEntry, Sidecar, UserId};
+use chrono::{TimeZone, Utc};
+
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/xmp")
+        .join(name)
+}
+
+fn load(name: &str) -> Sidecar {
+    Sidecar::read(&fixture(name)).unwrap().unwrap()
+}
+
+fn text(sc: &Sidecar) -> String {
+    String::from_utf8(sc.to_bytes()).unwrap()
+}
+
+fn reparse(sc: &Sidecar) -> Sidecar {
+    Sidecar::parse(&sc.to_bytes()).unwrap()
+}
+
+#[test]
+fn roundtrip_preserves_unknown_namespaces() {
+    let mut sc = load("darktable_attr.xmp");
+    sc.rating = Some(RatingEntry {
+        value: 5,
+        modified: None,
+    });
+    let out = text(&sc);
+    assert_eq!(reparse(&sc).rating.unwrap().value, 5);
+    for needle in [
+        "xmlns:darktable=\"http://darktable.sf.net/\"",
+        "xmlns:xmpMM=\"http://ns.adobe.com/xap/1.0/mm/\"",
+        "darktable:xmp_version=\"5\"",
+        "darktable:iop_order_version=\"2\"",
+        "xmpMM:DerivedFrom=\"IMG_0001.CR2\"",
+        "darktable:operation=\"exposure\"",
+        "darktable:params=\"00000000\"",
+        "<darktable:history>",
+    ] {
+        assert!(out.contains(needle), "missing {needle} in {out}");
+    }
+    assert_eq!(out.matches("Rating=").count(), 1);
+}
+
+#[test]
+fn element_form_rating_is_rewritten_once() {
+    let mut sc = load("element_form.xmp");
+    sc.rating.as_mut().unwrap().value = 2;
+    let out = text(&sc);
+    assert_eq!(out.matches("xmp:Rating").count(), 1, "{out}");
+    assert!(out.contains("xmp:Rating=\"2\""));
+    assert_eq!(reparse(&sc).rating.unwrap().value, 2);
+    assert_eq!(reparse(&sc).label.as_deref(), Some("Red"));
+}
+
+#[test]
+fn xpacket_wrapper_is_preserved() {
+    let sc = load("xpacket_wrapped.xmp");
+    let out = text(&sc);
+    assert!(out.starts_with("<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>"));
+    assert!(out.trim_end().ends_with("<?xpacket end=\"w\"?>"));
+    assert!(reparse(&sc).has_xpacket_wrapper());
+    assert_eq!(reparse(&sc).rating.unwrap().value, 2);
+}
+
+#[test]
+fn unwrapped_source_stays_unwrapped() {
+    let out = text(&load("darktable_attr.xmp"));
+    assert!(out.starts_with("<?xml"));
+    assert!(!out.contains("xpacket"));
+}
+
+#[test]
+fn new_sidecar_roundtrips_all_fields() {
+    let mut sc = Sidecar::new();
+    sc.rating = Some(RatingEntry {
+        value: -1,
+        modified: Some(Utc.with_ymd_and_hms(2026, 10, 22, 9, 0, 0).unwrap()),
+    });
+    let u1: UserId = "123abcd".parse().unwrap();
+    sc.user_ratings.insert(
+        u1,
+        RatingEntry {
+            value: 5,
+            modified: Some(Utc.with_ymd_and_hms(2026, 10, 21, 20, 0, 0).unwrap()),
+        },
+    );
+    sc.subjects
+        .extend(["cat".to_string(), "京都 & <b>".to_string()]);
+    sc.hierarchical_subjects.insert("animal|cat".into());
+    sc.description = Some("A \"cat\" & more".into());
+    sc.label = Some("Red".into());
+    let hash: ContentHash = format!("blake3:{}", "ab".repeat(32)).parse().unwrap();
+    sc.content_hash = Some((hash, HashScope::MediaPayload1));
+
+    let out = text(&sc);
+    assert!(out.contains("2026-10-22T09:00:00Z"), "{out}");
+    assert!(out.contains("xml:lang=\"x-default\""));
+    let back = reparse(&sc);
+    assert_eq!(back.rating, sc.rating);
+    assert_eq!(back.user_ratings, sc.user_ratings);
+    assert_eq!(back.subjects, sc.subjects);
+    assert_eq!(back.hierarchical_subjects, sc.hierarchical_subjects);
+    assert_eq!(back.description, sc.description);
+    assert_eq!(back.label, sc.label);
+    assert_eq!(back.content_hash, sc.content_hash);
+    assert!(!back.has_xpacket_wrapper());
+}
+
+#[test]
+fn empty_values_are_not_written() {
+    let mut sc = Sidecar::new();
+    sc.label = Some(String::new());
+    sc.description = Some(String::new());
+    let out = text(&sc);
+    assert!(
+        !out.contains("Label") && !out.contains("description"),
+        "{out}"
+    );
+    assert!(!out.contains("subject") && !out.contains("UserRatings"));
+    assert!(Sidecar::parse(out.as_bytes()).is_ok());
+}
+
+#[test]
+fn multi_description_managed_props_are_consolidated_unknown_kept() {
+    let mut sc = load("multi_description.xmp");
+    sc.rating.as_mut().unwrap().value = 3;
+    sc.subjects.insert("dog".into());
+    let out = text(&sc);
+    assert_eq!(out.matches("Rating").count(), 1, "{out}");
+    assert_eq!(out.matches("<rdf:Description").count(), 2);
+    let back = reparse(&sc);
+    assert_eq!(back.rating.unwrap().value, 3);
+    assert_eq!(back.subjects, sc.subjects);
+    assert_eq!(back.description.as_deref(), Some("A cat"));
+    assert_eq!(back.hierarchical_subjects, sc.hierarchical_subjects);
+    // the German translation is not asteria's to drop
+    assert!(out.contains("Ein Kater"), "{out}");
+}
+
+#[test]
+fn clearing_values_removes_them_from_file() {
+    let mut sc = load("asteria_full.xmp");
+    sc.rating = None;
+    sc.user_ratings.clear();
+    sc.content_hash = None;
+    let out = text(&sc);
+    for gone in ["Rating", "ContentHash", "HashScope", "UserRatings"] {
+        assert!(!out.contains(gone), "{gone} still in {out}");
+    }
+    assert!(out.contains("xmlns:asteria="));
+}
+
+#[test]
+fn foreign_content_is_kept_verbatim() {
+    let src = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><!--keep--><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:ex="urn:ex" ex:a="1 &amp; 2"><ex:b><![CDATA[<raw>]]></ex:b><?pi data?></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+    let mut sc = Sidecar::parse(src.as_bytes()).unwrap();
+    sc.label = Some("Blue".into());
+    let out = text(&sc);
+    for needle in [
+        "<!--keep-->",
+        "ex:a=\"1 &amp; 2\"",
+        "<![CDATA[<raw>]]>",
+        "<?pi data?>",
+        "xmlns:ex=\"urn:ex\"",
+    ] {
+        assert!(out.contains(needle), "missing {needle} in {out}");
+    }
+    assert_eq!(reparse(&sc).label.as_deref(), Some("Blue"));
+}
+
+#[test]
+fn new_property_reuses_existing_nondefault_prefix() {
+    let mut sc = load("multi_description.xmp"); // xap prefix for xmp, dublin for dc
+    sc.label = Some("Green".into());
+    let out = text(&sc);
+    assert!(out.contains("xap:Label=\"Green\""), "{out}");
+}
+
+#[test]
+fn write_is_atomic_file_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("a.jpg.xmp");
+    let mut sc = Sidecar::new();
+    sc.label = Some("Red".into());
+    sc.write(&p).unwrap();
+    assert_eq!(
+        Sidecar::read(&p).unwrap().unwrap().label.as_deref(),
+        Some("Red")
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn rewriting_is_stable() {
+    for name in [
+        "multi_description.xmp",
+        "asteria_full.xmp",
+        "element_form.xmp",
+    ] {
+        let once = load(name).to_bytes();
+        let twice = Sidecar::parse(&once).unwrap().to_bytes();
+        assert_eq!(
+            String::from_utf8(once).unwrap(),
+            String::from_utf8(twice).unwrap(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn canonical_prefix_bound_to_other_uri_is_not_reused() {
+    let src = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:dc="urn:other"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about=""/></rdf:RDF></x:xmpmeta>"#;
+    let mut sc = Sidecar::parse(src.as_bytes()).unwrap();
+    sc.subjects.insert("cat".into());
+    let back = reparse(&sc);
+    assert_eq!(back.subjects, sc.subjects);
+}
