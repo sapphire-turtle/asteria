@@ -47,6 +47,16 @@ impl Sidecar {
         Self::default()
     }
 
+    /// Whether any managed field other than the content hash holds data.
+    pub fn has_user_data(&self) -> bool {
+        self.rating.is_some()
+            || !self.user_ratings.is_empty()
+            || !self.subjects.is_empty()
+            || !self.hierarchical_subjects.is_empty()
+            || self.description.is_some()
+            || self.label.is_some()
+    }
+
     /// Whether the source file was wrapped in `<?xpacket ...?>`.
     pub fn has_xpacket_wrapper(&self) -> bool {
         self.doc.as_ref().is_some_and(|d| d.xpacket)

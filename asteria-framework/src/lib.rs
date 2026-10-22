@@ -6,6 +6,7 @@ pub mod hash;
 pub mod ids;
 pub mod journal;
 pub mod library;
+pub mod meta;
 pub mod paths;
 pub mod sidecar;
 

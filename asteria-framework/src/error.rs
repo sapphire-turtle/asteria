@@ -31,6 +31,10 @@ pub enum Error {
         path: Option<PathBuf>,
         reason: String,
     },
+    #[error("media file not found: {0}")]
+    MediaNotFound(PathBuf),
+    #[error("rating out of range (-1..=5): {0}")]
+    InvalidRating(i8),
     #[error("failed to serialize journal entry: {0}")]
     JournalSerialize(String),
     #[error("malformed journal entry at {}:{line}", .file.display())]
