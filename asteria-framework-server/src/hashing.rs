@@ -26,7 +26,8 @@ const BATCH: usize = 64;
 /// longer matches the file's (size, mtime). Returns how many hashes were stored.
 /// Stops early (keeping what is done) once `cancel` is set. Per-file errors are logged
 /// and skipped; cache errors propagate. Only the `hash` field of a record is written, and
-/// only if the record's size/mtime still match the hash.
+/// only if the record's size/mtime still match the hash. A record whose size/mtime no
+/// longer match the file is skipped (debug log): run `scan` first to refresh it.
 pub fn hash_pending(
     library: &Library,
     cache: &Cache,
@@ -64,6 +65,10 @@ fn hash_pending_with(
             }
         };
         let stamp = (before.len(), mtime_ns(&before));
+        if stamp != (rec.size, rec.mtime_ns) {
+            tracing::debug!(%path, "record is stale (file changed since scan); rescan first");
+            continue;
+        }
         if rec
             .hash
             .as_ref()
@@ -121,7 +126,8 @@ pub struct RelinkReport {
     /// matched item's file is gone (all left in place).
     pub unmatched: Vec<String>,
     /// Orphan sidecars with exactly one match that cannot be used: the target already has a
-    /// sidecar on disk, or the target file changed since it was hashed (left in place).
+    /// sidecar on disk, the target file changed since it was hashed, or the move failed with an
+    /// I/O error (left in place).
     pub conflicts: Vec<String>,
 }
 
@@ -282,7 +288,7 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
             }
         } else if let Err(e) = move_no_clobber(&old_abs, &new_sidecar_abs) {
             tracing::warn!(sidecar = %old, %target, error = %e, "could not move sidecar");
-            report.unmatched.push(old);
+            report.conflicts.push(old);
             continue;
         }
         journal.append(&JournalEntry {
@@ -328,11 +334,17 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Whether a failed `hard_link` should be retried as check-then-rename: every error except
+/// `AlreadyExists`. Some filesystems (vfat, exFAT) report EPERM for hard links; if the
+/// problem is a real permission error the rename fails too and that error is reported.
+fn should_fallback(e: &std::io::Error) -> bool {
+    e.kind() != ErrorKind::AlreadyExists
+}
+
 /// Moves `from` to `to` without ever replacing an existing `to`.
 ///
 /// Uses `hard_link` (fails if `to` exists, so a racing creator is never overwritten)
-/// followed by removing `from`. Only if the filesystem reports hard links as unsupported
-/// does it fall back to check-then-`rename`, which is acceptable because all library
+/// followed by removing `from`. If `hard_link` fails for any other reason it falls back to check-then-`rename`, which is acceptable because all library
 /// writes go through the single write queue.
 fn move_no_clobber(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::hard_link(from, to) {
@@ -344,8 +356,8 @@ fn move_no_clobber(from: &Path, to: &Path) -> std::io::Result<()> {
                 }
             });
         }
-        Err(e) if e.kind() == ErrorKind::Unsupported => {}
-        Err(e) => return Err(e),
+        Err(e) if !should_fallback(&e) => return Err(e),
+        Err(_) => {}
     }
     if to.symlink_metadata().is_ok() {
         return Err(ErrorKind::AlreadyExists.into());
@@ -433,6 +445,14 @@ mod tests {
         let rec = cache.get_by_path("a.bin").unwrap().unwrap();
         assert!(rec.hash.is_some());
         assert_eq!(rec.sidecar, snap);
+    }
+
+    #[test]
+    fn fallback_decision() {
+        use std::io::{Error, ErrorKind::*};
+        assert!(!should_fallback(&Error::from(AlreadyExists)));
+        assert!(should_fallback(&Error::from(PermissionDenied)));
+        assert!(should_fallback(&Error::from(Unsupported)));
     }
 
     #[test]

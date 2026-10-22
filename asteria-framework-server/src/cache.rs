@@ -294,10 +294,13 @@ impl Cache {
         {
             let mut items = w.open_table(ITEMS).map_err(ce)?;
             for (path, v) in updates {
-                let cur = items
-                    .get(path.as_str())
-                    .map_err(ce)?
-                    .and_then(|g| serde_json::from_slice::<ItemRecord>(g.value()).ok());
+                let cur = items.get(path.as_str()).map_err(ce)?.and_then(|g| {
+                    serde_json::from_slice::<ItemRecord>(g.value())
+                        .inspect_err(
+                            |e| tracing::debug!(%path, error = %e, "skipping undecodable record"),
+                        )
+                        .ok()
+                });
                 let Some(mut rec) = cur else { continue };
                 if f(&mut rec, v) {
                     let bytes = serde_json::to_vec(&rec).map_err(ce)?;
