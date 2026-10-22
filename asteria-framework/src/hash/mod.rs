@@ -3,6 +3,9 @@
 mod detect;
 mod file;
 mod jpeg;
+mod png;
+mod sink;
+mod webp;
 
 use std::fmt;
 use std::fs::File;
@@ -125,11 +128,11 @@ fn payload_hash(path: &Path, format: MediaFormat) -> Result<Option<ContentHash>>
         MediaFormat::Jpeg => {
             jpeg::jpeg_payload_hash(&mut BufReader::new(File::open(path)?)).map(Some)
         }
-        MediaFormat::Png
-        | MediaFormat::WebP
-        | MediaFormat::Flac
-        | MediaFormat::Mp3
-        | MediaFormat::Unknown => Ok(None),
+        MediaFormat::Png => png::png_payload_hash(&mut BufReader::new(File::open(path)?)).map(Some),
+        MediaFormat::WebP => {
+            webp::webp_payload_hash(&mut BufReader::new(File::open(path)?)).map(Some)
+        }
+        MediaFormat::Flac | MediaFormat::Mp3 | MediaFormat::Unknown => Ok(None),
     }
 }
 

@@ -16,4 +16,5 @@ blake3.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+crc32fast = "1"
 serde_json.workspace = true

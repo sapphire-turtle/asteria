@@ -3,10 +3,9 @@
 
 use std::io::{self, Read};
 
+use super::sink::Sink;
 use super::{ContentHash, MediaFormat};
 use crate::{Error, Result};
-
-const FLUSH_AT: usize = 64 * 1024;
 
 fn malformed(reason: &str) -> Error {
     Error::MalformedMedia {
@@ -28,32 +27,9 @@ fn read_u8(r: &mut impl Read) -> Result<u8> {
     Ok(b[0])
 }
 
-/// Buffers hashed bytes and flushes at `FLUSH_AT` so memory stays bounded.
-struct Sink<'a> {
-    hasher: &'a mut blake3::Hasher,
-    buf: Vec<u8>,
-}
-
-impl Sink<'_> {
-    fn push(&mut self, bytes: &[u8]) {
-        self.buf.extend_from_slice(bytes);
-        if self.buf.len() >= FLUSH_AT {
-            self.flush();
-        }
-    }
-
-    fn flush(&mut self) {
-        self.hasher.update(&self.buf);
-        self.buf.clear();
-    }
-}
-
 pub(crate) fn jpeg_payload_hash(r: &mut impl Read) -> Result<ContentHash> {
     let mut hasher = blake3::Hasher::new();
-    let mut sink = Sink {
-        hasher: &mut hasher,
-        buf: Vec::with_capacity(FLUSH_AT),
-    };
+    let mut sink = Sink::new(&mut hasher);
 
     let mut soi = [0u8; 2];
     read_exact(r, &mut soi)?;
@@ -269,7 +245,7 @@ mod tests {
     #[test]
     fn large_scan_flushes_and_matches_whole_hash() {
         let mut scan = Vec::new();
-        for i in 0..(FLUSH_AT * 3) {
+        for i in 0..(crate::hash::sink::TEST_FLUSH_AT * 3) {
             scan.push((i % 200) as u8);
             if i % 1000 == 0 {
                 scan.extend_from_slice(&[0xFF, 0x00]);
