@@ -21,6 +21,7 @@ serde_json.workspace = true
 tracing.workspace = true
 grain-id.workspace = true
 uuid.workspace = true
+walkdir.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
