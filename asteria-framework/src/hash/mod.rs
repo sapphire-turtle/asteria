@@ -27,12 +27,17 @@ use crate::{Error, Result};
 const PREFIX: &str = "blake3:";
 
 /// A BLAKE3 digest, written as `blake3:<64 lowercase hex digits>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Ordered by the raw digest bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentHash([u8; 32]);
 
 impl ContentHash {
-    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
@@ -76,7 +81,7 @@ impl<'de> Deserialize<'de> for ContentHash {
     }
 }
 
-/// What a [`ContentHash`] covers.
+/// What a [`ContentHash`] covers. Serialized as its string form (`media-payload/1`, `file/1`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HashScope {
     /// Encoded media data only, excluding metadata.
@@ -103,6 +108,19 @@ impl FromStr for HashScope {
             "file/1" => Ok(Self::File1),
             _ => Err(Error::InvalidHashScope(s.to_string())),
         }
+    }
+}
+
+impl Serialize for HashScope {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for HashScope {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }
 

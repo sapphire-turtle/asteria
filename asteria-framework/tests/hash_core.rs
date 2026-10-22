@@ -133,3 +133,72 @@ fn missing_file_is_io_error() {
         Err(Error::Io(_))
     ));
 }
+
+#[test]
+fn mp3_detection_requires_a_valid_frame_header() {
+    // MPEG-1 Layer III, 128 kbit/s, 44.1 kHz.
+    assert_eq!(detect_format(&[0xFF, 0xFB, 0x90, 0x64]), MediaFormat::Mp3);
+    // UTF-16LE BOM followed by text ("<?xml"): sample-rate index 11 is reserved.
+    assert_eq!(
+        detect_format(b"\xFF\xFE<\x00?\x00x\x00m\x00l\x00"),
+        MediaFormat::Unknown
+    );
+    // Reserved version (01).
+    assert_eq!(
+        detect_format(&[0xFF, 0xEB, 0x90, 0x00]),
+        MediaFormat::Unknown
+    );
+    // Reserved layer (00); this also leaves AAC ADTS (FF F1) unmatched.
+    assert_eq!(
+        detect_format(&[0xFF, 0xF9, 0x90, 0x00]),
+        MediaFormat::Unknown
+    );
+    assert_eq!(
+        detect_format(&[0xFF, 0xF1, 0x50, 0x80]),
+        MediaFormat::Unknown
+    );
+    // Bitrate index 1111.
+    assert_eq!(
+        detect_format(&[0xFF, 0xFB, 0xF0, 0x00]),
+        MediaFormat::Unknown
+    );
+    // Sync word alone, header cut short.
+    assert_eq!(detect_format(&[0xFF, 0xFB]), MediaFormat::Unknown);
+}
+
+#[test]
+fn sine_fixtures_still_detect_as_mp3() {
+    for name in ["sine440.mp3", "sine880.mp3"] {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        assert_eq!(detect_format_file(&p).unwrap(), MediaFormat::Mp3, "{name}");
+    }
+}
+
+#[test]
+fn content_hash_bytes_and_order() {
+    let mut a = [0u8; 32];
+    a[31] = 1;
+    let mut b = [0u8; 32];
+    b[0] = 1;
+    let (ha, hb) = (ContentHash::from_bytes(a), ContentHash::from_bytes(b));
+    assert_eq!(ha.as_bytes(), &a);
+    assert!(ha < hb);
+    assert_eq!(ha.cmp(&ha), std::cmp::Ordering::Equal);
+    let set: std::collections::BTreeSet<_> = [hb, ha].into();
+    assert_eq!(set.into_iter().collect::<Vec<_>>(), vec![ha, hb]);
+}
+
+#[test]
+fn hash_scope_serde_is_string() {
+    for (scope, s) in [
+        (HashScope::MediaPayload1, "media-payload/1"),
+        (HashScope::File1, "file/1"),
+    ] {
+        let json = serde_json::to_string(&scope).unwrap();
+        assert_eq!(json, format!("\"{s}\""));
+        assert_eq!(serde_json::from_str::<HashScope>(&json).unwrap(), scope);
+    }
+    assert!(serde_json::from_str::<HashScope>("\"media-payload/2\"").is_err());
+}

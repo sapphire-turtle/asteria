@@ -19,11 +19,26 @@ pub fn detect_format(head: &[u8]) -> MediaFormat {
         MediaFormat::WebP
     } else if head.starts_with(b"fLaC") {
         MediaFormat::Flac
-    } else if head.starts_with(b"ID3") || (head.len() >= 2 && head[0] == 0xFF && head[1] >= 0xE0) {
+    } else if head.starts_with(b"ID3") || is_mpeg_audio_header(head) {
         MediaFormat::Mp3
     } else {
         MediaFormat::Unknown
     }
+}
+
+/// An MPEG audio frame header: the 11-bit sync word plus version, layer, bitrate index and
+/// sample-rate index that are not reserved. Layer `00` is reserved, which also leaves AAC ADTS
+/// streams unmatched.
+fn is_mpeg_audio_header(head: &[u8]) -> bool {
+    let [0xFF, b1, b2, ..] = *head else {
+        return false;
+    };
+    let sync = b1 & 0xE0 == 0xE0;
+    let version = (b1 >> 3) & 0b11;
+    let layer = (b1 >> 1) & 0b11;
+    let bitrate = b2 >> 4;
+    let sample_rate = (b2 >> 2) & 0b11;
+    sync && version != 0b01 && layer != 0b00 && bitrate != 0b1111 && sample_rate != 0b11
 }
 
 /// Like [`detect_format`], but also recognises FLAC after an ID3v2 tag.
