@@ -5,8 +5,9 @@ use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 
+use crate::media_http::media;
 use crate::rpc::rpc;
 use crate::state::AppState;
 
@@ -19,6 +20,7 @@ const BODY_LIMIT: usize = 64 * 1024;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/rpc", post(rpc))
+        .route("/media/{id}/{what}", get(media))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state)

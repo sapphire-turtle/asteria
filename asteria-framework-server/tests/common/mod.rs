@@ -4,11 +4,12 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use asteria_framework::{Library, MediaKind, UserId};
 use asteria_framework_server::{
-    AppState, Cache, MediaFilter, ServerConfig, TokenEntry, Tokens, new_token, router, scan,
-    spawn_writer, token_hash,
+    AppState, Cache, MediaFilter, Processor, ServerConfig, TokenEntry, Tokens, new_token, router,
+    scan, spawn_writer, token_hash,
 };
 use axum::Router;
 use axum::body::Body;
@@ -31,12 +32,18 @@ pub struct Env {
     pub lib: Arc<Library>,
     pub cache: Arc<Cache>,
     pub app: Router,
+    pub processor: Arc<Processor>,
     pub owner_token: String,
     pub guest_token: String,
     pub _rescan_rx: tokio::sync::mpsc::Receiver<()>,
 }
 
 pub fn env() -> Env {
+    env_with(|thumbs| Processor::new(thumbs, 2, Duration::from_secs(60)))
+}
+
+/// `make` gets the thumbs directory (inside the cache directory) and builds the processor.
+pub fn env_with(make: impl FnOnce(PathBuf) -> Processor) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("lib");
     fs::create_dir(&root).unwrap();
@@ -67,6 +74,7 @@ pub fn env() -> Env {
             },
         ],
     };
+    let processor = Arc::new(make(dir.path().join("cache/thumbs")));
     let (rescan, rescan_rx) = tokio::sync::mpsc::channel(1);
     let state = AppState::new(
         lib.clone(),
@@ -78,6 +86,7 @@ pub fn env() -> Env {
         Arc::new(AtomicBool::new(false)),
         rescan,
         Arc::new(Gallery),
+        processor.clone(),
     );
     Env {
         _dir: dir,
@@ -85,6 +94,7 @@ pub fn env() -> Env {
         lib,
         cache,
         app: router(state),
+        processor,
         owner_token,
         guest_token,
         _rescan_rx: rescan_rx,
@@ -125,4 +135,48 @@ pub async fn call(app: &Router, token: &str, method: &str, params: Value) -> Val
 
 pub fn item_id(e: &Env, path: &str) -> String {
     e.cache.get_by_path(path).unwrap().unwrap().id.0
+}
+
+/// GET `uri`; returns status, headers and body.
+pub async fn get(
+    app: &Router,
+    token: Option<&str>,
+    uri: &str,
+    range: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut req = Request::get(uri);
+    if let Some(t) = token {
+        req = req.header("authorization", format!("Bearer {t}"));
+    }
+    if let Some(r) = range {
+        req = req.header("range", r);
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let (parts, body) = resp.into_parts();
+    (
+        parts.status,
+        parts.headers,
+        body.collect().await.unwrap().to_bytes().to_vec(),
+    )
+}
+
+/// Computes the content hashes of everything scanned.
+pub fn hash_all(e: &Env) {
+    asteria_framework_server::hash_pending(&e.lib, &e.cache, &AtomicBool::new(false)).unwrap();
+}
+
+/// Whether `<tool> --version` runs; prints why a test is skipped when it does not.
+pub fn have_tool(tool: &str) -> bool {
+    let ok = std::process::Command::new(tool)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !ok {
+        eprintln!("skipping: `{tool}` is not on PATH");
+    }
+    ok
 }

@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::auth::Tokens;
 use crate::cache::Cache;
+use crate::process::Processor;
 use crate::scan::MediaFilter;
 use crate::writer::Writer;
 
@@ -23,6 +24,7 @@ pub struct AppState {
     scanning: Arc<AtomicBool>,
     rescan: mpsc::Sender<()>,
     filter: Arc<dyn MediaFilter>,
+    processor: Arc<Processor>,
 }
 
 impl AppState {
@@ -38,6 +40,7 @@ impl AppState {
         scanning: Arc<AtomicBool>,
         rescan: mpsc::Sender<()>,
         filter: Arc<dyn MediaFilter>,
+        processor: Arc<Processor>,
     ) -> AppState {
         AppState {
             library,
@@ -49,6 +52,7 @@ impl AppState {
             scanning,
             rescan,
             filter,
+            processor,
         }
     }
 
@@ -78,5 +82,8 @@ impl AppState {
     }
     pub fn filter(&self) -> &Arc<dyn MediaFilter> {
         &self.filter
+    }
+    pub fn processor(&self) -> &Arc<Processor> {
+        &self.processor
     }
 }
