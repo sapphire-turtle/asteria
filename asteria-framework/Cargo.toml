@@ -7,3 +7,11 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+serde.workspace = true
+toml.workspace = true
+grain-id.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
