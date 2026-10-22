@@ -20,7 +20,9 @@ all-features = true
 yanked = "warn"
 # Every ignore needs a `reason`, so the next contributor can tell whether it is
 # still load-bearing. Re-check them when the dependency they name moves.
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "proc-macro pulled in by lofty, used only as a test dev-dependency; revisit when asteria-player uses lofty at runtime (Plan 5)" },
+]
 
 [licenses]
 # Permissive SPDX identifiers. Re-survey with `cargo deny list --layout license`

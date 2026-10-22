@@ -11,12 +11,15 @@ use crate::hash::content_hash;
 use crate::ids::UserId;
 use crate::journal::{Actor, Journal, JournalEntry, OpId, OpKind};
 use crate::library::Library;
-use crate::paths::sidecar_path_for;
+use crate::paths::{META_DIR, is_sidecar, sidecar_path_for};
 use crate::sidecar::{RatingEntry, Sidecar};
 
-/// Rejects absolute paths and anything but plain components (`..`, `.`, prefixes).
+/// Rejects absolute paths, anything but plain components (`..`, `.`, prefixes), paths into
+/// the library metadata directory, and sidecar paths.
 fn checked_rel(media_rel: &Path) -> Result<()> {
     let ok = media_rel.components().next().is_some()
+        && !is_sidecar(media_rel)
+        && media_rel.components().next() != Some(Component::Normal(META_DIR.as_ref()))
         && media_rel
             .components()
             .all(|c| matches!(c, Component::Normal(_)));
@@ -58,6 +61,10 @@ impl Library {
     }
 
     /// Applies `f` to the sidecar of `media_rel`, creating it only when it gains content.
+    ///
+    /// `media_rel` must be plain components: absolute paths, `..`, a leading `./`, paths under
+    /// `.asteria` and sidecar paths are rejected with `MediaNotFound`. A change that only adds
+    /// the content hash to an existing sidecar is not written.
     ///
     /// Returns `Ok(true)` when a sidecar was written, `Ok(false)` when nothing needed writing.
     pub fn update_sidecar(
@@ -123,9 +130,19 @@ impl Library {
             if user == owner {
                 apply(&mut sc.rating, value, at);
             } else {
-                let mut slot = sc.user_ratings.get(&user).cloned();
-                apply(&mut slot, value, at);
-                sc.user_ratings.extend(slot.map(|e| (user, e)));
+                let newer = sc
+                    .user_ratings
+                    .get(&user)
+                    .is_some_and(|e| newer_wins(e, at));
+                if !newer {
+                    sc.user_ratings.insert(
+                        user,
+                        RatingEntry {
+                            value,
+                            modified: Some(at),
+                        },
+                    );
+                }
             }
         })?;
         Ok(())

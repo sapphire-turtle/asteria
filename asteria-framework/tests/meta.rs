@@ -108,6 +108,7 @@ fn malformed_sidecar_is_not_overwritten() {
         .unwrap_err();
     assert!(matches!(err, Error::MalformedSidecar { .. }));
     assert_eq!(fs::read(&sc).unwrap(), before);
+    assert!(Journal::new(&lib).read_all().unwrap().is_empty());
 }
 
 #[test]
@@ -172,4 +173,46 @@ fn path_escape_is_rejected() {
     }
     assert!(!outer.path().join("outside.jpg.xmp").exists());
     assert!(!root.join("sub/red.jpg.xmp").exists());
+}
+
+#[test]
+fn meta_dir_and_sidecar_paths_are_rejected() {
+    let (dir, lib) = setup("red.jpg");
+    let a = Actor::User(lib.owner());
+    for p in [".asteria/library.toml", "red.jpg.xmp"] {
+        let err = lib
+            .update_sidecar(Path::new(p), a, |s| s.label = Some("x".into()))
+            .unwrap_err();
+        assert!(matches!(err, Error::MediaNotFound(_)), "{p}");
+    }
+    assert!(!dir.path().join("red.jpg.xmp").exists());
+    assert!(!dir.path().join(".asteria/library.toml.xmp").exists());
+    assert!(!dir.path().join("red.jpg.xmp.xmp").exists());
+}
+
+#[test]
+fn read_sidecar_reports_malformed() {
+    let (dir, lib) = setup("red.jpg");
+    fs::copy(
+        common::fixture("xmp/malformed.xmp"),
+        dir.path().join("red.jpg.xmp"),
+    )
+    .unwrap();
+    let err = lib.read_sidecar(Path::new("red.jpg")).unwrap_err();
+    assert!(matches!(err, Error::MalformedSidecar { .. }));
+}
+
+#[test]
+fn older_non_owner_rating_does_not_overwrite_newer() {
+    let (_dir, lib) = setup("red.jpg");
+    let other = UserId(GrainId::random());
+    let a = Actor::User(other);
+    let p = Path::new("red.jpg");
+    lib.set_rating(p, other, 4, t(2), a).unwrap();
+    lib.set_rating(p, other, 2, t(1), a).unwrap();
+    let sc = lib.read_sidecar(p).unwrap().unwrap();
+    assert_eq!(sc.user_ratings[&other].value, 4);
+    lib.set_rating(p, other, 3, t(2), a).unwrap();
+    let sc = lib.read_sidecar(p).unwrap().unwrap();
+    assert_eq!(sc.user_ratings[&other].value, 3);
 }
