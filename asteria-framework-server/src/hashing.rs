@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use asteria_framework::hash::content_hash;
 use asteria_framework::journal::{Actor, Journal, JournalEntry, OpId, OpKind};
 use asteria_framework::paths::{is_sidecar, media_path_for_sidecar, sidecar_path_for};
-use asteria_framework::{Library, Sidecar};
+use asteria_framework::{Error as FwError, Library, Sidecar};
 use chrono::Utc;
 use grain_id::GrainId;
 use walkdir::WalkDir;
@@ -311,7 +311,13 @@ fn refresh_snapshot(library: &Library, cache: &Cache, media: &str) -> Result<(),
     let (snap, err) = match library.read_sidecar(Path::new(media)) {
         Ok(Some(sc)) => (SidecarSnapshot::from(&sc), None),
         Ok(None) => (SidecarSnapshot::default(), None),
-        Err(e) => (SidecarSnapshot::default(), Some(e.to_string())),
+        // Only the reason: the Display form carries the absolute sidecar path.
+        Err(FwError::MalformedSidecar { reason, .. }) => (SidecarSnapshot::default(), Some(reason)),
+        Err(e) => {
+            // Leave the record alone; the next scan looks at the sidecar again.
+            tracing::warn!(%media, error = %e, "cannot read the relinked sidecar");
+            return Ok(());
+        }
     };
     cache.set_sidecar(media, snap, err)?;
     Ok(())
@@ -445,6 +451,23 @@ mod tests {
         let rec = cache.get_by_path("a.bin").unwrap().unwrap();
         assert!(rec.hash.is_some());
         assert_eq!(rec.sidecar, snap);
+    }
+
+    #[test]
+    fn refreshed_malformed_sidecar_keeps_only_the_reason() {
+        let (_d, lib, cache) = setup(&["a.bin"]);
+        let sidecar = sidecar_path_for(&lib.root().join("a.bin"));
+        std::fs::write(&sidecar, "<not xmp").unwrap();
+        refresh_snapshot(&lib, &cache, "a.bin").unwrap();
+        let err = cache
+            .get_by_path("a.bin")
+            .unwrap()
+            .unwrap()
+            .sidecar_error
+            .expect("the sidecar is malformed");
+        let root = lib.root().to_string_lossy().into_owned();
+        assert!(!err.contains(&root), "{err}");
+        assert!(!err.contains("a.bin"), "{err}");
     }
 
     #[test]
