@@ -169,10 +169,16 @@ pub fn hash_all(e: &Env) {
     asteria_framework_server::hash_pending(&e.lib, &e.cache, &AtomicBool::new(false)).unwrap();
 }
 
-/// Whether `<tool> --version` runs; prints why a test is skipped when it does not.
+/// Whether `<tool> -version` (ffmpeg) or `<tool> --version` (others) runs; prints why a
+/// test is skipped when it does not. ffmpeg rejects `--version`.
 pub fn have_tool(tool: &str) -> bool {
+    let flag = if tool == "ffmpeg" {
+        "-version"
+    } else {
+        "--version"
+    };
     let ok = std::process::Command::new(tool)
-        .arg("--version")
+        .arg(flag)
         .output()
         .is_ok_and(|o| o.status.success());
     if !ok {

@@ -296,16 +296,180 @@ async fn ffmpeg_refuses_concat_scripts() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("secret.txt");
-    std::fs::write(&target, "x").unwrap();
+    // A real, renderable video next to the script: without the whitelists ffmpeg would
+    // follow the script to it and succeed. Intra-only MJPEG, because the concat demuxer
+    // cannot seek (`-ss`) into an H.264 file with B-frames, which would fail regardless.
+    let real = dir.path().join("real.mp4");
+    let st = std::process::Command::new("ffmpeg")
+        .args([
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=10:duration=2",
+            "-c:v",
+            "mjpeg",
+            "-y",
+        ])
+        .arg(&real)
+        .status()
+        .unwrap();
+    assert!(st.success());
     let evil = dir.path().join("evil.mkv");
-    std::fs::write(
-        &evil,
-        format!("ffconcat version 1.0\nfile '{}'\n", target.display()),
-    )
-    .unwrap();
+    std::fs::write(&evil, "ffconcat version 1.0\nfile 'real.mp4'\n").unwrap();
     let p = Processor::new(dir.path().join("thumbs"), 1, Duration::from_secs(30));
     let r = p.render(&evil, MediaKind::Video, HASH, Preset::Thumb).await;
     assert!(matches!(r, Err(ProcessError::Unprocessable(_))), "{r:?}");
     assert!(leftovers(&dir.path().join("thumbs")).is_empty());
+    // The real video itself renders, so the failure above is the script being refused.
+    p.render(&real, MediaKind::Video, "blake3:ee99", Preset::Thumb)
+        .await
+        .unwrap();
+}
+
+/// Hashes `blake3:<n as 16 hex digits>`, distinct per `n`.
+fn nth_hash(n: usize) -> String {
+    format!("blake3:{n:016x}")
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failure_with_no_waiters_is_still_recorded() {
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let fail = script(
+        dir.path(),
+        "slowfail.sh",
+        "sleep 1\necho 'not an image' >&2\nexit 1",
+    );
+    let p = Processor::with_tools(
+        dir.path().join("thumbs"),
+        1,
+        Duration::from_secs(30),
+        &fail,
+        "ffmpeg",
+    );
+    let marks: Arc<Mutex<Vec<(String, Preset, String)>>> = Arc::default();
+    let m = marks.clone();
+    p.set_unprocessable_hook(move |hash, preset, reason| {
+        m.lock()
+            .unwrap()
+            .push((hash.to_string(), preset, reason.to_string()))
+    });
+    let early = tokio::time::timeout(
+        Duration::from_millis(200),
+        p.render(&red(), MediaKind::Image, HASH, Preset::Thumb),
+    )
+    .await;
+    assert!(early.is_err(), "the request was dropped mid-render");
+    for _ in 0..100 {
+        if !marks.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let marks = marks.lock().unwrap();
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    assert_eq!((marks[0].0.as_str(), marks[0].1), (HASH, Preset::Thumb));
+    assert!(marks[0].2.contains("not an image"), "{:?}", marks[0].2);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn abandoned_queued_render_never_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("invocations");
+    // Logs each run, then writes a fake WebP to the `-o` argument after a delay.
+    let fake = script(
+        dir.path(),
+        "slow.sh",
+        &format!(
+            "echo run >> '{}'\nsleep 1\nout=${{7%\\[*}}\nprintf 'RIFF0000WEBP' > \"$out\"",
+            log.display()
+        ),
+    );
+    let p = std::sync::Arc::new(Processor::with_tools(
+        dir.path().join("thumbs"),
+        1,
+        Duration::from_secs(30),
+        &fake,
+        "ffmpeg",
+    ));
+    let src = red();
+    // The first render holds the only permit.
+    let first = {
+        let (p, src) = (p.clone(), src.clone());
+        tokio::spawn(async move {
+            p.render(&src, MediaKind::Image, &nth_hash(1), Preset::Thumb)
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The second waits for the permit, and its only request goes away.
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(200),
+        p.render(&src, MediaKind::Image, &nth_hash(2), Preset::Thumb),
+    )
+    .await;
+    assert!(dropped.is_err());
+    first.await.unwrap().unwrap();
+    // Give the abandoned render the chance to (wrongly) run.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(p.renders_started(), 1);
+    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+    assert!(!p.thumb_path(&nth_hash(2), Preset::Thumb).unwrap().exists());
+    assert_eq!(p.renders_queued(), 0);
+    // A later request for it renders normally.
+    p.render(&src, MediaKind::Image, &nth_hash(2), Preset::Thumb)
+        .await
+        .unwrap();
+    assert_eq!(p.renders_started(), 2);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn render_queue_is_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let hang = script(dir.path(), "hang.sh", "exec sleep 30");
+    let p = std::sync::Arc::new(Processor::with_tools(
+        dir.path().join("thumbs"),
+        1,
+        Duration::from_secs(60),
+        &hang,
+        "ffmpeg",
+    ));
+    let limit = p.queue_limit();
+    assert_eq!(limit, 32);
+    let mut waiters = Vec::new();
+    for n in 0..limit {
+        let p = p.clone();
+        waiters.push(tokio::spawn(async move {
+            p.render(&red(), MediaKind::Image, &nth_hash(n), Preset::Thumb)
+                .await
+        }));
+    }
+    for _ in 0..100 {
+        if p.renders_queued() == limit {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(p.renders_queued(), limit);
+    let r = p
+        .render(&red(), MediaKind::Image, &nth_hash(limit), Preset::Thumb)
+        .await;
+    assert_eq!(r, Err(ProcessError::Busy));
+    // Joining a render that is already queued is still allowed.
+    let joined = tokio::time::timeout(
+        Duration::from_millis(100),
+        p.render(&red(), MediaKind::Image, &nth_hash(3), Preset::Thumb),
+    )
+    .await;
+    assert!(joined.is_err(), "it waits for the queued render");
+    assert_eq!(p.renders_queued(), limit);
+    for w in waiters {
+        w.abort();
+    }
 }

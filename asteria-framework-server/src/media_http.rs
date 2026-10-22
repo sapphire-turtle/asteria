@@ -16,7 +16,8 @@ use crate::process::{Preset, ProcessError};
 use crate::scan::mtime_ns;
 use crate::state::AppState;
 
-/// 503 telling the client to come back shortly (the content hash is not ready).
+/// 503 telling the client to come back shortly (the content hash is not ready, a tool is
+/// missing, or the render queue is full).
 fn not_ready() -> Response {
     let mut resp = StatusCode::SERVICE_UNAVAILABLE.into_response();
     resp.headers_mut()
@@ -135,18 +136,9 @@ async fn thumbnail(
     }
     match processor.render(&abs, rec.kind, &hash, preset).await {
         Ok(path) => serve_thumb(path, req).await,
-        Err(ProcessError::Unprocessable(reason)) => {
-            let cache = state.cache().clone();
-            let p = preset.name();
-            let marked =
-                tokio::task::spawn_blocking(move || cache.mark_unprocessable(&hash, p, &reason))
-                    .await;
-            if !matches!(marked, Ok(Ok(()))) {
-                tracing::error!("could not record an unprocessable thumbnail");
-            }
-            StatusCode::UNPROCESSABLE_ENTITY.into_response()
-        }
-        Err(ProcessError::ToolMissing(_)) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        // The render task already recorded it (see `AppState::new`).
+        Err(ProcessError::Unprocessable(_)) => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        Err(ProcessError::ToolMissing(_) | ProcessError::Busy) => not_ready(),
         Err(ProcessError::Io(e)) => {
             tracing::error!("thumbnail rendering failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()

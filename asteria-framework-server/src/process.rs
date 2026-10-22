@@ -2,13 +2,16 @@
 //!
 //! Renders are limited to `max_jobs` at a time, bounded by a timeout (the child is killed),
 //! and shared: concurrent requests for the same `(hash, preset)` wait for one render.
+//! At most `max_jobs * 32` renders are queued or running; beyond that a request gets
+//! [`ProcessError::Busy`]. A queued render whose requests have all gone away is dropped
+//! before it starts its tool.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use asteria_framework::MediaKind;
@@ -20,6 +23,9 @@ use tokio::sync::{Semaphore, watch};
 pub const VIPSTHUMBNAIL_ENV: &str = "ASTERIA_VIPSTHUMBNAIL";
 /// Environment variable naming the `ffmpeg` executable.
 pub const FFMPEG_ENV: &str = "ASTERIA_FFMPEG";
+
+/// Queued or running renders allowed per render slot.
+const QUEUE_PER_JOB: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Preset {
@@ -63,10 +69,17 @@ pub enum ProcessError {
     ToolMissing(&'static str),
     #[error("i/o error: {0}")]
     Io(String),
+    /// Too many renders are queued; try again shortly.
+    #[error("too many renders are queued")]
+    Busy,
 }
 
 type Outcome = Result<PathBuf, ProcessError>;
-type Pending = watch::Receiver<Option<Outcome>>;
+/// The sending side of one render's result; waiters `subscribe` to it, so its
+/// `receiver_count` is the number of requests still waiting.
+type Pending = Arc<watch::Sender<Option<Outcome>>>;
+/// Called with `(hash, preset, reason)` when a render fails as unprocessable.
+type Hook = Box<dyn Fn(&str, Preset, &str) + Send + Sync>;
 
 /// Renders thumbnails. Cheap to share behind an `Arc`; renders run detached from the
 /// requests that asked for them, so a dropped request neither kills nor leaks a render.
@@ -79,10 +92,13 @@ struct Inner {
     /// Set when the thumbs directory cannot be used; every render then fails with it.
     config_error: Option<String>,
     permits: Semaphore,
+    queue_limit: usize,
     timeout: Duration,
     vips: OsString,
     ffmpeg: OsString,
+    /// Renders queued or running, by key. Its length is the queue size.
     inflight: Mutex<HashMap<(String, Preset), Pending>>,
+    on_unprocessable: OnceLock<Hook>,
     started: AtomicUsize,
     tmp_counter: AtomicUsize,
 }
@@ -98,15 +114,23 @@ impl Drop for Cleanup {
     }
 }
 
-/// Removes a single-flight entry when dropped, even if the render task panicked.
+/// Removes a single-flight entry when dropped, even if the render task panicked. Only its
+/// own entry: a later render for the same key may have replaced it.
 struct Unregister {
     inner: Arc<Inner>,
     key: (String, Preset),
+    tx: Pending,
 }
 
 impl Drop for Unregister {
     fn drop(&mut self) {
-        self.inner.inflight.lock().unwrap().remove(&self.key);
+        let mut map = self.inner.inflight.lock().unwrap();
+        if map
+            .get(&self.key)
+            .is_some_and(|tx| Arc::ptr_eq(tx, &self.tx))
+        {
+            map.remove(&self.key);
+        }
     }
 }
 
@@ -141,15 +165,18 @@ impl Processor {
         } else {
             None
         };
+        let jobs = max_jobs.max(1);
         Processor {
             inner: Arc::new(Inner {
                 thumbs_dir,
                 config_error,
-                permits: Semaphore::new(max_jobs.max(1)),
+                permits: Semaphore::new(jobs),
+                queue_limit: jobs * QUEUE_PER_JOB,
                 timeout,
                 vips: vipsthumbnail.into(),
                 ffmpeg: ffmpeg.into(),
                 inflight: Mutex::new(HashMap::new()),
+                on_unprocessable: OnceLock::new(),
                 started: AtomicUsize::new(0),
                 tmp_counter: AtomicUsize::new(0),
             }),
@@ -176,6 +203,28 @@ impl Processor {
     }
 
     /// How many renders actually ran a tool (not counting cache hits or shared waits).
+    /// Sets what records an unprocessable result. It runs in the render task (on a blocking
+    /// thread), before the result reaches any waiter, so it runs even when every request has
+    /// gone away. Only the first call has an effect.
+    pub fn set_unprocessable_hook(
+        &self,
+        hook: impl Fn(&str, Preset, &str) + Send + Sync + 'static,
+    ) {
+        if self.inner.on_unprocessable.set(Box::new(hook)).is_err() {
+            tracing::warn!("unprocessable hook already set; ignoring another");
+        }
+    }
+
+    /// How many renders may be queued or running at once.
+    pub fn queue_limit(&self) -> usize {
+        self.inner.queue_limit
+    }
+
+    /// How many renders are queued or running.
+    pub fn renders_queued(&self) -> usize {
+        self.inner.inflight.lock().unwrap().len()
+    }
+
     pub fn renders_started(&self) -> usize {
         self.inner.started.load(Ordering::SeqCst)
     }
@@ -197,7 +246,8 @@ impl Processor {
     }
 
     /// Returns the path of the rendered thumbnail, rendering it first if needed.
-    /// `src` must be absolute. The render keeps running if this future is dropped.
+    /// `src` must be absolute. A render that has started keeps running if this future is
+    /// dropped; one still waiting for a slot is dropped once nobody waits for it.
     pub async fn render(
         &self,
         src: &Path,
@@ -221,21 +271,22 @@ impl Processor {
         let mut pending = {
             let mut map = self.inner.inflight.lock().unwrap();
             match map.get(&key) {
-                Some(rx) => rx.clone(),
+                Some(tx) => tx.subscribe(),
                 None => {
+                    if map.len() >= self.inner.queue_limit {
+                        return Err(ProcessError::Busy);
+                    }
                     let (tx, rx) = watch::channel(None);
-                    map.insert(key.clone(), rx.clone());
-                    let inner = self.inner.clone();
-                    let src = src.to_path_buf();
-                    tokio::spawn(async move {
-                        let _unregister = Unregister {
-                            inner: inner.clone(),
-                            key,
-                        };
-                        let result = inner.render_once(&src, kind, &out, preset).await;
-                        // Nobody may be listening any more; that is fine.
-                        let _ = tx.send(Some(result));
-                    });
+                    let tx = Arc::new(tx);
+                    map.insert(key.clone(), tx.clone());
+                    tokio::spawn(render_task(
+                        self.inner.clone(),
+                        key,
+                        tx,
+                        src.to_path_buf(),
+                        kind,
+                        out,
+                    ));
                     rx
                 }
             }
@@ -250,6 +301,59 @@ impl Processor {
             ))
         })
     }
+}
+
+/// One detached render: waits for a slot, gives up if nobody waits any more, renders,
+/// records an unprocessable result, then hands the result to the waiters.
+async fn render_task(
+    inner: Arc<Inner>,
+    key: (String, Preset),
+    tx: Pending,
+    src: PathBuf,
+    kind: MediaKind,
+    out: PathBuf,
+) {
+    let _unregister = Unregister {
+        inner: inner.clone(),
+        key: key.clone(),
+        tx: tx.clone(),
+    };
+    let permit = match inner.permits.acquire().await {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = tx.send(Some(Err(ProcessError::Io(e.to_string()))));
+            return;
+        }
+    };
+    {
+        // Waiters subscribe under this lock, so none can join after the check.
+        let mut map = inner.inflight.lock().unwrap();
+        if tx.receiver_count() == 0 {
+            if map.get(&key).is_some_and(|t| Arc::ptr_eq(t, &tx)) {
+                map.remove(&key);
+            }
+            tracing::debug!("dropping a queued render nobody waits for");
+            return;
+        }
+    }
+    let result = inner.render_once(&src, kind, &out, key.1).await;
+    drop(permit);
+    if let Err(ProcessError::Unprocessable(reason)) = &result
+        && inner.on_unprocessable.get().is_some()
+    {
+        let (inner, hash, preset, reason) = (inner.clone(), key.0.clone(), key.1, reason.clone());
+        let recorded = tokio::task::spawn_blocking(move || {
+            if let Some(hook) = inner.on_unprocessable.get() {
+                hook(&hash, preset, &reason);
+            }
+        })
+        .await;
+        if recorded.is_err() {
+            tracing::error!("recording an unprocessable thumbnail panicked");
+        }
+    }
+    // Nobody may be listening any more; that is fine.
+    let _ = tx.send(Some(result));
 }
 
 /// `try_exists`, with an error being an `Io` failure (logged) instead of "absent".
@@ -291,12 +395,7 @@ impl Inner {
         out: &Path,
         preset: Preset,
     ) -> Result<PathBuf, ProcessError> {
-        let _permit = self
-            .permits
-            .acquire()
-            .await
-            .map_err(|e| ProcessError::Io(e.to_string()))?;
-        // A render that finished while this one waited for a permit.
+        // The caller holds a permit. A render that finished while this one waited for it.
         if exists(out).await? {
             return Ok(out.to_path_buf());
         }

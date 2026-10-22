@@ -1,6 +1,5 @@
 mod common;
 
-use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -181,12 +180,12 @@ async fn thumb_is_webp_and_cached() {
         .thumb_path(&hash, asteria_framework_server::Preset::Thumb)
         .unwrap();
     assert!(path.starts_with(e._dir.path().join("cache/thumbs/thumb")));
-    let m1 = std::fs::metadata(&path).unwrap().mtime_nsec();
+    let m1 = std::fs::metadata(&path).unwrap().modified().unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     let (s, _, b2) = get(&e.app, Some(&e.owner_token), &uri, None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(b, b2);
-    assert_eq!(std::fs::metadata(&path).unwrap().mtime_nsec(), m1);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), m1);
     assert_eq!(e.processor.renders_started(), 1);
 }
 
@@ -224,8 +223,9 @@ async fn missing_tool_is_503_and_not_marked_unprocessable() {
     hash_all(&e);
     let id = item_id(&e, "a.jpg");
     let uri = format!("/media/{id}/thumb");
-    let (s, _, _) = get(&e.app, Some(&e.owner_token), &uri, None).await;
+    let (s, h, _) = get(&e.app, Some(&e.owner_token), &uri, None).await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(h["retry-after"], "2");
     let (s, _, _) = get(&e.app, Some(&e.owner_token), &uri, None).await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(e.processor.renders_started(), 2);
@@ -299,4 +299,98 @@ async fn video_thumb() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(h["content-type"], "image/webp");
     assert!(webp(&b));
+}
+
+#[cfg(unix)]
+fn script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failure_after_the_request_left_is_still_marked_unprocessable() {
+    let tools = tempfile::tempdir().unwrap();
+    let fail = script(
+        tools.path(),
+        "slowfail.sh",
+        "sleep 1\necho 'bad data' >&2\nexit 1",
+    );
+    let e = env_with(|t| Processor::with_tools(t, 1, Duration::from_secs(30), &fail, "ffmpeg"));
+    hash_all(&e);
+    let id = item_id(&e, "a.jpg");
+    let uri = format!("/media/{id}/thumb");
+    let early = tokio::time::timeout(
+        Duration::from_millis(200),
+        get(&e.app, Some(&e.owner_token), &uri, None),
+    )
+    .await;
+    assert!(early.is_err(), "the request was dropped mid-render");
+    let hash = e
+        .cache
+        .get_by_path("a.jpg")
+        .unwrap()
+        .unwrap()
+        .hash
+        .unwrap()
+        .hash;
+    let mut marked = None;
+    for _ in 0..100 {
+        marked = e.cache.unprocessable(&hash, "thumb").unwrap();
+        if marked.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(marked.is_some(), "the failure was recorded");
+    let (s, _, _) = get(&e.app, Some(&e.owner_token), &uri, None).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(e.processor.renders_started(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn full_render_queue_is_503_with_retry_after() {
+    let tools = tempfile::tempdir().unwrap();
+    let hang = script(tools.path(), "hang.sh", "exec sleep 30");
+    let e = env_with(|t| Processor::with_tools(t, 1, Duration::from_secs(60), &hang, "ffmpeg"));
+    hash_all(&e);
+    let limit = e.processor.queue_limit();
+    let src = e.root.join("sub/b.jpg");
+    let mut waiters = Vec::new();
+    for n in 0..limit {
+        let (p, src) = (e.processor.clone(), src.clone());
+        waiters.push(tokio::spawn(async move {
+            p.render(
+                &src,
+                asteria_framework::MediaKind::Image,
+                &format!("blake3:{n:016x}"),
+                asteria_framework_server::Preset::Thumb,
+            )
+            .await
+        }));
+    }
+    for _ in 0..100 {
+        if e.processor.renders_queued() == limit {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(e.processor.renders_queued(), limit);
+    let id = item_id(&e, "a.jpg");
+    let (s, h, _) = get(
+        &e.app,
+        Some(&e.owner_token),
+        &format!("/media/{id}/thumb"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(h["retry-after"], "2");
+    for w in waiters {
+        w.abort();
+    }
 }

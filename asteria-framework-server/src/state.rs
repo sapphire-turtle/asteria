@@ -29,6 +29,7 @@ pub struct AppState {
 
 impl AppState {
     /// `scanning` is set by whoever runs scans; `rescan` asks that task for another scan.
+    /// Also makes `processor` record unprocessable renders in `cache`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         library: Arc<Library>,
@@ -42,6 +43,12 @@ impl AppState {
         filter: Arc<dyn MediaFilter>,
         processor: Arc<Processor>,
     ) -> AppState {
+        let marks = cache.clone();
+        processor.set_unprocessable_hook(move |hash, preset, reason| {
+            if let Err(e) = marks.mark_unprocessable(hash, preset.name(), reason) {
+                tracing::error!("could not record an unprocessable thumbnail: {e}");
+            }
+        });
         AppState {
             library,
             cache,
