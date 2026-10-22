@@ -1,0 +1,26 @@
+[package]
+name = "asteria-gallery-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+asteria-framework = { path = "../asteria-framework" }
+asteria-framework-api = { path = "../asteria-framework-api" }
+asteria-framework-server = { path = "../asteria-framework-server" }
+asteria-gallery-api = { path = "../asteria-gallery-api" }
+clap.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "net"] }
+tokio-util.workspace = true
+axum.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+reqwest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+asteria-framework = { path = "../asteria-framework" }
+grain-id.workspace = true

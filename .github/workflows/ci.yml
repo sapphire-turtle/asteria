@@ -6,3 +6,5 @@ on:
 jobs:
   ci:
     uses: sapphire-turtle/sapphire-framework/.github/workflows/shared-rust-ci.yml@main
+    with:
+      linux-packages: libvips-tools ffmpeg
