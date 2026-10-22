@@ -95,3 +95,29 @@ fn symlink_survives_and_target_is_replaced() {
     assert_eq!(fs::read(&target).unwrap(), b"new");
     assert!(!tmp_path_for(&target).exists() && !tmp_path_for(&link).exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn cleanup_skips_unreadable_subdir() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::write(locked.join(".hidden.asteria-tmp"), b"x").unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let other = dir.path().join("other");
+    fs::create_dir(&other).unwrap();
+    fs::write(other.join(".x.asteria-tmp"), b"x").unwrap();
+    let readable = fs::read_dir(&locked).is_ok(); // root ignores modes
+    let result = cleanup_tmp_files(dir.path());
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    let expected = if readable { 2 } else { 1 };
+    assert_eq!(result.unwrap(), expected);
+    assert!(!other.join(".x.asteria-tmp").exists());
+}
+
+#[test]
+fn cleanup_unreadable_root_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(cleanup_tmp_files(&dir.path().join("missing")).is_err());
+}

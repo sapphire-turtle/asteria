@@ -2,7 +2,28 @@
 
 use std::fmt;
 
+mod media;
+mod rpc;
+
+pub use media::*;
+pub use rpc::*;
+
 use serde::{Deserialize, Serialize};
+
+/// `CARGO_PKG_VERSION_MAJOR` as a number. Cargo guarantees it is decimal digits.
+///
+/// An application API crate derives its `APP_API` from its own major version with
+/// `parse_major(env!("CARGO_PKG_VERSION_MAJOR"))`, so the two cannot drift.
+pub const fn parse_major(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut n = 0u32;
+    while i < bytes.len() {
+        n = n * 10 + (bytes[i] - b'0') as u32;
+        i += 1;
+    }
+    n
+}
 
 /// What a client announces about itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -17,6 +38,8 @@ pub struct ServerInfo {
     pub app: String,
     pub app_api: u32,
     pub server_version: String,
+    /// Identifies the server's current library state; changes when it is rebuilt.
+    pub epoch: String,
 }
 
 /// Why a client and server cannot talk to each other.
@@ -77,6 +100,7 @@ mod tests {
             app: app.into(),
             app_api: api,
             server_version: "0.1.0".into(),
+            epoch: "e1".into(),
         }
     }
 
@@ -108,6 +132,20 @@ mod tests {
                 server: "asteria-gallery".into()
             })
         );
+    }
+
+    #[test]
+    fn parse_major_parses_digits() {
+        assert_eq!(parse_major("2"), 2);
+        assert_eq!(parse_major("10"), 10);
+    }
+
+    #[test]
+    fn server_info_wire_format() {
+        let s = server("asteria-gallery", 2);
+        let json = r#"{"app":"asteria-gallery","app_api":2,"server_version":"0.1.0","epoch":"e1"}"#;
+        assert_eq!(serde_json::to_string(&s).unwrap(), json);
+        assert_eq!(serde_json::from_str::<ServerInfo>(json).unwrap(), s);
     }
 
     #[test]

@@ -1,0 +1,52 @@
+//! The axum router and its bearer-token authentication.
+
+use axum::Router;
+use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::http::{StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+
+use crate::media_http::media;
+use crate::rpc::rpc;
+use crate::state::AppState;
+
+/// Largest accepted request body. Bigger bodies get 413 before reaching `/rpc`: the only
+/// non-200 answer from `/rpc` besides the 401 of the auth layer.
+const BODY_LIMIT: usize = 64 * 1024;
+
+/// Builds the app. The auth layer wraps every route added before it, so routes added later
+/// must be registered before the `layer` call below.
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/rpc", post(rpc))
+        .route("/media/{id}/{what}", get(media))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT))
+        .layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        .with_state(state)
+}
+
+/// Requires `Authorization: Bearer <token>`; on success stores the `UserId` in the request
+/// extensions. Anything else is a 401 with an empty body. Neither the header nor the token is
+/// ever logged.
+async fn authenticate(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
+    let user = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(bearer_token)
+        .and_then(|token| state.tokens().verify(token));
+    match user {
+        Some(user) => {
+            req.extensions_mut().insert(user);
+            next.run(req).await
+        }
+        None => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
+
+/// The token of a `Bearer <token>` value; the scheme is case-insensitive (RFC 7235).
+fn bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("Bearer").then_some(token)
+}

@@ -12,7 +12,7 @@ use crate::ids::UserId;
 use crate::journal::{Actor, Journal, JournalEntry, OpId, OpKind};
 use crate::library::Library;
 use crate::paths::{META_DIR, is_sidecar, sidecar_path_for};
-use crate::sidecar::{RatingEntry, Sidecar};
+use crate::sidecar::Sidecar;
 
 /// Rejects absolute paths, anything but plain components (`..`, `.`, prefixes), paths into
 /// the library metadata directory, and sidecar paths.
@@ -135,33 +135,9 @@ impl Library {
         }
         let owner = self.owner();
         self.update_sidecar(media_rel, actor, |sc| {
-            if user == owner {
-                apply(&mut sc.rating, value, at);
-            } else {
-                let mut slot = sc.user_ratings.remove(&user);
-                apply(&mut slot, value, at);
-                if let Some(e) = slot {
-                    sc.user_ratings.insert(user, e);
-                }
-            }
+            // The value was range-checked above, so this cannot fail.
+            let _ = sc.apply_rating(owner, user, value, at);
         })?;
         Ok(())
     }
-}
-
-/// Whether `existing` beats a new `(value, at)`: newer time wins, then the greater value.
-fn existing_wins(existing: &RatingEntry, value: i8, at: DateTime<Utc>) -> bool {
-    existing
-        .modified
-        .is_some_and(|m| m > at || (m == at && existing.value >= value))
-}
-
-fn apply(slot: &mut Option<RatingEntry>, value: i8, at: DateTime<Utc>) {
-    if slot.as_ref().is_some_and(|e| existing_wins(e, value, at)) {
-        return;
-    }
-    *slot = Some(RatingEntry {
-        value,
-        modified: Some(at),
-    });
 }

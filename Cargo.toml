@@ -5,6 +5,8 @@ members = [
     "asteria-gallery-api",
     "asteria-player-api",
     "asteria-framework",
+    "asteria-framework-server",
+    "asteria-gallery-server",
 ]
 
 [workspace.package]
@@ -23,7 +25,22 @@ xml-rs = "0.8"
 grain-id = { version = "0.15", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+redb = "4"
 tempfile = "3"
 lofty = "0.22"
 tracing = "0.1"
+getrandom = "0.4"
+base64 = "0.23"
+dirs = "7"
+walkdir = "2"
+tokio = { version = "1", features = ["rt", "sync", "process", "time", "io-util", "macros"] }
+tokio-util = "0.7"
+notify = "8"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+tower = { version = "0.5", features = ["util"] }
+tracing-subscriber = "0.3"
+http-body-util = "0.1"
+tower-http = { version = "0.7", default-features = false, features = ["fs"] }
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json"] }

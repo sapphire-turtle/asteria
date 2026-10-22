@@ -26,7 +26,7 @@
 - 認証トークンはライブラリの中に置かない。サーバーの設定ファイルには、トークンの BLAKE3 ハッシュだけを書く（`blake3:<hex>`）。トークンそのものはログにも設定にも残さない。
 - キャッシュの場所は `<dirs::cache_dir()>/asteria-gallery/<ライブラリID>/`。中身は `cache.redb` と `thumbs/<プリセット>/<hex 先頭2文字>/<hex>.webp`。
 - 既定の待ち受けアドレスは `127.0.0.1:7810`（player は計画5で 7820 を使う）。
-- アイテム ID は `blake3("asteria-item-v1\0" + ライブラリ相対パス(UTF-8, 区切り "/"))` の先頭12バイトを小文字 hex にした24文字。パスから決まるので、キャッシュを作り直しても変わらない。
+- アイテム ID は UUID v5。名前空間はライブラリ ID（`library.toml` の UUID）、名前はライブラリ相対パス（UTF-8、区切り "/"）。表記はハイフン付き小文字の36文字。パスから決まるのでキャッシュを作り直しても変わらず、ライブラリが違えば同じパスでも別の ID になる。どの言語でも標準的な UUID ライブラリで同じ値を計算できる。
 - API に出すパスは、ライブラリ相対で区切りは `/`。UTF-8 にできない名前のファイルはスキャン対象外にし、警告を出す。
 - gallery が扱うアイテムは画像と動画だけ。サイドカー（`.xmp`）、`.asteria/` の中、`.` で始まるファイルとディレクトリは対象外。
 - 外部コマンド（vips、ffmpeg）を使うテストは、コマンドが見つからないときは理由を表示してスキップする。CI の Linux ジョブでは `linux-packages` でこれらを入れ、実際に実行する。
@@ -94,7 +94,7 @@
   - `RpcResponse<R> { jsonrpc, id, #[serde(flatten)] outcome: RpcOutcome<R> }`、`enum RpcOutcome<R> { #[serde(rename="result")] Ok(R), #[serde(rename="error")] Err(RpcError) }`
   - `RpcError { code: i32, message: String }` と、エラーコードの定数 `codes::{PARSE_ERROR=-32700, INVALID_REQUEST=-32600, METHOD_NOT_FOUND=-32601, INVALID_PARAMS=-32602, INTERNAL_ERROR=-32603, NOT_FOUND=-32001, INVALID_PATH=-32002, READ_ONLY=-32003, BUSY=-32004, API_MISMATCH=-32005}`
   - メソッド名の定数：`SERVER_INFO="server.info"`、`LIBRARY_INFO="library.info"`、`LIBRARY_RESCAN="library.rescan"`、`FOLDER_LIST="folder.list"`、`MEDIA_GET="media.get"`、`MEDIA_UPDATE="media.update"`
-  - `pub struct ItemId(pub String)`（serde transparent）
+  - `pub struct ItemId(pub String)`（serde transparent。中身は UUID v5 の文字列。api crate に uuid の依存を増やさないため String で持つ）
   - `MediaKind`（Task 1 で定義済み。そのまま使う）
   - `MediaItem { id: ItemId, path: String, kind: MediaKind, size: u64, modified: String /* RFC 3339 UTC */, rating: Option<i8> /* リクエストしたユーザー自身の評価 */, subjects: Vec<String>, hierarchical_subjects: Vec<String>, description: Option<String>, label: Option<String>, content_hash: Option<String>, read_only_reason: Option<String> }`
   - `LibraryInfo { library_id: String, owner: String, epoch: String, item_count: u64, scanning: bool }`
@@ -176,7 +176,7 @@
   - `pub struct ItemRecord { pub id: ItemId, pub path: String, pub kind: MediaKind, pub size: u64, pub mtime_ns: i128, pub hash: Option<StoredHash>, pub sidecar: SidecarSnapshot, pub sidecar_error: Option<String> }`（serde。値は serde_json のバイト列で保存する）
   - `pub struct StoredHash { pub hash: String, pub scope: String, pub size: u64, pub mtime_ns: i128 }`：(size, mtime) が今のファイルと一致するときだけ有効
   - `pub struct SidecarSnapshot { pub owner_rating: Option<i8>, pub user_ratings: BTreeMap<String, i8>, pub subjects: Vec<String>, pub hierarchical_subjects: Vec<String>, pub description: Option<String>, pub label: Option<String>, pub has_sidecar: bool }`。`From<&Sidecar>` を実装する
-  - `pub fn item_id_for(rel: &str) -> ItemId`（Global Constraints の規則で計算する）
+  - `pub fn item_id_for(library: &LibraryId, rel: &str) -> ItemId`：`Uuid::new_v5(&library.0, rel.as_bytes())` をハイフン付き小文字にしたもの（uuid crate の `v5` feature を使う）
   - `pub struct Cache`
     - `Cache::open(dir: &Path, library_id: &LibraryId) -> Result<Cache, ServerError>`：開けない、`meta.schema != CACHE_SCHEMA`、または `meta.library_id` が違う場合は、ファイルを消して作り直す。作り直すたびに新しい `epoch`（GrainId）を書く
     - `epoch(&self) -> String`
@@ -189,7 +189,11 @@
 - [ ] **Step 1: 失敗するテストを書く**
 
 ```rust
-#[test] fn item_id_is_stable_and_24_hex() { /* 同じパスは同じ ID、別のパスは別の ID。長さ 24 で [0-9a-f] だけ */ }
+#[test] fn item_id_is_uuid_v5_of_library_and_path() {
+    // 同じ (ライブラリ, パス) は同じ ID。パスが違えば別の ID。ライブラリが違えば同じパスでも別の ID
+    // Uuid::parse_str で読めて、get_version() == Some(Version::Sha1)
+    // 名前空間 6ba7b810-9dad-11d1-80b4-00c04fd430c8、パス "2025/京都旅行/a.jpg" の値は "b0a2f96c-dcb1-5b0a-b03e-4c229ab92971"（Python の uuid.uuid5 で計算した独立の値）と一致する
+}
 #[test] fn put_get_remove_roundtrip() { /* id でもパスでも引ける。remove のあとは両方 None */ }
 #[test] fn list_folder_pages_and_subfolders() {
     // "a.jpg", "x/b.jpg", "x/c.jpg", "x/y/d.jpg", "z/e.jpg"
@@ -489,3 +493,50 @@
   Run: `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check && cargo deny check`
   Expected: すべて成功
 - [ ] **Step 5: Commit** `feat(gallery-server): init/token/serve CLI and end-to-end test`
+
+## 付録：実装時の変更（レビューによる決定）
+
+各タスクのレビューで決めた、上の手順からの変更点。タスク本文は書き換えていない。詳細は `.superpowers/sdd/2026-10-22-plan2-gallery-server/progress.md` の記録を参照。
+
+- **Task 1**：MP3 の2つ目のフレームの確認を細かく決めた。最初のフレームより短いファイルは Unknown、最初のフレームが丸ごとあって2つ目のヘッダーの前で終わるファイルは MP3 とする。free-format（ビットレート 0）は最初のヘッダーだけで受け付ける。
+- **Task 4**：
+  - キャッシュの読み出し（`get_by_id`、`get_by_path`、`all_paths`、`count`、`list_folder`、`unprocessable`）は `Result` を返す。`list_folder` は復号できないレコードをログに出して飛ばす。
+  - 書き込みは redb の `Durability::None` で行い、`put_many`、`remove_many`、`flush`（Immediate の commit）を足した。スキャンの最後に `flush` する。
+  - 作り直すのは、壊れている・形式が古い・スキーマ不一致・ライブラリ不一致の場合だけ。`DatabaseAlreadyOpen` やその他の I/O エラーはそのまま `ServerError` で返す。
+  - `list_folder` のフォルダ名は名前順。`limit` は 1 以上に丸める。フォルダ引数を検証し、不正なら新しい `ServerError::InvalidPath`。
+- **Task 5**：
+  - 一時ファイルの掃除は `scan()` から外し、`serve` の起動時に一度だけ行う（書き込みキューと競合するため）。
+  - サイズと更新時刻が変わっていなければ、ファイルを開かずにキャッシュの種類を使う。シンボリックリンクの行き先にも同じパスの規則（`.` で始まる部分がない、サイドカーでない、`.asteria` の外）を当てる。読めないサブツリーと UTF-8 でない名前は警告を出し、報告するパスはライブラリ相対にする。
+- **Task 6**：
+  - 移動の前に、持ち主のいないサイドカーを（ハッシュ、スコープ）でまとめる。同じファイルを2つ以上が取り合えば、すべて曖昧。一致は1つだがそのファイルにすでにサイドカーがある場合は、新しい `RelinkReport.conflicts` に入れる。
+  - 移動の前に移動先のファイルを stat し、保存してあるサイズと更新時刻と違えば衝突として動かさない。
+  - `hash_pending` は `set_hash(path, Option<StoredHash>)` でハッシュの欄だけを書く（レコードのサイズと更新時刻が一致するときだけ）。
+  - 移動は `hard_link` と削除で行い、`AlreadyExists` 以外のエラーでは確認してから `rename` に切り替える（vfat や exFAT が EPERM を返すため）。link と削除の間で落ちた残りは完了させてジャーナルに記録する。
+- **Task 7**：
+  - framework に `Sidecar::apply_rating` を足した（LWW、同時刻の規則を含む）。Writer は評価とほかの欄を1つの `update_sidecar` のクロージャで書く。書き込みもジャーナルも1回で、ハッシュの再計算もしない。
+  - キャッシュのハッシュを先に設定するのは、今の stat が保存してあるサイズと更新時刻と一致するときだけ。
+  - `spawn_writer` は `(Writer, JoinHandle)` を返す。
+  - サイドカーの `content_hash` をキャッシュに写すことはしない。キャッシュの `StoredHash` を埋めるのは `hash_pending` の計算だけ。
+- **Task 8**：
+  - `AppState::new` で組み立てる。`/rpc` は `DefaultBodyLimit` 64 KiB で、超えると 413（401 以外で唯一の 200 でない応答）。
+  - `sidecar_error` には壊れている理由だけを入れ、READ_ONLY と BUSY のメッセージはパスを含まない固定文にする（詳細はログ）。
+  - `Bearer` の綴りは大文字・小文字を問わない。トークンがログに出ないことのテストは、独立したテストバイナリでグローバルな subscriber を使って確かめる。
+- **Task 9**：
+  - 原本は、ファイルがあれば（スキャンの後に変わっていても）いつも返す。サムネイルは、ファイルがスキャンの後に変わっていれば 503 を返し、再スキャンを依頼する。
+  - vips には一時ディレクトリに置いた安全な名前のコピー（シンボリックリンク）を渡す。ffmpeg には `-protocol_whitelist file` と `-format_whitelist` を付ける。
+  - 生成はリクエストから切り離して動かし、一時ファイルは drop で消す。起動時に `Processor::sweep_tmp` で `.tmp-*` と `.src-*` を掃除する。
+  - 原本とサムネイルに `X-Content-Type-Options: nosniff` を付ける。vips のサイズ指定は縮小だけの `NxN>`。
+  - 外部ツールがないこと（ToolMissing）は処理不可にしない。書けないことによる失敗は Io で、処理不可にしない。
+- **Task 10**：
+  - 停止用の `CancellationToken` と、テスト用のスキャン回数カウンター（`passes`）を `ScanLoop` に持たせた。
+  - notify のイベントは容量 1 のチャネルに `try_send` で渡してまとめる。Rescan フラグ付きやパスのないイベント（キューのあふれ）は関係ありとみなす。
+- **Task 11**：
+  - `init` は既存の設定を `--force` なしでは上書きしない。`init --listen` と `serve --listen` を足した。Ctrl-C に加えて SIGTERM（Unix）でも止まる。どの止まり方でも、書き込みキューを空にしてキャッシュを flush する。
+  - e2e は Linux だけ（ほかは理由を出すだけのテスト）。
+- **最終レビュー**：
+  - `serve` は何よりも先に `.asteria/server.lock` の排他ロックを取る。2つ目のサーバーは何も触らずにエラーで終わる。
+  - 生成待ちの列に上限を設け、誰も待っていない生成は捨て、処理不可は生成側で記録する。
+  - リクエストのたびに、メディアのパスを解決してライブラリの中にあることを確かめる。
+  - スキャンの前に `library.toml` の ID を確かめ、合わなければ何も消さずに中止する。
+  - 停止時の graceful shutdown は最大 10 秒。過ぎたら接続を切り、書き込みキューを閉じて空にする。
+  - 生成物のキーと、ハッシュの計算をスキャンから切り離すことは Plan 3 の前に決める（設計書 §4.2、§4.5）。
