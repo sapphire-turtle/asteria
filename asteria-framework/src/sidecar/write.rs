@@ -83,8 +83,9 @@ fn dirty_props(sc: &Sidecar, orig: Option<&Sidecar>) -> Vec<Prop> {
     let value = |s: &Sidecar| s.rating.as_ref().map(|r| r.value);
     let modified = |s: &Sidecar| s.rating.as_ref().and_then(|r| r.modified);
     add(value(sc) != value(o), &[(ns::XMP, "Rating")]);
+    // A stray RatingModified attaches to whatever rating exists, so it is rewritten with Rating.
     add(
-        modified(sc) != modified(o),
+        value(sc) != value(o) || modified(sc) != modified(o),
         &[(ns::ASTERIA, "RatingModified")],
     );
     add(sc.label != o.label, &[(ns::XMP, "Label")]);
@@ -132,6 +133,11 @@ fn verify_output(sc: &Sidecar, bytes: &[u8]) -> std::result::Result<(), String> 
     if let Some(d) = sc.description.as_deref().and_then(clean) {
         check("description", Some(d) == back.description);
     }
+    if clean_opt(&sc.description).is_none()
+        && let Ok(root) = xml::parse(bytes)
+    {
+        check("description (stray x-default)", !has_x_default(&root));
+    }
     if bad.is_empty() {
         Ok(())
     } else {
@@ -140,6 +146,19 @@ fn verify_output(sc: &Sidecar, bytes: &[u8]) -> std::result::Result<(), String> 
             bad.join(", ")
         ))
     }
+}
+
+fn clean_opt(s: &Option<String>) -> Option<&str> {
+    s.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn has_x_default(e: &Element) -> bool {
+    (e.is(ns::DC, "description")
+        && e.child_elements().any(|c| {
+            c.child_elements()
+                .any(|li| li.attr(ns::XML, "lang") == Some("x-default"))
+        }))
+        || e.child_elements().any(has_x_default)
 }
 
 fn is_dirty(dirty: &[Prop], ns: Option<&str>, local: &str) -> bool {
@@ -576,5 +595,16 @@ mod tests {
 
         assert!(verify_output(&sc, &good[..good.len() / 2]).is_err());
         assert!(verify_output(&sc, b"<x:unbound/>").is_err());
+    }
+
+    #[test]
+    fn verify_rejects_x_default_when_model_has_no_description() {
+        let mut with = Sidecar::new();
+        with.description = Some("A cat".into());
+        let bytes = with.to_bytes();
+        let without = Sidecar::new();
+        let err = verify_output(&without, &bytes).unwrap_err();
+        assert!(err.contains("x-default"), "{err}");
+        assert!(verify_output(&with, &bytes).is_ok());
     }
 }

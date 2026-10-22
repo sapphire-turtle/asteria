@@ -318,8 +318,53 @@ fn moved_li_keeps_default_namespace_of_unprefixed_children() {
     );
     let (out, _) = moved(&src);
     find(&out, "<note/>");
-    find(&out, "xmlns=\"urn:d\"");
+    // the moved li itself carries the declaration (the second Description's is not enough)
+    find(&out, "<rdf:li xmlns=\"urn:d\"");
     // the namespace of <note/> is intact: re-read and re-write keeps the declaration
     let again = Sidecar::parse(out.as_bytes()).unwrap();
     find(&text(&again), "xmlns=\"urn:d\"");
+}
+
+#[test]
+fn stray_rating_modified_is_replaced_when_rating_appears() {
+    let src = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:asteria="https://sapphire-turtle.github.io/ns/asteria/1.0/" asteria:RatingModified="2020-01-01T00:00:00Z"/></rdf:RDF></x:xmpmeta>"#;
+    let mut sc = Sidecar::parse(src.as_bytes()).unwrap();
+    assert!(sc.rating.is_none());
+    sc.rating = Some(RatingEntry {
+        value: 3,
+        modified: None,
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("a.jpg.xmp");
+    sc.write(&p).unwrap();
+    let back = Sidecar::read(&p).unwrap().unwrap();
+    assert_eq!(
+        back.rating,
+        Some(RatingEntry {
+            value: 3,
+            modified: None
+        })
+    );
+    assert!(!std::fs::read_to_string(&p).unwrap().contains("2020-01-01"));
+}
+
+#[test]
+fn write_refuses_unsafe_output_and_leaves_target_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("a.jpg.xmp");
+    let mut good = Sidecar::new();
+    good.label = Some("Red".into());
+    good.write(&p).unwrap();
+    let before = std::fs::read(&p).unwrap();
+
+    // A control character is not legal XML, so the output would not parse back.
+    let mut bad = Sidecar::new();
+    bad.label = Some("a\u{1}b".into());
+    let err = bad.write(&p).unwrap_err();
+    assert!(
+        matches!(err, asteria_framework::Error::UnsafeSidecarWrite(_)),
+        "{err:?}"
+    );
+    assert_eq!(std::fs::read(&p).unwrap(), before);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }

@@ -11,6 +11,10 @@
 //! - The XML declaration is normalised to `<?xml version="1.0" encoding="UTF-8"?>`.
 //! - xml-rs writes `xmlns` declarations before other attributes, so attribute order can change on
 //!   the first rewrite of an element that carries declarations.
+//! - An unprefixed no-namespace element moved under a default namespace cannot be undeclared,
+//!   because xml-rs skips `xmlns=""`.
+//! - A binding that `bind_prefixes` adds can be dropped by xml-rs `put_checked` when an outer
+//!   scope binds the same prefix and URI but an intermediate scope shadows it.
 //! - An xpacket wrapper is rewritten with the standard `begin`/`id` and `end="w"`.
 
 use std::borrow::Cow;
