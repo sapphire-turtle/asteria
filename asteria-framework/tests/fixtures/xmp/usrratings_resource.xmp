@@ -1,0 +1,13 @@
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:asteria="https://sapphire-turtle.github.io/ns/asteria/1.0/">
+   <asteria:UserRatings><rdf:Bag>
+    <rdf:li rdf:parseType="Resource">
+     <asteria:User>123abcd</asteria:User>
+     <asteria:Rating>5</asteria:Rating>
+     <asteria:Modified>2026-10-21T20:00:00Z</asteria:Modified>
+    </rdf:li>
+   </rdf:Bag></asteria:UserRatings>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>

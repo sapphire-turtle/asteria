@@ -89,6 +89,7 @@ fn convert_name(n: &xml::name::OwnedName) -> Name {
 /// (including `<?xpacket?>`) are not kept.
 pub(crate) fn parse(bytes: &[u8]) -> Result<Element, String> {
     let config = ParserConfig::new()
+        .allow_multiple_root_elements(false)
         .ignore_comments(false)
         .whitespace_to_characters(true);
     let reader = EventReader::new_with_config(bytes, config);
@@ -204,5 +205,10 @@ mod tests {
         assert!(parse(b"<r><a></r>").is_err());
         assert!(parse(b"<r>").is_err());
         assert!(parse(b"").is_err());
+    }
+
+    #[test]
+    fn second_root_element_is_error() {
+        assert!(parse(b"<a/><b/>").is_err());
     }
 }
