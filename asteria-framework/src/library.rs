@@ -20,6 +20,12 @@ pub struct LibraryConfig {
     pub owner: UserId,
 }
 
+/// Just the `format` field of `library.toml`, read before anything else.
+#[derive(Deserialize)]
+struct FormatOnly {
+    format: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     pub id: UserId,
@@ -88,11 +94,14 @@ impl Library {
             }
             Err(e) => return Err(e.into()),
         };
+        // Check the format before the rest: another format may have different fields.
+        let FormatOnly { format } =
+            toml::from_str(&config_text).map_err(|e| Error::Toml(e.to_string()))?;
+        if format != FORMAT {
+            return Err(Error::UnsupportedFormat(format));
+        }
         let config: LibraryConfig =
             toml::from_str(&config_text).map_err(|e| Error::Toml(e.to_string()))?;
-        if config.format != FORMAT {
-            return Err(Error::UnsupportedFormat(config.format));
-        }
         let users_path = meta.join(USERS_FILE);
         let users_text = match fs::read_to_string(&users_path) {
             Ok(s) => s,

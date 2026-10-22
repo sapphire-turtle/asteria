@@ -56,6 +56,16 @@ fn unsupported_format_fails() {
 }
 
 #[test]
+fn newer_format_with_different_fields_reports_format() {
+    let dir = tempfile::tempdir().unwrap();
+    Library::init(dir.path(), "a").unwrap();
+    let p = dir.path().join(".asteria/library.toml");
+    std::fs::write(&p, "format = 2\n[library]\nuuid = 7\n").unwrap();
+    let err = Library::open(dir.path()).unwrap_err();
+    assert!(matches!(err, Error::UnsupportedFormat(2)), "{err:?}");
+}
+
+#[test]
 fn sidecar_path_keeps_extension_and_japanese() {
     assert_eq!(
         sidecar_path_for(Path::new("2025/京都旅行/IMG_0001.HEIC")),
