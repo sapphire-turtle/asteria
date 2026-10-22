@@ -125,7 +125,7 @@ fn symlink_outside_root_is_ignored() {
     assert_eq!(paths(&e), vec!["in.jpg", "inside.jpg"]);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn non_utf8_name_is_skipped() {
     use std::ffi::OsStr;
@@ -139,13 +139,13 @@ fn non_utf8_name_is_skipped() {
 }
 
 #[test]
-fn leftover_tmp_is_cleaned() {
+fn scan_does_not_touch_tmp_files() {
     let e = env();
     red(&e.root.join("a.jpg"));
     let tmp = e.root.join(".a.jpg.xmp.asteria-tmp");
     fs::write(&tmp, b"junk").unwrap();
     run(&e);
-    assert!(!tmp.exists());
+    assert!(tmp.exists());
 }
 
 #[test]
@@ -200,10 +200,129 @@ fn large_tree_scan_is_reasonable() {
     }
     let t = Instant::now();
     let r = run(&e);
+    let first = t.elapsed();
     assert_eq!(r.added, 5000);
+    assert!(first < Duration::from_secs(30), "took {first:?}");
+    let t = Instant::now();
+    assert_eq!(run(&e), ScanReport::default());
+    let second = t.elapsed();
     assert!(
-        t.elapsed() < Duration::from_secs(30),
-        "took {:?}",
-        t.elapsed()
+        second < first,
+        "rescan {second:?} not faster than first {first:?}"
     );
+}
+
+#[test]
+fn sidecar_only_edit_is_an_update() {
+    use asteria_framework::journal::Actor;
+    let e = env();
+    red(&e.root.join("a.jpg"));
+    run(&e);
+    assert!(
+        !e.cache
+            .get_by_path("a.jpg")
+            .unwrap()
+            .unwrap()
+            .sidecar
+            .has_sidecar
+    );
+    let owner = e.lib.owner();
+    e.lib
+        .update_sidecar(Path::new("a.jpg"), Actor::User(owner), |sc| {
+            sc.description = Some("hello".into());
+        })
+        .unwrap();
+    let r = run(&e);
+    assert_eq!((r.added, r.updated, r.removed), (0, 1, 0));
+    let rec = e.cache.get_by_path("a.jpg").unwrap().unwrap();
+    assert_eq!(rec.sidecar.description.as_deref(), Some("hello"));
+    assert!(rec.sidecar.has_sidecar);
+}
+
+#[test]
+fn fixing_malformed_sidecar_clears_error() {
+    let e = env();
+    red(&e.root.join("a.jpg"));
+    fs::write(e.root.join("a.jpg.xmp"), b"<not xml").unwrap();
+    run(&e);
+    assert!(
+        e.cache
+            .get_by_path("a.jpg")
+            .unwrap()
+            .unwrap()
+            .sidecar_error
+            .is_some()
+    );
+    fs::copy(fixture("xmp/asteria_full.xmp"), e.root.join("a.jpg.xmp")).unwrap();
+    let r = run(&e);
+    assert_eq!(r.updated, 1);
+    let rec = e.cache.get_by_path("a.jpg").unwrap().unwrap();
+    assert!(rec.sidecar_error.is_none());
+    assert!(rec.sidecar.has_sidecar);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_into_hidden_or_sidecar_is_rejected() {
+    use std::os::unix::fs::symlink;
+    let e = env();
+    red(&e.root.join("a.jpg"));
+    fs::write(e.root.join("a.jpg.xmp"), b"x").unwrap();
+    fs::create_dir(e.root.join(".hidden")).unwrap();
+    red(&e.root.join(".hidden/h.jpg"));
+    red(&e.root.join(".asteria/m.jpg"));
+    symlink(e.root.join(".asteria/m.jpg"), e.root.join("l1.jpg")).unwrap();
+    symlink(e.root.join(".hidden/h.jpg"), e.root.join("l2.jpg")).unwrap();
+    symlink(e.root.join("a.jpg.xmp"), e.root.join("l3.jpg")).unwrap();
+    run(&e);
+    assert_eq!(paths(&e), vec!["a.jpg"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_directory_is_not_followed() {
+    let e = env();
+    fs::create_dir(e.root.join("real")).unwrap();
+    red(&e.root.join("real/a.jpg"));
+    std::os::unix::fs::symlink(e.root.join("real"), e.root.join("link")).unwrap();
+    run(&e);
+    assert_eq!(paths(&e), vec!["real/a.jpg"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn records_under_unreadable_subtree_are_retained() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = env();
+    fs::create_dir(e.root.join("sub")).unwrap();
+    red(&e.root.join("sub/a.jpg"));
+    red(&e.root.join("b.jpg"));
+    run(&e);
+    let sub = e.root.join("sub");
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_dir(&sub).is_ok() {
+        // Running as root: permissions are not enforced.
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+    let r = run(&e);
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(r.removed, 0);
+    assert!(r.skipped.iter().any(|(p, _)| p == "sub"), "{:?}", r.skipped);
+    assert_eq!(paths(&e), vec!["b.jpg", "sub/a.jpg"]);
+}
+
+#[test]
+fn removing_more_than_one_batch_works() {
+    let e = env();
+    for i in 0..1100 {
+        red(&e.root.join(format!("{i}.jpg")));
+    }
+    assert_eq!(run(&e).added, 1100);
+    for i in 0..1100 {
+        fs::remove_file(e.root.join(format!("{i}.jpg"))).unwrap();
+    }
+    let r = run(&e);
+    assert_eq!(r.removed, 1100);
+    assert!(paths(&e).is_empty());
 }

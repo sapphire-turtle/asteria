@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 use asteria_framework::paths::is_sidecar;
-use asteria_framework::{Error as FrameworkError, Library, MediaKind, classify, fsutil};
+use asteria_framework::{Error as FrameworkError, Library, MediaKind, classify};
 use walkdir::WalkDir;
 
 use crate::cache::{Cache, ItemRecord, SidecarSnapshot, item_id_for};
@@ -47,13 +47,33 @@ fn rel_string(root: &Path, path: &Path) -> Option<String> {
     Some(parts?.join("/"))
 }
 
+/// Library-relative `/`-joined path for reporting; non-UTF-8 parts are replaced lossily.
+fn rel_lossy(root: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let parts: Vec<_> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect();
+    parts.join("/")
+}
+
+/// A symlink target must lie inside the library and obey the same path policy as
+/// ordinary entries: no component starting with `.` (covers `.asteria`), not a sidecar.
+fn target_allowed(canonical_root: &Path, target: &Path) -> bool {
+    let Ok(rel) = target.strip_prefix(canonical_root) else {
+        return false;
+    };
+    !rel.components().any(|c| is_hidden(c.as_os_str())) && !is_sidecar(target)
+}
+
+/// Scans the library into `cache`. Does not clean leftover tmp files: that is done
+/// once at server startup, because running it here would race in-flight atomic writes.
 pub fn scan(
     library: &Library,
     cache: &Cache,
     filter: &dyn MediaFilter,
 ) -> Result<ScanReport, ServerError> {
     let root = library.root();
-    fsutil::cleanup_tmp_files(root)?;
     // Failing to read the root aborts the scan.
     std::fs::read_dir(root)?;
     let canonical_root = root.canonicalize()?;
@@ -98,10 +118,11 @@ pub fn scan(
             if ft.is_dir() {
                 it.skip_current_dir();
             }
-            report.skipped.push((
-                entry.path().to_string_lossy().into_owned(),
-                "name is not valid UTF-8".into(),
-            ));
+            let lossy = rel_lossy(root, entry.path());
+            tracing::warn!(path = %lossy, "skipping name that is not valid UTF-8");
+            report
+                .skipped
+                .push((lossy, "name is not valid UTF-8".into()));
             continue;
         };
         if ft.is_dir() {
@@ -113,7 +134,7 @@ pub fn scan(
         let meta = if ft.is_symlink() {
             // Only links that resolve to a file inside the library are accepted.
             match entry.path().canonicalize() {
-                Ok(target) if target.starts_with(&canonical_root) => {}
+                Ok(target) if target_allowed(&canonical_root, &target) => {}
                 Ok(_) => continue,
                 Err(e) => {
                     report.skipped.push((rel, e.to_string()));
@@ -134,19 +155,26 @@ pub fn scan(
                 continue;
             }
         };
-        let kind = match classify(entry.path()) {
-            Ok(k) => k,
-            Err(e) => {
-                report.skipped.push((rel, e.to_string()));
-                continue;
-            }
+        let size = meta.len();
+        let mtime = mtime_ns(&meta);
+        let existing = cache.get_by_path(&rel)?;
+        // Only new or changed files are opened for classification.
+        let unchanged = existing
+            .as_ref()
+            .filter(|old| old.size == size && old.mtime_ns == mtime);
+        let kind = match unchanged {
+            Some(old) => old.kind,
+            None => match classify(entry.path()) {
+                Ok(k) => k,
+                Err(e) => {
+                    report.skipped.push((rel, e.to_string()));
+                    continue;
+                }
+            },
         };
         if !filter.accepts(kind) {
             continue;
         }
-        let size = meta.len();
-        let mtime = mtime_ns(&meta);
-        let existing = cache.get_by_path(&rel)?;
         let hash = existing
             .as_ref()
             .filter(|old| old.size == size && old.mtime_ns == mtime)
