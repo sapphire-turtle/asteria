@@ -1,0 +1,8 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  ci:
+    uses: sapphire-turtle/sapphire-framework/.github/workflows/shared-rust-ci.yml@main

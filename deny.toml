@@ -1,0 +1,65 @@
+# cargo-deny config. Run locally with `cargo deny check`.
+# Reference: https://embarkstudios.github.io/cargo-deny/
+#
+# The shared starting point for sapphire-turtle repositories
+# (sapphire-framework/ci/templates/deny.toml). Keep repository-specific entries
+# under `ignore` and `exceptions`, each with its reason.
+
+[graph]
+# The platforms release binaries are published for. Drops UEFI/WASM-only
+# transitive dependencies such as `r-efi`, so their licenses need no allowing.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+[advisories]
+yanked = "warn"
+# Every ignore needs a `reason`, so the next contributor can tell whether it is
+# still load-bearing. Re-check them when the dependency they name moves.
+ignore = []
+
+[licenses]
+# Permissive SPDX identifiers. Re-survey with `cargo deny list --layout license`
+# before widening; prefer a per-crate entry under `exceptions` to adding here.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+exceptions = [
+    # asteria's own application crate is GPL-3.0-or-later with an app store
+    # exception (LICENSE.App-Store-Exception). Scoped to that crate, so a GPL
+    # dependency cannot slip in unnoticed:
+    { name = "asteria-framework", allow = ["GPL-3.0-or-later"] },
+]
+
+[bans]
+# Duplicate versions are too common in real workspaces to be worth a warning.
+multiple-versions = "allow"
+wildcards = "deny"
+# A `path` dependency without a version (a workspace crate's dev-dependency, or a
+# crate that is not published) is not a wildcard on the registry.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
