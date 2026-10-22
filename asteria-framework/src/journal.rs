@@ -1,4 +1,5 @@
-//! Append-only JSONL journal of file operations, one `YYYY-MM.jsonl` file per month (UTC).
+//! Append-only JSONL journal of file operations, one `YYYY-MM.jsonl` file per month (UTC) of
+//! the append.
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -91,16 +92,24 @@ impl Journal {
         }
     }
 
-    /// Appends one line to the month file of `e.at` and syncs it to disk.
+    /// Appends one line to the month file (UTC) of the current time and syncs it to disk.
+    ///
+    /// The file is chosen by when the append happens, not by `e.at`, so file order equals append
+    /// order; `e.at` is stored as given.
     ///
     /// If the file ends in a torn (unterminated) fragment from a crash, the fragment is first
     /// preserved in `<file>.torn` and cut off, so the new line starts on a clean boundary.
     pub fn append(&self, e: &JournalEntry) -> Result<()> {
+        self.append_at(e, Utc::now())
+    }
+
+    /// [`Journal::append`] with the clock injected; `now` picks the month file.
+    pub(crate) fn append_at(&self, e: &JournalEntry, now: DateTime<Utc>) -> Result<()> {
         let mut line =
             serde_json::to_vec(e).map_err(|err| Error::JournalSerialize(err.to_string()))?;
         line.push(b'\n');
         fs::create_dir_all(&self.dir)?;
-        let name = format!("{:04}-{:02}.{EXT}", e.at.year(), e.at.month());
+        let name = format!("{:04}-{:02}.{EXT}", now.year(), now.month());
         let path = self.dir.join(name);
         let is_new = !path.exists();
         if !is_new {
@@ -225,4 +234,79 @@ fn sync_dir(dir: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn sync_dir(_dir: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use serde_json::json;
+
+    fn journal() -> (tempfile::TempDir, Journal) {
+        let d = tempfile::tempdir().unwrap();
+        let j = Journal {
+            dir: d.path().join(JOURNAL_DIR),
+        };
+        (d, j)
+    }
+
+    fn entry(at: DateTime<Utc>, n: i32) -> JournalEntry {
+        let user = UserId(GrainId::random());
+        JournalEntry {
+            op_id: OpId(GrainId::random()),
+            plan_id: None,
+            actor: Actor::User(user),
+            at,
+            kind: OpKind::Move,
+            before: json!(n),
+            after: json!(n),
+        }
+    }
+
+    fn ymd(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, h, mi, s).unwrap()
+    }
+
+    #[test]
+    fn entries_split_by_append_month() {
+        let (_d, j) = journal();
+        let oct_end = ymd(2026, 10, 31, 23, 59, 59);
+        let nov_start = ymd(2026, 11, 1, 0, 0, 0);
+        // An entry stamped in November but appended in October, then the reverse.
+        let a = entry(nov_start, 1);
+        let b = entry(oct_end, 2);
+        j.append_at(&a, oct_end).unwrap();
+        j.append_at(&b, nov_start).unwrap();
+        let read = |name: &str| {
+            let mut out = Vec::new();
+            read_file(&j.dir.join(name), &mut out).unwrap();
+            out
+        };
+        assert_eq!(read("2026-10.jsonl"), vec![a.clone()]);
+        assert_eq!(read("2026-11.jsonl"), vec![b.clone()]);
+        // File order equals append order; `at` is kept as given.
+        assert_eq!(j.read_all().unwrap(), vec![a, b]);
+    }
+
+    #[test]
+    fn unterminated_fragment_in_earlier_file_is_skipped_but_terminated_corrupt_is_error() {
+        let (_d, j) = journal();
+        let (oct, nov) = (ymd(2026, 10, 1, 12, 0, 0), ymd(2026, 11, 1, 12, 0, 0));
+        let e1 = entry(oct, 1);
+        let e2 = entry(nov, 2);
+        j.append_at(&e1, oct).unwrap();
+        j.append_at(&e1, oct).unwrap();
+        j.append_at(&e2, nov).unwrap();
+        let p = j.dir.join("2026-10.jsonl");
+        let bytes = fs::read(&p).unwrap();
+        fs::write(&p, &bytes[..bytes.len() - 10]).unwrap();
+        assert_eq!(j.read_all().unwrap(), vec![e1, e2]);
+        let mut b = fs::read(&p).unwrap();
+        b.push(b'\n');
+        fs::write(&p, b).unwrap();
+        assert!(matches!(
+            j.read_all(),
+            Err(Error::MalformedJournal { line: 2, .. })
+        ));
+    }
 }

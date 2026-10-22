@@ -29,6 +29,11 @@ fn day(m: u32, d: u32) -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, m, d, 12, 0, 0).unwrap()
 }
 
+/// The journal file appends go to now.
+fn this_month() -> String {
+    Utc::now().format("%Y-%m.jsonl").to_string()
+}
+
 fn jfile(dir: &tempfile::TempDir, name: &str) -> std::path::PathBuf {
     dir.path().join(".asteria/journal").join(name)
 }
@@ -52,23 +57,18 @@ fn read_all_without_journal_dir_is_empty() {
 }
 
 #[test]
-fn entries_split_by_month() {
+fn month_file_follows_append_time_not_entry_time() {
     let (d, lib, j) = setup();
-    let nov = entry(
+    let old = entry(
         &lib,
-        Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap(),
+        Utc.with_ymd_and_hms(2000, 1, 15, 0, 0, 0).unwrap(),
         json!(1),
     );
-    let oct = entry(
-        &lib,
-        Utc.with_ymd_and_hms(2026, 10, 31, 23, 59, 59).unwrap(),
-        json!(2),
-    );
-    j.append(&nov).unwrap();
-    j.append(&oct).unwrap();
-    assert!(jfile(&d, "2026-10.jsonl").is_file());
-    assert!(jfile(&d, "2026-11.jsonl").is_file());
-    assert_eq!(j.read_all().unwrap(), vec![oct, nov]);
+    j.append(&old).unwrap();
+    assert!(jfile(&d, &this_month()).is_file());
+    assert!(!jfile(&d, "2000-01.jsonl").exists());
+    // `at` is kept as given.
+    assert_eq!(j.read_all().unwrap(), vec![old]);
 }
 
 #[test]
@@ -104,7 +104,7 @@ fn truncated_last_line_is_skipped() {
     for e in &es {
         j.append(e).unwrap();
     }
-    let p = jfile(&d, "2026-10.jsonl");
+    let p = jfile(&d, &this_month());
     let bytes = fs::read(&p).unwrap();
     fs::write(&p, &bytes[..bytes.len() - 20]).unwrap();
     assert_eq!(j.read_all().unwrap(), es[..2]);
@@ -116,7 +116,7 @@ fn corrupt_middle_line_is_error() {
     for i in 1..=3 {
         j.append(&entry(&lib, day(10, i), json!(i))).unwrap();
     }
-    let p = jfile(&d, "2026-10.jsonl");
+    let p = jfile(&d, &this_month());
     let text = fs::read_to_string(&p).unwrap();
     let mut lines: Vec<&str> = text.lines().collect();
     lines[1] = "{not json";
@@ -134,31 +134,10 @@ fn corrupt_middle_line_is_error() {
 fn corrupt_newline_terminated_last_line_is_error() {
     let (d, lib, j) = setup();
     j.append(&entry(&lib, day(10, 1), json!(1))).unwrap();
-    let p = jfile(&d, "2026-10.jsonl");
+    let p = jfile(&d, &this_month());
     let mut text = fs::read_to_string(&p).unwrap();
     text.push_str("{broken\n");
     fs::write(&p, text).unwrap();
-    assert!(matches!(
-        j.read_all(),
-        Err(Error::MalformedJournal { line: 2, .. })
-    ));
-}
-
-#[test]
-fn unterminated_fragment_in_earlier_file_is_skipped_but_terminated_corrupt_is_error() {
-    let (d, lib, j) = setup();
-    let e1 = entry(&lib, day(10, 1), json!(1));
-    let e2 = entry(&lib, day(11, 1), json!(2));
-    j.append(&e1).unwrap();
-    j.append(&e1).unwrap();
-    j.append(&e2).unwrap();
-    let p = jfile(&d, "2026-10.jsonl");
-    let bytes = fs::read(&p).unwrap();
-    fs::write(&p, &bytes[..bytes.len() - 10]).unwrap();
-    assert_eq!(j.read_all().unwrap(), vec![e1, e2]);
-    let mut b = fs::read(&p).unwrap();
-    b.push(b'\n');
-    fs::write(&p, b).unwrap();
     assert!(matches!(
         j.read_all(),
         Err(Error::MalformedJournal { line: 2, .. })
@@ -171,14 +150,14 @@ fn append_after_torn_tail_preserves_fragment_and_stays_readable() {
     let es: Vec<_> = (1..=3).map(|i| entry(&lib, day(10, i), json!(i))).collect();
     j.append(&es[0]).unwrap();
     j.append(&es[1]).unwrap();
-    let p = jfile(&d, "2026-10.jsonl");
+    let p = jfile(&d, &this_month());
     let bytes = fs::read(&p).unwrap();
     let cut = bytes.len() - 15;
     fs::write(&p, &bytes[..cut]).unwrap();
     let first_len = bytes.iter().position(|&b| b == b'\n').unwrap() + 1;
     j.append(&es[2]).unwrap();
     assert_eq!(j.read_all().unwrap(), vec![es[0].clone(), es[2].clone()]);
-    let torn = fs::read(jfile(&d, "2026-10.jsonl.torn")).unwrap();
+    let torn = fs::read(jfile(&d, &format!("{}.torn", this_month()))).unwrap();
     assert!(torn.starts_with(&bytes[first_len..cut]));
 }
 
@@ -200,11 +179,11 @@ fn append_after_missing_final_newline_keeps_complete_entry() {
     let es: Vec<_> = (1..=3).map(|i| entry(&lib, day(10, i), json!(i))).collect();
     j.append(&es[0]).unwrap();
     j.append(&es[1]).unwrap();
-    let p = jfile(&d, "2026-10.jsonl");
+    let p = jfile(&d, &this_month());
     let bytes = fs::read(&p).unwrap();
     fs::write(&p, &bytes[..bytes.len() - 1]).unwrap();
     assert_eq!(j.read_all().unwrap(), es[..2]);
     j.append(&es[2]).unwrap();
     assert_eq!(j.read_all().unwrap(), es);
-    assert!(!jfile(&d, "2026-10.jsonl.torn").exists());
+    assert!(!jfile(&d, &format!("{}.torn", this_month())).exists());
 }
