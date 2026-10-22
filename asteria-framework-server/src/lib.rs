@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod hashing;
 pub mod scan;
+pub mod writer;
 
 pub use auth::{Tokens, new_token, token_hash};
 pub use cache::{CACHE_SCHEMA, Cache, ItemRecord, SidecarSnapshot, StoredHash, item_id_for};
@@ -13,3 +14,4 @@ pub use config::{ServerConfig, TokenEntry, cache_dir_for};
 pub use error::ServerError;
 pub use hashing::{RelinkReport, hash_pending, relink_orphans};
 pub use scan::{MediaFilter, ScanReport, scan};
+pub use writer::{WriteError, Writer, spawn_writer};

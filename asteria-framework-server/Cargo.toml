@@ -23,6 +23,8 @@ grain-id.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
 chrono.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
