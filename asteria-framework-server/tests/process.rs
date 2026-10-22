@@ -1,7 +1,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use asteria_framework::MediaKind;
 use asteria_framework_server::{Preset, ProcessError, Processor};
@@ -87,7 +87,7 @@ async fn hung_tool_times_out() {
         &script,
         "ffmpeg",
     );
-    let start = Instant::now();
+    let start = std::time::Instant::now();
     let r = p
         .render(&red(), MediaKind::Image, HASH, Preset::Thumb)
         .await;
@@ -125,6 +125,7 @@ async fn short_video_falls_back_to_first_frame() {
     assert!(std::fs::metadata(out).unwrap().len() > 0);
 }
 
+#[cfg(unix)]
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../asteria-framework/tests/fixtures")
@@ -330,6 +331,7 @@ async fn ffmpeg_refuses_concat_scripts() {
 }
 
 /// Hashes `blake3:<n as 16 hex digits>`, distinct per `n`.
+#[cfg(unix)]
 fn nth_hash(n: usize) -> String {
     format!("blake3:{n:016x}")
 }
