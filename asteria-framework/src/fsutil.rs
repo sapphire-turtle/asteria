@@ -83,19 +83,27 @@ fn write_and_rename(f: &mut fs::File, tmp: &Path, path: &Path, bytes: &[u8]) -> 
 }
 
 /// Delete leftover `.*.asteria-tmp` files under `root` (symlinks are not followed).
-/// Returns how many were removed.
+/// Returns how many were removed. Unreadable subdirectories and undeletable files are skipped
+/// with a warning; only an unreadable `root` is an error.
 pub fn cleanup_tmp_files(root: &Path) -> Result<usize> {
     let mut removed = 0;
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            removed += cleanup_tmp_files(&entry.path())?;
+            match cleanup_tmp_files(&entry.path()) {
+                Ok(n) => removed += n,
+                Err(e) => {
+                    tracing::warn!(path = %entry.path().display(), error = %e, "skipping unreadable directory")
+                }
+            }
         } else if kind.is_file() && is_tmp_name(&entry.file_name().to_string_lossy()) {
             match fs::remove_file(entry.path()) {
                 Ok(()) => removed += 1,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    tracing::warn!(path = %entry.path().display(), error = %e, "cannot remove tmp file")
+                }
             }
         }
     }

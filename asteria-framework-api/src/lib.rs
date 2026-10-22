@@ -4,6 +4,16 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// Coarse kind of a media file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    Image,
+    Video,
+    Audio,
+    Other,
+}
+
 /// What a client announces about itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClientInfo {

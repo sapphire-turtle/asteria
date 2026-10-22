@@ -202,3 +202,43 @@ fn hash_scope_serde_is_string() {
     }
     assert!(serde_json::from_str::<HashScope>("\"media-payload/2\"").is_err());
 }
+
+#[test]
+fn utf16_text_is_not_mp3() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("t.txt");
+    let mut data = vec![0xFF, 0xFE];
+    for u in "hello world".encode_utf16() {
+        data.extend_from_slice(&u.to_le_bytes());
+    }
+    std::fs::write(&p, &data).unwrap();
+    assert_eq!(detect_format_file(&p).unwrap(), MediaFormat::Unknown);
+}
+
+#[test]
+fn real_mp3_fixture_still_detects() {
+    let p = std::path::Path::new("tests/fixtures/sine440.mp3");
+    assert_eq!(detect_format_file(p).unwrap(), MediaFormat::Mp3);
+}
+
+#[test]
+fn bare_mp3_needs_second_frame_unless_file_ends_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("a.mp3");
+    // MPEG-1 Layer III, 128 kbps, 44.1 kHz, no padding: 417-byte frames
+    let mut frame = vec![0xFF, 0xFB, 0x90, 0x00];
+    frame.resize(417, 0);
+    // exactly one frame: accepted on the first header alone
+    std::fs::write(&p, &frame).unwrap();
+    assert_eq!(detect_format_file(&p).unwrap(), MediaFormat::Mp3);
+    // garbage where the second header should be
+    let mut bad = frame.clone();
+    bad.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+    std::fs::write(&p, &bad).unwrap();
+    assert_eq!(detect_format_file(&p).unwrap(), MediaFormat::Unknown);
+    // a valid second header
+    let mut good = frame.clone();
+    good.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
+    std::fs::write(&p, &good).unwrap();
+    assert_eq!(detect_format_file(&p).unwrap(), MediaFormat::Mp3);
+}
