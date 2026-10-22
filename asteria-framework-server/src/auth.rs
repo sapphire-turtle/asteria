@@ -22,6 +22,10 @@ fn parse_hash(s: &str) -> Option<blake3::Hash> {
     s.strip_prefix(HASH_PREFIX)?.parse().ok()
 }
 
+pub(crate) fn is_valid_hash(s: &str) -> bool {
+    parse_hash(s).is_some()
+}
+
 /// Verifies presented bearer tokens against the hashes in the server config.
 pub struct Tokens {
     entries: Vec<(UserId, blake3::Hash)>,

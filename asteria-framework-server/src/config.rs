@@ -24,12 +24,25 @@ pub struct ServerConfig {
 impl ServerConfig {
     pub fn load(path: &Path) -> Result<ServerConfig> {
         let text = std::fs::read_to_string(path)?;
-        toml::from_str(&text).map_err(|e| ServerError::Config(format!("{}: {e}", path.display())))
+        let cfg: ServerConfig = toml::from_str(&text)
+            .map_err(|e| ServerError::Config(format!("{}: {e}", path.display())))?;
+        for entry in &cfg.token {
+            if !crate::auth::is_valid_hash(&entry.hash) {
+                return Err(ServerError::Config(format!(
+                    "token entry for user {}: invalid hash",
+                    entry.user
+                )));
+            }
+        }
+        Ok(cfg)
     }
 
     /// Writes atomically; on unix the file is 0600 (new file and overwrite alike).
     pub fn save(&self, path: &Path) -> Result<()> {
         let text = toml::to_string_pretty(self).map_err(|e| ServerError::Config(e.to_string()))?;
+        // Pre-creating the file at 0600 means that if the write below fails, an empty
+        // (zero-byte) file can remain; that is intentional, since it leaks nothing and
+        // keeps the content from ever being written with looser permissions.
         #[cfg(unix)]
         restrict_permissions(path)?;
         atomic_write(path, text.as_bytes())?;
@@ -60,6 +73,6 @@ pub fn cache_dir_for(app: &str, library: &LibraryId) -> Result<PathBuf> {
                 .filter(|h| !h.is_empty())
                 .map(|h| PathBuf::from(h).join(".cache"))
         })
-        .ok_or_else(|| ServerError::Config("cannot determine a cache directory".into()))?;
+        .ok_or_else(|| ServerError::Cache("cannot determine a cache directory".into()))?;
     Ok(base.join(app).join(library.0.hyphenated().to_string()))
 }
