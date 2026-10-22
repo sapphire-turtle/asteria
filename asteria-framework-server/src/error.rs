@@ -6,6 +6,8 @@ pub enum ServerError {
     Config(String),
     #[error("cache error: {0}")]
     Cache(String),
+    #[error("invalid path: {0}")]
+    InvalidPath(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

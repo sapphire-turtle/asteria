@@ -18,6 +18,7 @@ base64.workspace = true
 dirs.workspace = true
 redb.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 grain-id.workspace = true
 uuid.workspace = true
 
