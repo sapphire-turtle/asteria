@@ -13,6 +13,8 @@ grain-id.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 blake3.workspace = true
+xml-rs.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -20,6 +20,11 @@ pub enum Error {
     InvalidHashScope(String),
     #[error("malformed {format:?} media: {reason}")]
     MalformedMedia { format: MediaFormat, reason: String },
+    #[error("malformed XMP sidecar{}: {reason}", .path.as_ref().map(|p| format!(" {}", p.display())).unwrap_or_default())]
+    MalformedSidecar {
+        path: Option<PathBuf>,
+        reason: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
