@@ -493,3 +493,50 @@
   Run: `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check && cargo deny check`
   Expected: すべて成功
 - [ ] **Step 5: Commit** `feat(gallery-server): init/token/serve CLI and end-to-end test`
+
+## 付録：実装時の変更（レビューによる決定）
+
+各タスクのレビューで決めた、上の手順からの変更点。タスク本文は書き換えていない。詳細は `.superpowers/sdd/2026-10-22-plan2-gallery-server/progress.md` の記録を参照。
+
+- **Task 1**：MP3 の2つ目のフレームの確認を細かく決めた。最初のフレームより短いファイルは Unknown、最初のフレームが丸ごとあって2つ目のヘッダーの前で終わるファイルは MP3 とする。free-format（ビットレート 0）は最初のヘッダーだけで受け付ける。
+- **Task 4**：
+  - キャッシュの読み出し（`get_by_id`、`get_by_path`、`all_paths`、`count`、`list_folder`、`unprocessable`）は `Result` を返す。`list_folder` は復号できないレコードをログに出して飛ばす。
+  - 書き込みは redb の `Durability::None` で行い、`put_many`、`remove_many`、`flush`（Immediate の commit）を足した。スキャンの最後に `flush` する。
+  - 作り直すのは、壊れている・形式が古い・スキーマ不一致・ライブラリ不一致の場合だけ。`DatabaseAlreadyOpen` やその他の I/O エラーはそのまま `ServerError` で返す。
+  - `list_folder` のフォルダ名は名前順。`limit` は 1 以上に丸める。フォルダ引数を検証し、不正なら新しい `ServerError::InvalidPath`。
+- **Task 5**：
+  - 一時ファイルの掃除は `scan()` から外し、`serve` の起動時に一度だけ行う（書き込みキューと競合するため）。
+  - サイズと更新時刻が変わっていなければ、ファイルを開かずにキャッシュの種類を使う。シンボリックリンクの行き先にも同じパスの規則（`.` で始まる部分がない、サイドカーでない、`.asteria` の外）を当てる。読めないサブツリーと UTF-8 でない名前は警告を出し、報告するパスはライブラリ相対にする。
+- **Task 6**：
+  - 移動の前に、持ち主のいないサイドカーを（ハッシュ、スコープ）でまとめる。同じファイルを2つ以上が取り合えば、すべて曖昧。一致は1つだがそのファイルにすでにサイドカーがある場合は、新しい `RelinkReport.conflicts` に入れる。
+  - 移動の前に移動先のファイルを stat し、保存してあるサイズと更新時刻と違えば衝突として動かさない。
+  - `hash_pending` は `set_hash(path, Option<StoredHash>)` でハッシュの欄だけを書く（レコードのサイズと更新時刻が一致するときだけ）。
+  - 移動は `hard_link` と削除で行い、`AlreadyExists` 以外のエラーでは確認してから `rename` に切り替える（vfat や exFAT が EPERM を返すため）。link と削除の間で落ちた残りは完了させてジャーナルに記録する。
+- **Task 7**：
+  - framework に `Sidecar::apply_rating` を足した（LWW、同時刻の規則を含む）。Writer は評価とほかの欄を1つの `update_sidecar` のクロージャで書く。書き込みもジャーナルも1回で、ハッシュの再計算もしない。
+  - キャッシュのハッシュを先に設定するのは、今の stat が保存してあるサイズと更新時刻と一致するときだけ。
+  - `spawn_writer` は `(Writer, JoinHandle)` を返す。
+  - サイドカーの `content_hash` をキャッシュに写すことはしない。キャッシュの `StoredHash` を埋めるのは `hash_pending` の計算だけ。
+- **Task 8**：
+  - `AppState::new` で組み立てる。`/rpc` は `DefaultBodyLimit` 64 KiB で、超えると 413（401 以外で唯一の 200 でない応答）。
+  - `sidecar_error` には壊れている理由だけを入れ、READ_ONLY と BUSY のメッセージはパスを含まない固定文にする（詳細はログ）。
+  - `Bearer` の綴りは大文字・小文字を問わない。トークンがログに出ないことのテストは、独立したテストバイナリでグローバルな subscriber を使って確かめる。
+- **Task 9**：
+  - 原本は、ファイルがあれば（スキャンの後に変わっていても）いつも返す。サムネイルは、ファイルがスキャンの後に変わっていれば 503 を返し、再スキャンを依頼する。
+  - vips には一時ディレクトリに置いた安全な名前のコピー（シンボリックリンク）を渡す。ffmpeg には `-protocol_whitelist file` と `-format_whitelist` を付ける。
+  - 生成はリクエストから切り離して動かし、一時ファイルは drop で消す。起動時に `Processor::sweep_tmp` で `.tmp-*` と `.src-*` を掃除する。
+  - 原本とサムネイルに `X-Content-Type-Options: nosniff` を付ける。vips のサイズ指定は縮小だけの `NxN>`。
+  - 外部ツールがないこと（ToolMissing）は処理不可にしない。書けないことによる失敗は Io で、処理不可にしない。
+- **Task 10**：
+  - 停止用の `CancellationToken` と、テスト用のスキャン回数カウンター（`passes`）を `ScanLoop` に持たせた。
+  - notify のイベントは容量 1 のチャネルに `try_send` で渡してまとめる。Rescan フラグ付きやパスのないイベント（キューのあふれ）は関係ありとみなす。
+- **Task 11**：
+  - `init` は既存の設定を `--force` なしでは上書きしない。`init --listen` と `serve --listen` を足した。Ctrl-C に加えて SIGTERM（Unix）でも止まる。どの止まり方でも、書き込みキューを空にしてキャッシュを flush する。
+  - e2e は Linux だけ（ほかは理由を出すだけのテスト）。
+- **最終レビュー**：
+  - `serve` は何よりも先に `.asteria/server.lock` の排他ロックを取る。2つ目のサーバーは何も触らずにエラーで終わる。
+  - 生成待ちの列に上限を設け、誰も待っていない生成は捨て、処理不可は生成側で記録する。
+  - リクエストのたびに、メディアのパスを解決してライブラリの中にあることを確かめる。
+  - スキャンの前に `library.toml` の ID を確かめ、合わなければ何も消さずに中止する。
+  - 停止時の graceful shutdown は最大 10 秒。過ぎたら接続を切り、書き込みキューを閉じて空にする。
+  - 生成物のキーと、ハッシュの計算をスキャンから切り離すことは Plan 3 の前に決める（設計書 §4.2、§4.5）。
