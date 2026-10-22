@@ -100,13 +100,14 @@ fn actor_serde_shape() {
 #[test]
 fn truncated_last_line_is_skipped() {
     let (d, lib, j) = setup();
-    for i in 1..=3 {
-        j.append(&entry(&lib, day(10, i), json!(i))).unwrap();
+    let es: Vec<_> = (1..=3).map(|i| entry(&lib, day(10, i), json!(i))).collect();
+    for e in &es {
+        j.append(e).unwrap();
     }
     let p = jfile(&d, "2026-10.jsonl");
     let bytes = fs::read(&p).unwrap();
     fs::write(&p, &bytes[..bytes.len() - 20]).unwrap();
-    assert_eq!(j.read_all().unwrap().len(), 2);
+    assert_eq!(j.read_all().unwrap(), es[..2]);
 }
 
 #[test]
@@ -144,15 +145,51 @@ fn corrupt_newline_terminated_last_line_is_error() {
 }
 
 #[test]
-fn truncated_line_in_earlier_file_is_error() {
+fn unterminated_fragment_in_earlier_file_is_skipped_but_terminated_corrupt_is_error() {
     let (d, lib, j) = setup();
-    j.append(&entry(&lib, day(10, 1), json!(1))).unwrap();
-    j.append(&entry(&lib, day(11, 1), json!(2))).unwrap();
+    let e1 = entry(&lib, day(10, 1), json!(1));
+    let e2 = entry(&lib, day(11, 1), json!(2));
+    j.append(&e1).unwrap();
+    j.append(&e1).unwrap();
+    j.append(&e2).unwrap();
     let p = jfile(&d, "2026-10.jsonl");
     let bytes = fs::read(&p).unwrap();
     fs::write(&p, &bytes[..bytes.len() - 10]).unwrap();
+    assert_eq!(j.read_all().unwrap(), vec![e1, e2]);
+    let mut b = fs::read(&p).unwrap();
+    b.push(b'\n');
+    fs::write(&p, b).unwrap();
     assert!(matches!(
         j.read_all(),
-        Err(Error::MalformedJournal { line: 1, .. })
+        Err(Error::MalformedJournal { line: 2, .. })
     ));
+}
+
+#[test]
+fn append_after_torn_tail_preserves_fragment_and_stays_readable() {
+    let (d, lib, j) = setup();
+    let es: Vec<_> = (1..=3).map(|i| entry(&lib, day(10, i), json!(i))).collect();
+    j.append(&es[0]).unwrap();
+    j.append(&es[1]).unwrap();
+    let p = jfile(&d, "2026-10.jsonl");
+    let bytes = fs::read(&p).unwrap();
+    let cut = bytes.len() - 15;
+    fs::write(&p, &bytes[..cut]).unwrap();
+    let first_len = bytes.iter().position(|&b| b == b'\n').unwrap() + 1;
+    j.append(&es[2]).unwrap();
+    assert_eq!(j.read_all().unwrap(), vec![es[0].clone(), es[2].clone()]);
+    let torn = fs::read(jfile(&d, "2026-10.jsonl.torn")).unwrap();
+    assert!(torn.starts_with(&bytes[first_len..cut]));
+}
+
+#[test]
+fn plan_id_none_roundtrips() {
+    let (_d, lib, j) = setup();
+    let mut e = entry(&lib, day(10, 1), json!(1));
+    e.plan_id = None;
+    e.actor = Actor::Agent {
+        on_behalf_of: lib.owner(),
+    };
+    j.append(&e).unwrap();
+    assert_eq!(j.read_all().unwrap(), vec![e]);
 }

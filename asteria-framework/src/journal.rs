@@ -92,24 +92,32 @@ impl Journal {
     }
 
     /// Appends one line to the month file of `e.at` and syncs it to disk.
+    ///
+    /// If the file ends in a torn (unterminated) fragment from a crash, the fragment is first
+    /// preserved in `<file>.torn` and cut off, so the new line starts on a clean boundary.
     pub fn append(&self, e: &JournalEntry) -> Result<()> {
-        let mut line = serde_json::to_vec(e).map_err(std::io::Error::from)?;
+        let mut line =
+            serde_json::to_vec(e).map_err(|err| Error::JournalSerialize(err.to_string()))?;
         line.push(b'\n');
         fs::create_dir_all(&self.dir)?;
         let name = format!("{:04}-{:02}.{EXT}", e.at.year(), e.at.month());
-        let mut f = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(self.dir.join(name))?;
+        let path = self.dir.join(name);
+        let is_new = !path.exists();
+        if !is_new {
+            repair_torn_tail(&path)?;
+        }
+        let mut f = OpenOptions::new().append(true).create(true).open(&path)?;
         // One write_all of the whole line, so a crash can only leave a truncated tail.
         f.write_all(&line)?;
         f.sync_data()?;
+        if is_new {
+            sync_dir(&self.dir)?;
+        }
         Ok(())
     }
 
-    /// Entries in file-name order, then line order. A truncated final line of the last file
-    /// (no trailing newline, unparsable) is skipped with a warning; any other malformed line is an
-    /// error.
+    /// Entries in file-name order, then line order. An unterminated, unparsable final fragment of
+    /// any file is skipped with a warning; a newline-terminated malformed line is an error.
     pub fn read_all(&self) -> Result<Vec<JournalEntry>> {
         let mut files = match fs::read_dir(&self.dir) {
             Ok(rd) => rd
@@ -121,15 +129,14 @@ impl Journal {
         files.retain(|p| p.extension().is_some_and(|x| x == EXT));
         files.sort();
         let mut out = Vec::new();
-        let last_file = files.len().saturating_sub(1);
-        for (i, file) in files.iter().enumerate() {
-            read_file(file, i == last_file, &mut out)?;
+        for file in &files {
+            read_file(file, &mut out)?;
         }
         Ok(out)
     }
 }
 
-fn read_file(file: &Path, is_last_file: bool, out: &mut Vec<JournalEntry>) -> Result<()> {
+fn read_file(file: &Path, out: &mut Vec<JournalEntry>) -> Result<()> {
     let bytes = fs::read(file)?;
     for (idx, raw) in bytes.split_inclusive(|&b| b == b'\n').enumerate() {
         let terminated = raw.ends_with(b"\n");
@@ -140,7 +147,7 @@ fn read_file(file: &Path, is_last_file: bool, out: &mut Vec<JournalEntry>) -> Re
         };
         match serde_json::from_slice::<JournalEntry>(body) {
             Ok(entry) => out.push(entry),
-            Err(_) if !terminated && is_last_file => {
+            Err(_) if !terminated => {
                 tracing::warn!(
                     file = %file.display(),
                     line = idx + 1,
@@ -155,5 +162,38 @@ fn read_file(file: &Path, is_last_file: bool, out: &mut Vec<JournalEntry>) -> Re
             }
         }
     }
+    Ok(())
+}
+
+fn repair_torn_tail(path: &Path) -> Result<()> {
+    let bytes = fs::read(path)?;
+    if bytes.is_empty() || bytes.ends_with(b"\n") {
+        return Ok(());
+    }
+    let keep = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let mut torn_name = path.as_os_str().to_owned();
+    torn_name.push(".torn");
+    let mut torn = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(PathBuf::from(torn_name))?;
+    torn.write_all(&bytes[keep..])?;
+    torn.write_all(b"\n")?;
+    torn.sync_data()?;
+    tracing::warn!(file = %path.display(), "cut torn journal tail before appending");
+    let f = OpenOptions::new().write(true).open(path)?;
+    f.set_len(keep as u64)?;
+    f.sync_data()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> Result<()> {
+    fs::File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> Result<()> {
     Ok(())
 }

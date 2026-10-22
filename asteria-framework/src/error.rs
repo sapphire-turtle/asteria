@@ -31,6 +31,8 @@ pub enum Error {
         path: Option<PathBuf>,
         reason: String,
     },
+    #[error("failed to serialize journal entry: {0}")]
+    JournalSerialize(String),
     #[error("malformed journal entry at {}:{line}", .file.display())]
     MalformedJournal { file: PathBuf, line: usize },
 }
