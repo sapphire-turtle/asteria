@@ -106,7 +106,7 @@ project-asteria/
    2025/京都旅行/IMG_0001.HEIC.xmp
 ```
 
-- ユーザー ID は、名前ではなく、変わらない短い ID にする（例：`u_7k2m`）。
+- ユーザー ID は、名前ではなく、変わらない短い ID にする。sapphire と揃えて grain-id（例：`123abcd`）を使う。
 - 認証トークンはライブラリに入れず、サーバーの設定ディレクトリに置く。ライブラリはバックアップや同期の対象になり得るため。
 - DB キャッシュ、サムネイル、変換結果は `~/.cache/<アプリ名>/<ライブラリID>/` に置く。丸ごと削除しても再生成できる。
 
@@ -146,7 +146,7 @@ project-asteria/
     asteria:ContentHash="blake3:9f2c…"
     asteria:HashScope="media-payload/1">
    <asteria:UserRatings><rdf:Bag>
-    <rdf:li asteria:User="u_7k2m" asteria:Rating="5" asteria:Modified="2026-10-21T20:00:00Z"/>
+    <rdf:li asteria:User="123abcd" asteria:Rating="5" asteria:Modified="2026-10-21T20:00:00Z"/>
    </rdf:Bag></asteria:UserRatings>
   </rdf:Description>
  </rdf:RDF>
@@ -160,8 +160,8 @@ project-asteria/
 | 形式 | ハッシュ対象 | 除外するもの | 対応段階 |
 |---|---|---|---|
 | JPEG | SOF/DQT/DHT/SOS セグメントと圧縮データ | APP0〜15、COM | 第1段階 |
-| PNG | IHDR、PLTE、IDAT、IEND | その他の補助チャンク | 第1段階 |
-| WebP | VP8、VP8L、ALPH | EXIF、XMP、ICCP | 第1段階 |
+| PNG | IHDR、PLTE、IDAT、IEND、および画素の内容を表す tRNS、APNG の acTL/fcTL/fdAT | その他の補助チャンク（tEXt、iTXt、eXIf、tIME、iCCP など） | 第1段階 |
+| WebP | VP8、VP8L、ALPH、ANIM、ANMF | VP8X（メタデータ有無のフラグを含むため）、EXIF、XMP、ICCP、未知のチャンク | 第1段階 |
 | FLAC | 音声フレーム | メタデータブロック | 第1段階 |
 | MP3 | 音声フレーム | ID3v2、ID3v1、APE | 第1段階 |
 | HEIC / AVIF | 主画像アイテムのデータ | Exif、XMP アイテム | 第2段階 |
