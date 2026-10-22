@@ -1,14 +1,17 @@
 //! Runs the real binary: init, serve, RPC and media requests, restart.
-//! Unix only: the server is stopped with an external `kill -INT`.
+//! Linux only: the server is stopped with an external `kill -INT`, and the cache is isolated
+//! through `XDG_CACHE_HOME`, which other platforms ignore.
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 #[test]
 fn e2e_skipped_on_this_platform() {
-    eprintln!("skipping the end-to-end test: it stops the server with `kill -INT` (Unix only)");
+    eprintln!(
+        "skipping the end-to-end test: it relies on XDG_CACHE_HOME cache isolation (Linux only)"
+    );
 }
 
-#[cfg(unix)]
-mod unix {
+#[cfg(target_os = "linux")]
+mod linux {
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
