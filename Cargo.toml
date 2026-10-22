@@ -24,7 +24,8 @@ xml-rs = "0.8"
 grain-id = { version = "0.15", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+redb = "4"
 tempfile = "3"
 lofty = "0.22"
 tracing = "0.1"

@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 asteria-framework = { path = "../asteria-framework" }
+asteria-framework-api = { path = "../asteria-framework-api" }
 serde.workspace = true
 toml.workspace = true
 thiserror.workspace = true
@@ -15,7 +16,10 @@ blake3.workspace = true
 getrandom.workspace = true
 base64.workspace = true
 dirs.workspace = true
+redb.workspace = true
+serde_json.workspace = true
+grain-id.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-uuid.workspace = true
