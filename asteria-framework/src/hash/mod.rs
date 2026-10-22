@@ -2,8 +2,11 @@
 
 mod detect;
 mod file;
+mod jpeg;
 
 use std::fmt;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -117,10 +120,12 @@ pub struct HashOutcome {
 /// Hashes the media payload of a recognised format; `Ok(None)` means the
 /// format has no payload hash and the caller should use `file/1`.
 /// Each format's task adds its arm here.
-fn payload_hash(_path: &Path, format: MediaFormat) -> Result<Option<ContentHash>> {
+fn payload_hash(path: &Path, format: MediaFormat) -> Result<Option<ContentHash>> {
     match format {
-        MediaFormat::Jpeg
-        | MediaFormat::Png
+        MediaFormat::Jpeg => {
+            jpeg::jpeg_payload_hash(&mut BufReader::new(File::open(path)?)).map(Some)
+        }
+        MediaFormat::Png
         | MediaFormat::WebP
         | MediaFormat::Flac
         | MediaFormat::Mp3
