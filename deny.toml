@@ -50,6 +50,8 @@ exceptions = [
     # exception (LICENSE.App-Store-Exception). Scoped to that crate, so a GPL
     # dependency cannot slip in unnoticed:
     { name = "asteria-framework", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-framework-server", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-gallery-server", allow = ["GPL-3.0-or-later"] },
 ]
 
 [bans]

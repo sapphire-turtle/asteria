@@ -1,0 +1,65 @@
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+
+use asteria_framework::{LibraryId, UserId, fsutil::atomic_write};
+use serde::{Deserialize, Serialize};
+
+use crate::error::{Result, ServerError};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenEntry {
+    pub user: UserId,
+    /// `blake3:<hex>` of the token; the token itself is never stored.
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerConfig {
+    pub library: PathBuf,
+    pub listen: SocketAddr,
+    #[serde(default)]
+    pub token: Vec<TokenEntry>,
+}
+
+impl ServerConfig {
+    pub fn load(path: &Path) -> Result<ServerConfig> {
+        let text = std::fs::read_to_string(path)?;
+        toml::from_str(&text).map_err(|e| ServerError::Config(format!("{}: {e}", path.display())))
+    }
+
+    /// Writes atomically; on unix the file is 0600 (new file and overwrite alike).
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let text = toml::to_string_pretty(self).map_err(|e| ServerError::Config(e.to_string()))?;
+        #[cfg(unix)]
+        restrict_permissions(path)?;
+        atomic_write(path, text.as_bytes())?;
+        Ok(())
+    }
+}
+
+/// Makes sure `path` exists with mode 0600 so `atomic_write` (which keeps the target's
+/// permission bits) never exposes the new content with looser permissions.
+#[cfg(unix)]
+fn restrict_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+/// `<cache_dir>/<app>/<library id>/`; falls back to `$HOME/.cache` when the platform has no cache dir.
+pub fn cache_dir_for(app: &str, library: &LibraryId) -> Result<PathBuf> {
+    let base = dirs::cache_dir()
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".cache"))
+        })
+        .ok_or_else(|| ServerError::Config("cannot determine a cache directory".into()))?;
+    Ok(base.join(app).join(library.0.hyphenated().to_string()))
+}

@@ -1,0 +1,13 @@
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    #[error(transparent)]
+    Framework(#[from] asteria_framework::Error),
+    #[error("config error: {0}")]
+    Config(String),
+    #[error("cache error: {0}")]
+    Cache(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+pub type Result<T> = std::result::Result<T, ServerError>;
