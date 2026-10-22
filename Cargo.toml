@@ -34,3 +34,7 @@ base64 = "0.23"
 dirs = "7"
 walkdir = "2"
 tokio = { version = "1", features = ["rt", "sync"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+tower = { version = "0.5", features = ["util"] }
+tracing-subscriber = "0.3"
+http-body-util = "0.1"
