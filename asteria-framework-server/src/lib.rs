@@ -11,6 +11,7 @@ pub mod process;
 mod rpc;
 pub mod scan;
 pub mod state;
+pub mod watch;
 pub mod writer;
 
 pub use app::router;
@@ -22,4 +23,5 @@ pub use hashing::{RelinkReport, hash_pending, relink_orphans};
 pub use process::{Preset, ProcessError, Processor};
 pub use scan::{MediaFilter, ScanReport, scan};
 pub use state::AppState;
+pub use watch::{ScanLoop, spawn_scan_loop};
 pub use writer::{WriteError, Writer, spawn_writer};
