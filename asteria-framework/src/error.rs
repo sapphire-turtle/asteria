@@ -10,6 +10,8 @@ pub enum Error {
     NotALibrary(PathBuf),
     #[error("library already initialized: {0}")]
     AlreadyInitialized(PathBuf),
+    #[error("temporary file already exists (concurrent writer or crash leftover): {0}")]
+    TmpExists(PathBuf),
     #[error("required file is missing: {0}")]
     MissingFile(PathBuf),
     #[error("unsupported library format: {0}")]

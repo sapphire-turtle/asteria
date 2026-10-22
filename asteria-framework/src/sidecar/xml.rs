@@ -3,6 +3,13 @@
 //! Unlike `xmltree`, attributes keep their namespace URI and prefix, and each element keeps the
 //! namespace declarations made on it, so the serializer can write the document back without
 //! losing information.
+//!
+//! Known limitations of the round trip:
+//! - xml-rs drops a namespace re-declaration when an outer scope bound the same prefix to the
+//!   same URI (checked against every outer level, even if a level in between shadowed it).
+//! - Content outside the root element (comments, PIs, doctype) is dropped.
+//! - The XML declaration is normalised to `<?xml version="1.0" encoding="UTF-8"?>`.
+//! - An xpacket wrapper is rewritten with the standard `begin`/`id` and `end="w"`.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;

@@ -154,7 +154,7 @@ fn values(prop: &Element) -> Vec<String> {
     }
 }
 
-fn extract(root: &Element) -> R<Sidecar> {
+pub(super) fn extract(root: &Element) -> R<Sidecar> {
     let rdf = rdf_root(root)?;
     let descs: Vec<&Element> = rdf
         .child_elements()

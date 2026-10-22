@@ -220,3 +220,40 @@ fn canonical_prefix_bound_to_other_uri_is_not_reused() {
     let back = reparse(&sc);
     assert_eq!(back.subjects, sc.subjects);
 }
+
+const DE_ONLY: &str = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="1"><dc:description><rdf:Alt><rdf:li xmlns:q="urn:q" xml:lang="de" q:extra="1"> Ein  Kater </rdf:li></rdf:Alt></dc:description></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+
+const DESC_PART: &str = r#"<dc:description><rdf:Alt><rdf:li xmlns:q="urn:q" xml:lang="de" q:extra="1"> Ein  Kater </rdf:li></rdf:Alt></dc:description>"#;
+
+#[test]
+fn unchanged_description_is_byte_identical_after_rating_change() {
+    let mut sc = Sidecar::parse(DE_ONLY.as_bytes()).unwrap();
+    sc.rating.as_mut().unwrap().value = 4;
+    let out = text(&sc);
+    assert!(out.contains(DESC_PART), "{out}");
+    assert!(!out.contains("x-default"));
+    assert!(out.contains("xmp:Rating=\"4\""));
+}
+
+#[test]
+fn changed_description_keeps_other_language_items_whole() {
+    let mut sc = Sidecar::parse(DE_ONLY.as_bytes()).unwrap();
+    sc.description = Some("A cat".into());
+    let out = text(&sc);
+    assert!(
+        out.contains(r#"<rdf:li xmlns:q="urn:q" xml:lang="de" q:extra="1"> Ein  Kater </rdf:li>"#),
+        "{out}"
+    );
+    assert_eq!(out.matches("x-default").count(), 1);
+    assert_eq!(reparse(&sc).description.as_deref(), Some("A cat"));
+}
+
+#[test]
+fn unchanged_properties_stay_in_their_original_description() {
+    let mut sc = load("multi_description.xmp");
+    sc.label = Some("Red".into());
+    let out = text(&sc);
+    // subjects were not touched, so both original (differently prefixed) blocks are intact
+    assert!(out.contains("<dublin:subject xmlns:dublin"), "{out}");
+    assert_eq!(reparse(&sc).subjects, sc.subjects);
+}

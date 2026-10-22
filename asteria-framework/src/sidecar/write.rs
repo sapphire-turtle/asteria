@@ -10,6 +10,7 @@ use crate::fsutil::atomic_write;
 
 use super::model::{RatingEntry, Sidecar};
 use super::ns;
+use super::read::extract;
 use super::xml::{self, Attribute, Element, Name, Node};
 
 /// Properties asteria owns, as `(namespace URI, local name)`.
@@ -35,7 +36,8 @@ impl Sidecar {
             Some(d) => (d.root.clone(), d.xpacket),
             None => (skeleton(), false),
         };
-        apply(&mut root, self);
+        let orig = self.doc.as_ref().and_then(|d| extract(&d.root).ok());
+        apply(&mut root, self, &dirty_props(self, orig.as_ref()));
         xml::serialize(&root, xpacket)
     }
 
@@ -58,8 +60,51 @@ fn skeleton() -> Element {
     }
 }
 
-fn is_managed(ns: Option<&str>, local: &str) -> bool {
-    ns.is_some_and(|ns| MANAGED.iter().any(|&(u, l)| u == ns && l == local))
+type Prop = (&'static str, &'static str);
+
+/// The managed properties whose value differs from what the source document says. Everything
+/// else is left exactly as it is in the tree.
+fn dirty_props(sc: &Sidecar, orig: Option<&Sidecar>) -> Vec<Prop> {
+    let Some(o) = orig else {
+        return MANAGED.to_vec();
+    };
+    let mut d = Vec::new();
+    let mut add = |changed: bool, props: &[Prop]| {
+        if changed {
+            d.extend_from_slice(props);
+        }
+    };
+    let value = |s: &Sidecar| s.rating.as_ref().map(|r| r.value);
+    let modified = |s: &Sidecar| s.rating.as_ref().and_then(|r| r.modified);
+    add(value(sc) != value(o), &[(ns::XMP, "Rating")]);
+    add(
+        modified(sc) != modified(o),
+        &[(ns::ASTERIA, "RatingModified")],
+    );
+    add(sc.label != o.label, &[(ns::XMP, "Label")]);
+    add(sc.subjects != o.subjects, &[(ns::DC, "subject")]);
+    add(
+        sc.hierarchical_subjects != o.hierarchical_subjects,
+        &[(ns::LR, "hierarchicalSubject")],
+    );
+    add(sc.description != o.description, &[(ns::DC, "description")]);
+    add(
+        sc.user_ratings != o.user_ratings,
+        &[(ns::ASTERIA, "UserRatings")],
+    );
+    add(
+        sc.content_hash != o.content_hash,
+        &[(ns::ASTERIA, "ContentHash"), (ns::ASTERIA, "HashScope")],
+    );
+    d
+}
+
+fn is_dirty(dirty: &[Prop], ns: Option<&str>, local: &str) -> bool {
+    ns.is_some_and(|ns| dirty.iter().any(|&(u, l)| u == ns && l == local))
+}
+
+fn has(dirty: &[Prop], ns: &str, local: &str) -> bool {
+    is_dirty(dirty, Some(ns), local)
 }
 
 /// Namespace declarations in scope at the element being written.
@@ -111,7 +156,7 @@ fn find_rdf(e: &mut Element) -> Option<&mut Element> {
     })
 }
 
-fn apply(root: &mut Element, sc: &Sidecar) {
+fn apply(root: &mut Element, sc: &Sidecar, dirty: &[Prop]) {
     let mut scope = Scope(root.declarations.clone());
     let rdf: &mut Element = if root.is(ns::RDF, "RDF") {
         root
@@ -130,12 +175,12 @@ fn apply(root: &mut Element, sc: &Sidecar) {
     };
 
     // Managed properties may sit in any Description (attribute or element form); clear them all.
-    let mut other_langs = Vec::new();
+    let mut other_langs: Vec<Element> = Vec::new();
     for n in &mut rdf.children {
         if let Node::Element(d) = n
             && d.is(ns::RDF, "Description")
         {
-            strip_managed(d, &mut other_langs);
+            strip_managed(d, dirty, &mut other_langs);
         }
     }
 
@@ -168,7 +213,7 @@ fn apply(root: &mut Element, sc: &Sidecar) {
         return;
     };
     scope.0.extend(desc.declarations.iter().cloned());
-    fill(desc, &mut scope, sc, other_langs);
+    fill(desc, &mut scope, sc, dirty, other_langs);
 }
 
 fn qname(ns: &str, prefix: &str, local: &str) -> Name {
@@ -188,15 +233,15 @@ fn new_element(ns: &str, prefix: &str, local: &str) -> Element {
     }
 }
 
-/// Remove every managed attribute and child element. Language alternatives of `dc:description`
-/// other than `x-default` belong to the user, so they are returned as `(lang, text)`.
-fn strip_managed(d: &mut Element, other_langs: &mut Vec<(String, String)>) {
+/// Remove every dirty attribute and child element. Language alternatives of `dc:description`
+/// other than `x-default` belong to the user, so they are returned (as they are) for reuse.
+fn strip_managed(d: &mut Element, dirty: &[Prop], other_langs: &mut Vec<Element>) {
     d.attributes
-        .retain(|a| !is_managed(a.name.ns.as_deref(), &a.name.local));
+        .retain(|a| !is_dirty(dirty, a.name.ns.as_deref(), &a.name.local));
     let mut kept: Vec<Node> = Vec::with_capacity(d.children.len());
     for n in std::mem::take(&mut d.children) {
         match n {
-            Node::Element(e) if is_managed(e.name.ns.as_deref(), &e.name.local) => {
+            Node::Element(e) if is_dirty(dirty, e.name.ns.as_deref(), &e.name.local) => {
                 if e.is(ns::DC, "description") {
                     collect_other_langs(&e, other_langs);
                 }
@@ -211,15 +256,16 @@ fn strip_managed(d: &mut Element, other_langs: &mut Vec<(String, String)>) {
     d.children = kept;
 }
 
-fn collect_other_langs(prop: &Element, out: &mut Vec<(String, String)>) {
+fn collect_other_langs(prop: &Element, out: &mut Vec<Element>) {
     let Some(alt) = prop.child(ns::RDF, "Alt") else {
         return;
     };
     for li in alt.child_elements().filter(|e| e.is(ns::RDF, "li")) {
         if let Some(lang) = li.attr(ns::XML, "lang")
             && lang != "x-default"
+            && !out.iter().any(|o| o.attr(ns::XML, "lang") == Some(lang))
         {
-            out.push((lang.to_string(), li.raw_text()));
+            out.push(li.clone());
         }
     }
 }
@@ -228,7 +274,13 @@ fn fmt_time(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-fn fill(d: &mut Element, scope: &mut Scope, sc: &Sidecar, other_langs: Vec<(String, String)>) {
+fn fill(
+    d: &mut Element,
+    scope: &mut Scope,
+    sc: &Sidecar,
+    dirty: &[Prop],
+    other_langs: Vec<Element>,
+) {
     let mut decls = Vec::new();
     let mut xmp = None;
     let mut asteria = None;
@@ -253,24 +305,32 @@ fn fill(d: &mut Element, scope: &mut Scope, sc: &Sidecar, other_langs: Vec<(Stri
     let mut props: Vec<Element> = Vec::new();
 
     if let Some(r) = &sc.rating {
-        let p = pfx!(xmp, ns::XMP, "xmp");
-        attrs.push(attr(ns::XMP, p, "Rating", r.value.to_string()));
-        if let Some(m) = r.modified {
+        if has(dirty, ns::XMP, "Rating") {
+            let p = pfx!(xmp, ns::XMP, "xmp");
+            attrs.push(attr(ns::XMP, p, "Rating", r.value.to_string()));
+        }
+        if let (Some(m), true) = (r.modified, has(dirty, ns::ASTERIA, "RatingModified")) {
             let p = pfx!(asteria, ns::ASTERIA, "asteria");
             attrs.push(attr(ns::ASTERIA, p, "RatingModified", fmt_time(m)));
         }
     }
-    if let Some(l) = sc.label.as_deref().filter(|l| !l.is_empty()) {
+    let label = sc.label.as_deref().filter(|_| has(dirty, ns::XMP, "Label"));
+    if let Some(l) = label.filter(|l| !l.is_empty()) {
         let p = pfx!(xmp, ns::XMP, "xmp");
         attrs.push(attr(ns::XMP, p, "Label", l.to_string()));
     }
-    if let Some((h, s)) = &sc.content_hash {
+    let hash = sc.content_hash.as_ref();
+    if let Some((h, s)) = hash.filter(|_| has(dirty, ns::ASTERIA, "ContentHash")) {
         let p = pfx!(asteria, ns::ASTERIA, "asteria");
         attrs.push(attr(ns::ASTERIA, p.clone(), "ContentHash", h.to_string()));
         attrs.push(attr(ns::ASTERIA, p, "HashScope", s.to_string()));
     }
 
-    let subjects: Vec<&String> = sc.subjects.iter().filter(|s| !s.is_empty()).collect();
+    let subjects: Vec<&String> = sc
+        .subjects
+        .iter()
+        .filter(|s| !s.is_empty() && has(dirty, ns::DC, "subject"))
+        .collect();
     if !subjects.is_empty() {
         let (p, r) = (pfx!(dc, ns::DC, "dc"), pfx!(rdf, ns::RDF, "rdf"));
         props.push(literal_container(
@@ -285,7 +345,7 @@ fn fill(d: &mut Element, scope: &mut Scope, sc: &Sidecar, other_langs: Vec<(Stri
     let hier: Vec<&String> = sc
         .hierarchical_subjects
         .iter()
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && has(dirty, ns::LR, "hierarchicalSubject"))
         .collect();
     if !hier.is_empty() {
         let (p, r) = (pfx!(lr, ns::LR, "lr"), pfx!(rdf, ns::RDF, "rdf"));
@@ -299,31 +359,28 @@ fn fill(d: &mut Element, scope: &mut Scope, sc: &Sidecar, other_langs: Vec<(Stri
         ));
     }
 
+    let desc_dirty = has(dirty, ns::DC, "description");
     let desc = sc.description.as_deref().filter(|s| !s.is_empty());
-    if desc.is_some() || !other_langs.is_empty() {
+    if desc_dirty && (desc.is_some() || !other_langs.is_empty()) {
         let (p, r) = (pfx!(dc, ns::DC, "dc"), pfx!(rdf, ns::RDF, "rdf"));
-        let lang = |l: &str, text: &str| {
+        let mut alt = new_element(ns::RDF, &r, "Alt");
+        if let Some(t) = desc {
             let mut li = new_element(ns::RDF, &r, "li");
             li.attributes.push(Attribute {
                 name: qname(ns::XML, "xml", "lang"),
-                value: l.to_string(),
+                value: "x-default".to_string(),
             });
-            li.children.push(Node::Text(text.to_string()));
-            Node::Element(li)
-        };
-        let mut alt = new_element(ns::RDF, &r, "Alt");
-        if let Some(t) = desc {
-            alt.children.push(lang("x-default", t));
+            li.children.push(Node::Text(t.to_string()));
+            alt.children.push(Node::Element(li));
         }
-        for (l, t) in &other_langs {
-            alt.children.push(lang(l, t));
-        }
+        alt.children
+            .extend(other_langs.into_iter().map(Node::Element));
         let mut prop = new_element(ns::DC, &p, "description");
         prop.children.push(Node::Element(alt));
         props.push(prop);
     }
 
-    if !sc.user_ratings.is_empty() {
+    if !sc.user_ratings.is_empty() && has(dirty, ns::ASTERIA, "UserRatings") {
         let (a, r) = (
             pfx!(asteria, ns::ASTERIA, "asteria"),
             pfx!(rdf, ns::RDF, "rdf"),

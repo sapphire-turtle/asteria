@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 const TMP_SUFFIX: &str = ".asteria-tmp";
 
@@ -18,23 +18,54 @@ pub fn tmp_path_for(path: &Path) -> PathBuf {
 }
 
 /// Replace `path` with `bytes` so readers see either the old or the new content, never a mix.
+///
+/// The temp file is created exclusively; if it already exists (another writer, or a leftover
+/// for [`cleanup_tmp_files`]) this fails with [`Error::TmpExists`] and leaves it alone. The
+/// target's permission bits are kept, and a symlink target is replaced at its resolved path.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     if path.file_name().is_none() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "path has no file name").into());
     }
-    let tmp = tmp_path_for(path);
-    let result = write_and_rename(&tmp, path, bytes);
+    let path = resolve_link(path);
+    let tmp = tmp_path_for(&path);
+    let mut f = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(Error::TmpExists(tmp)),
+        Err(e) => return Err(e.into()),
+    };
+    let result = write_and_rename(&mut f, &tmp, &path, bytes);
+    drop(f);
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
     Ok(result?)
 }
 
-fn write_and_rename(tmp: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut f = fs::File::create(tmp)?;
+/// Follow symlinks (even dangling ones) so the link itself survives the rename.
+fn resolve_link(path: &Path) -> PathBuf {
+    let mut cur = path.to_path_buf();
+    for _ in 0..40 {
+        match fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => match fs::read_link(&cur) {
+                Ok(t) => cur = cur.parent().map_or(t.clone(), |p| p.join(&t)),
+                Err(_) => return cur,
+            },
+            _ => return cur,
+        }
+    }
+    cur
+}
+
+fn write_and_rename(f: &mut fs::File, tmp: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Ok(meta) = fs::metadata(path) {
+        f.set_permissions(meta.permissions())?;
+    }
     f.write_all(bytes)?;
     f.sync_all()?;
-    drop(f);
     fs::rename(tmp, path)?;
     // Persist the rename itself; not possible on every platform, so best effort.
     #[cfg(unix)]
