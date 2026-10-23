@@ -3,6 +3,7 @@
 
 pub mod audio_session;
 pub mod log;
+pub mod memory;
 pub mod now_playing;
 pub mod pasteboard;
 pub mod photos;

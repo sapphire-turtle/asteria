@@ -125,48 +125,104 @@ fn asset_info(asset: &PHAsset) -> AssetInfo {
     }
 }
 
-/// The resource at `resource_index` of the asset `local_id`, if both still exist.
-fn find_resource(local_id: &str, resource_index: usize) -> Option<Retained<PHAssetResource>> {
+/// The resource at `resource_index` of the asset `local_id`, if both still exist and it
+/// is still the resource `expected` describes.
+fn find_resource(
+    local_id: &str,
+    resource_index: usize,
+    expected: &ResourceInfo,
+) -> Result<Retained<PHAssetResource>, String> {
     let ids = NSArray::from_retained_slice(&[NSString::from_str(local_id)]);
     // SAFETY: as in `counts`.
     unsafe {
-        let asset = PHAsset::fetchAssetsWithLocalIdentifiers_options(&ids, None).firstObject()?;
+        let asset = PHAsset::fetchAssetsWithLocalIdentifiers_options(&ids, None)
+            .firstObject()
+            .ok_or("asset not found")?;
         let resources = PHAssetResource::assetResourcesForAsset(&asset);
-        (resource_index < resources.count()).then(|| resources.objectAtIndex(resource_index))
+        if resource_index >= resources.count() {
+            return Err(format!("resource {resource_index} not found"));
+        }
+        let resource = resources.objectAtIndex(resource_index);
+        let kind = ResourceKind::from_raw(resource.r#type().0 as i64);
+        let name = resource.originalFilename().to_string();
+        if kind != expected.kind || name != expected.original_filename {
+            return Err(format!(
+                "resource {resource_index} is now {kind:?} {name}, not {:?} {}",
+                expected.kind, expected.original_filename
+            ));
+        }
+        Ok(resource)
     }
 }
 
-/// What the data handler and the completion handler share.
+/// What the handlers of one read share.
 struct Reading {
     hash: Option<StreamHash>,
     last_progress: Instant,
+    from_icloud: bool,
 }
 
+impl Reading {
+    /// Whether enough time passed since the last progress event to send another.
+    fn progress_due(&mut self) -> bool {
+        let due = self.last_progress.elapsed() >= PROGRESS_INTERVAL;
+        if due {
+            self.last_progress = Instant::now();
+        }
+        due
+    }
+}
+
+/// Identifies a read in flight, for [`cancel`].
+pub type RequestId = i32;
+
 /// Read resource `resource_index` of asset `local_id` (downloading it from iCloud if
-/// needed), hashing each chunk as it arrives so the file is never held whole. Sends
-/// [`FetchEvent::Progress`] at most every 100 ms and then one [`FetchEvent::Done`].
+/// needed), hashing each chunk as it arrives so the file is never held whole. The
+/// resource must still be the one `expected` describes. Sends [`FetchEvent::Progress`]
+/// and [`FetchEvent::Downloading`] at most every 100 ms and then one
+/// [`FetchEvent::Done`]. Returns the request, or `None` if the read failed to start (its
+/// `Done` is already sent).
 pub fn fetch_original(
     local_id: &str,
     resource_index: usize,
+    expected: &ResourceInfo,
     tx: Sender<FetchEvent>,
     ctx: egui::Context,
-) {
+) -> Option<RequestId> {
     let started = Instant::now();
-    let Some(resource) = find_resource(local_id, resource_index) else {
-        let _ = tx.send(FetchEvent::Done(FetchResult {
-            bytes: 0,
-            hash: String::new(),
-            secs: 0.0,
-            error: Some("asset or resource not found".to_owned()),
-        }));
-        ctx.request_repaint();
-        return;
+    let resource = match find_resource(local_id, resource_index, expected) {
+        Ok(resource) => resource,
+        Err(error) => {
+            let _ = tx.send(FetchEvent::Done(FetchResult {
+                bytes: 0,
+                hash: String::new(),
+                secs: 0.0,
+                error: Some(error),
+                from_icloud: false,
+            }));
+            ctx.request_repaint();
+            return None;
+        }
     };
     let reading = Arc::new(Mutex::new(Reading {
         hash: Some(StreamHash::new()),
         last_progress: started,
+        from_icloud: false,
     }));
 
+    let on_download = {
+        let (reading, tx, ctx) = (reading.clone(), tx.clone(), ctx.clone());
+        RcBlock::new(move |fraction: f64| {
+            guarded("photo download progress handler", (), || {
+                let mut reading = reading.lock().unwrap_or_else(|e| e.into_inner());
+                reading.from_icloud = true;
+                if reading.progress_due() || fraction >= 1.0 {
+                    let _ = tx.send(FetchEvent::Downloading(fraction));
+                    ctx.request_repaint();
+                }
+            });
+        })
+    };
     let on_data = {
         let (reading, tx, ctx) = (reading.clone(), tx.clone(), ctx.clone());
         RcBlock::new(move |data: NonNull<NSData>| {
@@ -179,8 +235,7 @@ pub fn fetch_original(
                 };
                 hash.update(chunk);
                 let bytes = hash.bytes();
-                if reading.last_progress.elapsed() >= PROGRESS_INTERVAL {
-                    reading.last_progress = Instant::now();
+                if reading.progress_due() {
                     let _ = tx.send(FetchEvent::Progress(bytes));
                     ctx.request_repaint();
                 }
@@ -191,33 +246,41 @@ pub fn fetch_original(
         guarded("photo completion handler", (), || {
             // SAFETY: PhotoKit passes null or a valid error for the call's duration.
             let error = unsafe { error.as_ref() }.map(|e| e.localizedDescription().to_string());
-            let hash = reading
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .hash
-                .take()
-                .unwrap_or_default();
+            let (hash, from_icloud) = {
+                let mut reading = reading.lock().unwrap_or_else(|e| e.into_inner());
+                (reading.hash.take().unwrap_or_default(), reading.from_icloud)
+            };
             let (bytes, hash) = hash.finish();
             let _ = tx.send(FetchEvent::Done(FetchResult {
                 bytes,
                 hash,
                 secs: started.elapsed().as_secs_f64(),
                 error,
+                from_icloud,
             }));
             ctx.request_repaint();
         });
     });
-    // SAFETY: the manager copies both blocks and calls them on its own queue; they only
-    // use a mutex, a channel and the egui context. `resource` came from a fetch just now.
+    // SAFETY: the options copy the progress block and the manager copies the other two;
+    // PhotoKit calls them on its own queues, and they only use a mutex, a channel and the
+    // egui context. `resource` came from a fetch just now.
     unsafe {
         let options = PHAssetResourceRequestOptions::new();
         options.setNetworkAccessAllowed(true);
-        PHAssetResourceManager::defaultManager()
+        options.setProgressHandler(RcBlock::as_ptr(&on_download));
+        let request = PHAssetResourceManager::defaultManager()
             .requestDataForAssetResource_options_dataReceivedHandler_completionHandler(
                 &resource,
                 Some(&options),
                 &on_data,
                 &on_done,
             );
+        Some(request)
     }
+}
+
+/// Cancel the read `request`. PhotoKit then calls its completion handler with an error.
+pub fn cancel(request: RequestId) {
+    // SAFETY: cancelling an unknown or finished request is a no-op.
+    unsafe { PHAssetResourceManager::defaultManager().cancelDataRequest(request) };
 }

@@ -186,6 +186,9 @@ impl StreamHash {
 pub enum FetchEvent {
     /// The bytes read so far.
     Progress(u64),
+    /// How much of an iCloud download is done, from 0 to 1. Only sent for originals that
+    /// are not on the device.
+    Downloading(f64),
     /// The read ended.
     Done(FetchResult),
 }
@@ -199,6 +202,8 @@ pub struct FetchResult {
     pub secs: f64,
     /// Why the read failed, if it did; `bytes` and `hash` then cover what arrived.
     pub error: Option<String>,
+    /// Whether PhotoKit reported download progress, i.e. the original came from iCloud.
+    pub from_icloud: bool,
 }
 
 impl FetchResult {
@@ -211,6 +216,9 @@ impl FetchResult {
             mb_per_s(self.bytes, self.secs),
             self.hash,
         );
+        if self.from_icloud {
+            line.push_str(", from iCloud");
+        }
         if let Some(error) = &self.error {
             line.push_str(&format!(", error: {error}"));
         }
@@ -372,6 +380,27 @@ mod tests {
         let line = sample_line(&live);
         assert!(line.starts_with("no date live: "), "{line}");
         assert!(line.ends_with("-> IMG_0001.HEIC + IMG_0001.mov"), "{line}");
+    }
+
+    #[test]
+    fn fetch_summary_marks_icloud_and_errors() {
+        let mut result = FetchResult {
+            bytes: 2_000_000,
+            hash: "blake3:ab".to_owned(),
+            secs: 1.0,
+            error: None,
+            from_icloud: false,
+        };
+        assert_eq!(
+            result.summary(),
+            "2000000 bytes, 1.00 s, 2.0 MB/s, blake3:ab"
+        );
+        result.from_icloud = true;
+        result.error = Some("timeout".to_owned());
+        assert_eq!(
+            result.summary(),
+            "2000000 bytes, 1.00 s, 2.0 MB/s, blake3:ab, from iCloud, error: timeout"
+        );
     }
 
     #[test]
