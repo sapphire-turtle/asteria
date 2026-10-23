@@ -1,10 +1,11 @@
-//! iOS-only code. Everything that touches UIKit, AVFoundation or MediaPlayer lives under
+//! iOS-only code. Everything that touches UIKit, AVFoundation, MediaPlayer or Photos lives under
 //! this module.
 
 pub mod audio_session;
 pub mod log;
 pub mod now_playing;
 pub mod pasteboard;
+pub mod photos;
 
 /// Run `f`, logging instead of unwinding if it panics. Objective-C blocks call back into
 /// Rust through a C boundary, where a panic must not escape.

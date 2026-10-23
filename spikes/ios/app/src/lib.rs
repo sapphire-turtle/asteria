@@ -5,6 +5,7 @@
 pub mod audio;
 #[cfg(target_os = "ios")]
 mod ios;
+pub mod photos;
 mod report;
 pub mod screens;
 
@@ -20,6 +21,7 @@ use audio::Source;
 use audio::{Engine, PlayState};
 use screens::audio::AudioScreen;
 use screens::display::DisplayScreen;
+use screens::photos::PhotosScreen;
 
 /// The app: the shell, its screens' state and the shared report.
 struct SpikeApp {
@@ -27,6 +29,7 @@ struct SpikeApp {
     report: SharedReport,
     display: DisplayScreen,
     audio: AudioScreen,
+    photos: PhotosScreen,
     engine: Engine,
     /// Notification observers and remote-command targets, alive as long as the app.
     #[cfg(target_os = "ios")]
@@ -50,6 +53,7 @@ impl SpikeApp {
         report.set("fonts.cjk", cjk.as_deref().unwrap_or("none"));
         let display = DisplayScreen::new(&mut report);
         let audio = AudioScreen::new(&mut report);
+        let photos = PhotosScreen::new(ctx, &mut report);
         // The session must be in the playback category before the first stream exists.
         #[cfg(target_os = "ios")]
         report.set(
@@ -71,6 +75,7 @@ impl SpikeApp {
             report,
             display,
             audio,
+            photos,
             engine,
         }
     }
@@ -83,12 +88,12 @@ impl eframe::App for SpikeApp {
         let mut report = report.lock().unwrap_or_else(|e| e.into_inner());
         self.display.update(ui.ctx(), &mut report);
         let display = &mut self.display;
-        let (audio, engine) = (&mut self.audio, &self.engine);
+        let (audio, photos, engine) = (&mut self.audio, &mut self.photos, &self.engine);
         self.shell.ui(ui, |ui, screen| {
             egui::CentralPanel::default().show(ui, |ui| match screen {
                 Screen::Display => display.ui(ui, &mut report),
                 Screen::Audio => audio.ui(ui, engine, &mut report),
-                Screen::Photos => screens::not_implemented(ui, "Photos"),
+                Screen::Photos => photos.ui(ui, &mut report),
                 Screen::Opus => screens::not_implemented(ui, "Opus"),
                 Screen::Report => screens::report::ui(ui, &report),
             });

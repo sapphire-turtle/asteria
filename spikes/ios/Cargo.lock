@@ -143,6 +143,7 @@ dependencies = [
 name = "asteria-ios-spike"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "block2 0.6.2",
  "corundum-gui",
  "cpal",
@@ -153,6 +154,7 @@ dependencies = [
  "objc2-avf-audio",
  "objc2-foundation 0.3.2",
  "objc2-media-player",
+ "objc2-photos",
  "objc2-ui-kit 0.3.2",
  "opus-probe",
  "tracing",
@@ -1926,6 +1928,18 @@ name = "objc2-metal"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a0125f776a10d00af4152d74616409f0d4a2053a6f57fa5b7d6aa2854ac04794"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2 0.6.2",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-photos"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6ea9a706f18e32cf8a0723e99855af4f135282891e07259301bae9135ae3872"
 dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",

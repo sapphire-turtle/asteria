@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod display;
+pub mod photos;
 pub mod report;
 
 use corundum_gui::{Destination, egui, icons};
@@ -15,7 +16,7 @@ pub enum Screen {
     Display,
     /// Background audio, interruptions and lock-screen controls.
     Audio,
-    /// Photo library access (not built yet).
+    /// Photo library access, the newest assets and streamed reads of their originals.
     Photos,
     /// Opus decoding on the device (not built yet).
     Opus,
