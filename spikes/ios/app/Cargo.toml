@@ -12,12 +12,12 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 corundum-gui = { git = "https://github.com/sapphire-turtle/sapphire-framework", rev = "bb7c34fbdf35ea7a46121aa70d53f3107d033619" }
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts"] }
+log = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
-log = "0.4"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString"] }
 objc2-ui-kit = { version = "0.3", features = ["UIPasteboard"] }

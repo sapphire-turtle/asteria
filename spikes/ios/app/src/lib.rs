@@ -24,8 +24,14 @@ struct SpikeApp {
 }
 
 impl SpikeApp {
-    fn new(ctx: &egui::Context) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let ctx = &cc.egui_ctx;
         let mut report = Report::default();
+        let gpu = cc.wgpu_render_state.as_ref().map(|state| {
+            let info = state.adapter.get_info();
+            format!("{} ({:?})", info.name, info.backend)
+        });
+        report.set("gpu.adapter", gpu.as_deref().unwrap_or("none"));
         // Replaces egui's font set, so it comes before anything draws.
         let cjk = corundum_gui::fonts::install_system_cjk_fallback(ctx);
         report.set("fonts.cjk", cjk.as_deref().unwrap_or("none"));
@@ -60,11 +66,37 @@ impl eframe::App for SpikeApp {
 /// Open the spike's window and run until it closes. On iOS this is called on the main
 /// thread and does not return until the app exits.
 pub fn run() -> eframe::Result {
+    let options = eframe::NativeOptions {
+        wgpu_options: wgpu_options(),
+        ..Default::default()
+    };
     eframe::run_native(
         "Asteria Spike",
-        eframe::NativeOptions::default(),
-        Box::new(|cc| Ok(Box::new(SpikeApp::new(&cc.egui_ctx)))),
+        options,
+        Box::new(|cc| Ok(Box::new(SpikeApp::new(cc)))),
     )
+}
+
+/// egui's wgpu setup, with the requested device limits clamped to what the adapter
+/// reports. wgpu's defaults exceed some adapters (the iOS simulator's Metal one), and
+/// requesting more than the adapter has makes device creation fail.
+fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::WgpuSetup;
+
+    let mut options = eframe::egui_wgpu::WgpuConfiguration::default();
+    if let WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
+        let egui_default = Arc::clone(&setup.device_descriptor);
+        setup.device_descriptor = Arc::new(move |adapter| {
+            let mut descriptor = egui_default(adapter);
+            let supported = adapter.limits();
+            descriptor.required_limits =
+                descriptor.required_limits.or_worse_values_from(&supported);
+            log::info!("wgpu adapter: {:?}", adapter.get_info());
+            log::info!("wgpu requested limits: {:?}", descriptor.required_limits);
+            descriptor
+        });
+    }
+    options
 }
 
 /// Put `text` on the system clipboard.
