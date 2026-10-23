@@ -222,10 +222,27 @@ async fn shutdown_stops_the_loop() {
 async fn reading_files_does_not_trigger_scans() {
     let e = start(|r| red(&r.join("a.jpg")), false);
     wait_for("first pass", || e.passes.load(Ordering::SeqCst) >= 1).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Some backends (FSEvents) deliver the setup file's events late and cause a further,
+    // legitimate pass; wait until the count has been stable for 1s (well over the 100ms
+    // debounce) before taking the baseline.
+    let mut baseline = e.passes.load(Ordering::SeqCst);
+    let mut stable_since = Instant::now();
+    let end = Instant::now() + Duration::from_secs(5);
+    while stable_since.elapsed() < Duration::from_secs(1) {
+        assert!(
+            Instant::now() < end,
+            "timed out waiting for passes to settle"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let now = e.passes.load(Ordering::SeqCst);
+        if now != baseline {
+            baseline = now;
+            stable_since = Instant::now();
+        }
+    }
     for _ in 0..3 {
         let _ = fs::read(e.root.join("a.jpg")).unwrap();
     }
     tokio::time::sleep(Duration::from_millis(800)).await;
-    assert_eq!(e.passes.load(Ordering::SeqCst), 1);
+    assert_eq!(e.passes.load(Ordering::SeqCst), baseline);
 }
