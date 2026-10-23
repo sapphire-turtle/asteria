@@ -16,6 +16,8 @@ targets:
     settings:
       base:
         TARGETED_DEVICE_FAMILY: "1"
+        ARCHS: arm64
+        EXCLUDED_ARCHS: x86_64
         LIBRARY_SEARCH_PATHS: "$(BUILT_PRODUCTS_DIR)/rust"
         OTHER_LDFLAGS: "-lasteria_ios_spike"
         GENERATE_INFOPLIST_FILE: NO

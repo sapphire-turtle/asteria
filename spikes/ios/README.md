@@ -11,6 +11,8 @@ egui/eframe (wgpu) を iOS の実機で動かし、写真・音声・日本語�
 5. `cd spikes/ios/xcode && xcodegen generate && open AsteriaSpike.xcodeproj`
 6. 実機を選んで Run（初回は端末側で開発者を信頼する）。
 
+シミュレーターは arm64 のみ対応（Rust のライブラリが arm64 だけのため）。Apple Silicon の Mac が必要で、Intel Mac のシミュレーターでは動かない。
+
 ## 結果の集め方
 
 アプリのレポートの画面で「コピー」を押し、チェックリストの文書に貼る。
