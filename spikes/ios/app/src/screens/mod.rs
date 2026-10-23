@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod display;
+pub mod opus;
 pub mod photos;
 pub mod report;
 
@@ -18,7 +19,7 @@ pub enum Screen {
     Audio,
     /// Photo library access, the newest assets and streamed reads of their originals.
     Photos,
-    /// Opus decoding on the device (not built yet).
+    /// Opus decoder timing on the device.
     Opus,
     /// The report text and its copy button.
     Report,
@@ -36,12 +37,6 @@ impl Screen {
             Destination::new(Screen::Report, icons::file_text(), "Report"),
         ]
     }
-}
-
-/// The body of a screen that is not built yet.
-pub fn not_implemented(ui: &mut egui::Ui, name: &str) {
-    ui.heading(name);
-    ui.label("未実装");
 }
 
 /// What the person answered for one checklist item.

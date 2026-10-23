@@ -19,4 +19,4 @@ egui/eframe (wgpu) を iOS の実機で動かし、写真・音声・日本語�
 
 ## CI
 
-`.github/workflows/ios-spike.yml` の `ios` ジョブが、署名なしでシミュレーター向けにビルドして起動し、スクリーンショットとコンソール出力をアーティファクト `ios-simulator` に残す。
+`.github/workflows/ios-spike.yml` の `ios` ジョブが、ad-hoc 署名（CODE_SIGN_IDENTITY "-"）でシミュレーター向けにビルドして起動し、スクリーンショットとコンソール出力をアーティファクト `ios-simulator` に残す。

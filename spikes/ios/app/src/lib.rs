@@ -21,6 +21,7 @@ use audio::Source;
 use audio::{Engine, PlayState};
 use screens::audio::AudioScreen;
 use screens::display::DisplayScreen;
+use screens::opus::OpusScreen;
 use screens::photos::PhotosScreen;
 
 /// The app: the shell, its screens' state and the shared report.
@@ -30,6 +31,7 @@ struct SpikeApp {
     display: DisplayScreen,
     audio: AudioScreen,
     photos: PhotosScreen,
+    opus: OpusScreen,
     engine: Engine,
     /// Notification observers and remote-command targets, alive as long as the app.
     #[cfg(target_os = "ios")]
@@ -54,6 +56,7 @@ impl SpikeApp {
         let display = DisplayScreen::new(&mut report);
         let audio = AudioScreen::new(&mut report);
         let photos = PhotosScreen::new(ctx, &mut report);
+        let opus = OpusScreen::new(&mut report);
         // The session must be in the playback category before the first stream exists.
         #[cfg(target_os = "ios")]
         report.set(
@@ -76,6 +79,7 @@ impl SpikeApp {
             display,
             audio,
             photos,
+            opus,
             engine,
         }
     }
@@ -88,16 +92,28 @@ impl eframe::App for SpikeApp {
         let mut report = report.lock().unwrap_or_else(|e| e.into_inner());
         self.display.update(ui.ctx(), &mut report);
         let display = &mut self.display;
-        let (audio, photos, engine) = (&mut self.audio, &mut self.photos, &self.engine);
-        self.shell.ui(ui, |ui, screen| {
-            egui::CentralPanel::default().show(ui, |ui| match screen {
-                Screen::Display => display.ui(ui, &mut report),
-                Screen::Audio => audio.ui(ui, engine, &mut report),
-                Screen::Photos => photos.ui(ui, &mut report),
-                Screen::Opus => screens::not_implemented(ui, "Opus"),
-                Screen::Report => screens::report::ui(ui, &report),
+        let (audio, photos, opus, engine) = (
+            &mut self.audio,
+            &mut self.photos,
+            &mut self.opus,
+            &self.engine,
+        );
+        // Works around a corundum-gui gap (to be filed upstream): its Shell draws under
+        // the status bar and over the home indicator, so hand it the safe area only.
+        let insets = ui.ctx().input(|i| i.safe_area_insets());
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::from(insets.0)))
+            .show(ui, |ui| {
+                self.shell.ui(ui, |ui, screen| {
+                    egui::CentralPanel::default().show(ui, |ui| match screen {
+                        Screen::Display => display.ui(ui, &mut report),
+                        Screen::Audio => audio.ui(ui, engine, &mut report),
+                        Screen::Photos => photos.ui(ui, &mut report),
+                        Screen::Opus => opus.ui(ui, &mut report),
+                        Screen::Report => screens::report::ui(ui, &report),
+                    });
+                });
             });
-        });
     }
 }
 
