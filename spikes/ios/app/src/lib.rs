@@ -2,6 +2,7 @@
 //! device (display, touch, audio, photos). The screens live in [`screens`]; what the run
 //! learns goes into the [`Report`].
 
+pub mod audio;
 #[cfg(target_os = "ios")]
 mod ios;
 mod report;
@@ -14,6 +15,10 @@ use corundum_gui::{Shell, egui};
 pub use report::{Report, SharedReport};
 pub use screens::Screen;
 
+#[cfg(target_os = "ios")]
+use audio::Source;
+use audio::{Engine, PlayState};
+use screens::audio::AudioScreen;
 use screens::display::DisplayScreen;
 
 /// The app: the shell, its screens' state and the shared report.
@@ -21,6 +26,14 @@ struct SpikeApp {
     shell: Shell<Screen>,
     report: SharedReport,
     display: DisplayScreen,
+    audio: AudioScreen,
+    engine: Engine,
+    /// Notification observers and remote-command targets, alive as long as the app.
+    #[cfg(target_os = "ios")]
+    _audio_hooks: (
+        ios::audio_session::Observers,
+        ios::now_playing::RemoteTargets,
+    ),
 }
 
 impl SpikeApp {
@@ -36,10 +49,29 @@ impl SpikeApp {
         let cjk = corundum_gui::fonts::install_system_cjk_fallback(ctx);
         report.set("fonts.cjk", cjk.as_deref().unwrap_or("none"));
         let display = DisplayScreen::new(&mut report);
+        let audio = AudioScreen::new(&mut report);
+        // The session must be in the playback category before the first stream exists.
+        #[cfg(target_os = "ios")]
+        report.set(
+            "audio.session",
+            match ios::audio_session::activate_playback() {
+                Ok(()) => "playback, active".to_owned(),
+                Err(e) => e,
+            },
+        );
+        let report = Arc::new(Mutex::new(report));
+        let engine = Engine::start(report.clone(), on_playback_change(ctx.clone()));
         Self {
             shell: Shell::new(Screen::destinations()),
-            report: Arc::new(Mutex::new(report)),
+            #[cfg(target_os = "ios")]
+            _audio_hooks: (
+                ios::audio_session::observe(engine.sender(), report.clone()),
+                ios::now_playing::register(engine.sender(), report.clone()),
+            ),
+            report,
             display,
+            audio,
+            engine,
         }
     }
 }
@@ -51,15 +83,32 @@ impl eframe::App for SpikeApp {
         let mut report = report.lock().unwrap_or_else(|e| e.into_inner());
         self.display.update(ui.ctx(), &mut report);
         let display = &mut self.display;
+        let (audio, engine) = (&mut self.audio, &self.engine);
         self.shell.ui(ui, |ui, screen| {
             egui::CentralPanel::default().show(ui, |ui| match screen {
                 Screen::Display => display.ui(ui, &mut report),
-                Screen::Audio => screens::not_implemented(ui, "Audio"),
+                Screen::Audio => audio.ui(ui, engine, &mut report),
                 Screen::Photos => screens::not_implemented(ui, "Photos"),
                 Screen::Opus => screens::not_implemented(ui, "Opus"),
                 Screen::Report => screens::report::ui(ui, &report),
             });
         });
+    }
+}
+
+/// What happens when playback changes (and every few seconds while it plays), on the
+/// audio engine's thread: redraw the UI and, on iOS, update the lock screen.
+fn on_playback_change(ctx: egui::Context) -> impl FnMut(PlayState, f64) + Send + 'static {
+    move |state, elapsed_secs| {
+        ctx.request_repaint();
+        #[cfg(target_os = "ios")]
+        ios::now_playing::update(
+            state.source().map_or("Stopped", Source::title),
+            matches!(state, PlayState::Playing(_)),
+            elapsed_secs,
+        );
+        #[cfg(not(target_os = "ios"))]
+        let _ = (state, elapsed_secs);
     }
 }
 

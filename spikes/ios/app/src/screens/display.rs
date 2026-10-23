@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 
 use corundum_gui::egui::{self, Event, TouchId, TouchPhase};
 
+use super::{Answer, checklist};
 use crate::report::Report;
 
 /// The things the person holding the device confirms, as `(report key, label)`.
@@ -17,24 +18,6 @@ const CHECKS: &[(&str, &str)] = &[
     ("cjk", "日本語の表示"),
     ("rotate", "画面の回転"),
 ];
-
-/// What the person answered for one check.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Answer {
-    Unchecked,
-    Ok,
-    Ng,
-}
-
-impl Answer {
-    fn as_str(self) -> &'static str {
-        match self {
-            Answer::Unchecked => "unchecked",
-            Answer::Ok => "ok",
-            Answer::Ng => "ng",
-        }
-    }
-}
 
 /// State of the display screen.
 pub struct DisplayScreen {
@@ -48,9 +31,7 @@ pub struct DisplayScreen {
 impl DisplayScreen {
     /// A fresh screen; every check starts as `unchecked` in `report`.
     pub fn new(report: &mut Report) -> Self {
-        for (key, _) in CHECKS {
-            report.set(&format!("check.display.{key}"), Answer::Unchecked.as_str());
-        }
+        super::reset_checklist("display", CHECKS, report);
         Self {
             taps: 0,
             text: String::new(),
@@ -138,17 +119,7 @@ impl DisplayScreen {
                 ui.add(egui::TextEdit::singleline(&mut self.text).hint_text("ここに入力"));
                 ui.separator();
 
-                for (i, (key, name)) in CHECKS.iter().enumerate() {
-                    let before = self.answers[i];
-                    ui.horizontal(|ui| {
-                        ui.label(*name);
-                        ui.selectable_value(&mut self.answers[i], Answer::Ok, "OK");
-                        ui.selectable_value(&mut self.answers[i], Answer::Ng, "NG");
-                    });
-                    if self.answers[i] != before {
-                        report.set(&format!("check.display.{key}"), self.answers[i].as_str());
-                    }
-                }
+                checklist(ui, "display", CHECKS, &mut self.answers, report);
             });
     }
 }
