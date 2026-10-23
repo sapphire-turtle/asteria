@@ -78,15 +78,18 @@ pub(crate) fn copy_report(ctx: &egui::Context, text: &str) {
     ctx.copy_text(text.to_owned());
 }
 
-/// The entry point `main.m` calls on the main thread. Errors and panics are printed (to
-/// the Xcode console) instead of crashing, because unwinding across the C boundary
+/// The entry point `main.m` calls on the main thread. Errors and panics are logged (to
+/// the unified log and the Xcode console) instead of crashing, because unwinding across the C boundary
 /// would abort without saying why.
 #[cfg(target_os = "ios")]
 #[unsafe(no_mangle)]
 pub extern "C" fn asteria_spike_main() {
+    use ios::log::{install_panic_hook, log};
+    install_panic_hook();
+    log("asteria_spike_main: start");
     match std::panic::catch_unwind(run) {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => eprintln!("asteria_spike_main: run failed: {e}"),
-        Err(_) => eprintln!("asteria_spike_main: run panicked"),
+        Ok(Ok(())) => log("asteria_spike_main: eframe returned"),
+        Ok(Err(e)) => log(&format!("asteria_spike_main: run failed: {e}")),
+        Err(_) => log("asteria_spike_main: run panicked"),
     }
 }

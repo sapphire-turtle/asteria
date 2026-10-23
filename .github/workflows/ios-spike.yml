@@ -75,6 +75,11 @@ jobs:
         run: |
           app=build/Build/Products/Debug-iphonesimulator/AsteriaSpike.app
           bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
+          expected=$(sed -n 's/^PRODUCT_BUNDLE_IDENTIFIER *= *//p' Local.xcconfig.example)
+          if [ "$bundle_id" != "$expected" ]; then
+            echo "::error::built bundle id '$bundle_id' != '$expected' from Local.xcconfig.example"
+            exit 1
+          fi
           codesign -dv "$app" 2>&1 || true
           echo "bundle id: $bundle_id"
           xcrun simctl install "$SIM_UDID" "$app"
@@ -96,7 +101,7 @@ jobs:
         working-directory: spikes/ios/xcode
         run: |
           if [ -n "${SIM_UDID:-}" ]; then
-            xcrun simctl spawn "$SIM_UDID" log show --last 2m --style compact \
+            xcrun simctl spawn "$SIM_UDID" log show --last 2m --style compact --info --debug \
               --predicate 'process == "AsteriaSpike"' > simulator-log.txt 2>&1 || true
           fi
           mkdir -p crash-reports

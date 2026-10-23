@@ -1,6 +1,5 @@
 name: AsteriaSpike
 options:
-  bundleIdPrefix: io.github.sapphireturtle.asteria
   deploymentTarget:
     iOS: "16.0"
 configFiles:
@@ -11,6 +10,11 @@ targets:
     type: application
     platform: iOS
     deploymentTarget: "16.0"
+    # Set on the target as well: bundleIdPrefix is deliberately not used, since it
+    # writes PRODUCT_BUNDLE_IDENTIFIER into the target and would override the xcconfig.
+    configFiles:
+      Debug: Config.xcconfig
+      Release: Config.xcconfig
     sources:
       - Sources
     settings:
