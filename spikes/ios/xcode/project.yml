@@ -1,0 +1,64 @@
+name: AsteriaSpike
+options:
+  bundleIdPrefix: io.github.sapphireturtle.asteria
+  deploymentTarget:
+    iOS: "16.0"
+configFiles:
+  Debug: Config.xcconfig
+  Release: Config.xcconfig
+targets:
+  AsteriaSpike:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - Sources
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1"
+        LIBRARY_SEARCH_PATHS: "$(BUILT_PRODUCTS_DIR)/rust"
+        OTHER_LDFLAGS: "-lasteria_ios_spike"
+        GENERATE_INFOPLIST_FILE: NO
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Asteria Spike
+        UILaunchScreen: {}
+        UIBackgroundModes: [audio]
+        NSPhotoLibraryUsageDescription: 写真の一覧と原本の読み取りを試すために使います。
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIApplicationSupportsIndirectInputEvents: true
+    preBuildScripts:
+      - name: Build Rust staticlib
+        script: ./build-rust.sh
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(SRCROOT)/../app/src
+          - $(SRCROOT)/../opus-probe/src
+          - $(SRCROOT)/../Cargo.lock
+        outputFiles:
+          - $(BUILT_PRODUCTS_DIR)/rust/libasteria_ios_spike.a
+    dependencies:
+      - sdk: UIKit.framework
+      - sdk: Foundation.framework
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: Photos.framework
+      - sdk: AVFAudio.framework
+      - sdk: MediaPlayer.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreAudio.framework
+      - sdk: CoreText.framework
+      - sdk: CoreFoundation.framework
+schemes:
+  AsteriaSpike:
+    build:
+      targets:
+        AsteriaSpike: all
+    run:
+      config: Debug
+    archive:
+      config: Release

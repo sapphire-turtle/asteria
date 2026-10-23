@@ -46,3 +46,64 @@ jobs:
         run: cargo clippy --manifest-path spikes/ios/Cargo.toml --target aarch64-apple-ios --all-targets -- -D warnings
       - name: Clippy (simulator)
         run: cargo clippy --manifest-path spikes/ios/Cargo.toml --target aarch64-apple-ios-sim --all-targets -- -D warnings
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate the Xcode project
+        working-directory: spikes/ios/xcode
+        run: xcodegen generate
+      - name: Build for the simulator
+        working-directory: spikes/ios/xcode
+        run: |
+          set -o pipefail
+          xcodebuild -project AsteriaSpike.xcodeproj -scheme AsteriaSpike \
+            -sdk iphonesimulator -configuration Debug -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee xcodebuild.log | tail -n 200
+      - name: Boot a simulator
+        run: |
+          udid=$(xcrun simctl list devices available --json \
+            | jq -r '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')
+          if [ -z "$udid" ] || [ "$udid" = "null" ]; then
+            echo "no iPhone simulator available" >&2
+            xcrun simctl list devices available >&2
+            exit 1
+          fi
+          echo "SIM_UDID=$udid" >> "$GITHUB_ENV"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+      - name: Install and launch the app
+        working-directory: spikes/ios/xcode
+        run: |
+          app=build/Build/Products/Debug-iphonesimulator/AsteriaSpike.app
+          bundle_id=$(sed -n 's/^PRODUCT_BUNDLE_IDENTIFIER *= *//p' Local.xcconfig.example)
+          echo "bundle id: $bundle_id"
+          xcrun simctl install "$SIM_UDID" "$app"
+          # --console forwards the app's stdout/stderr to this process.
+          xcrun simctl launch --console "$SIM_UDID" "$bundle_id" > console.log 2>&1 &
+          launch_pid=$!
+          sleep 20
+          xcrun simctl io "$SIM_UDID" screenshot screenshot.png
+          # The launcher stays alive for as long as the app does.
+          if ! kill -0 "$launch_pid" 2>/dev/null; then
+            echo "::error::the app exited within 20 seconds"
+            echo "---- console.log ----"; cat console.log
+            exit 1
+          fi
+          echo "---- console.log (app still running) ----"; cat console.log
+          kill "$launch_pid" || true
+      - name: Show build log on failure
+        if: failure()
+        working-directory: spikes/ios/xcode
+        run: |
+          grep -n "error:" xcodebuild.log || true
+          tail -n 100 xcodebuild.log || true
+          cat console.log || true
+      - name: Upload screenshot and console output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator
+          path: |
+            spikes/ios/xcode/screenshot.png
+            spikes/ios/xcode/console.log
+            spikes/ios/xcode/xcodebuild.log
+          if-no-files-found: warn
