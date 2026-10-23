@@ -21,6 +21,8 @@ targets:
         LIBRARY_SEARCH_PATHS: "$(BUILT_PRODUCTS_DIR)/rust"
         OTHER_LDFLAGS: "-lasteria_ios_spike"
         GENERATE_INFOPLIST_FILE: NO
+        # arm64 simulator binaries must be at least ad-hoc signed to launch.
+        "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
     info:
       path: Info.plist
       properties:

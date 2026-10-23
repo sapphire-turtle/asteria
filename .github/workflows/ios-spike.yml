@@ -57,7 +57,7 @@ jobs:
           set -o pipefail
           xcodebuild -project AsteriaSpike.xcodeproj -scheme AsteriaSpike \
             -sdk iphonesimulator -configuration Debug -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee xcodebuild.log | tail -n 200
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO build 2>&1 | tee xcodebuild.log | tail -n 200
       - name: Boot a simulator
         run: |
           udid=$(xcrun simctl list devices available --json \
@@ -74,7 +74,8 @@ jobs:
         working-directory: spikes/ios/xcode
         run: |
           app=build/Build/Products/Debug-iphonesimulator/AsteriaSpike.app
-          bundle_id=$(sed -n 's/^PRODUCT_BUNDLE_IDENTIFIER *= *//p' Local.xcconfig.example)
+          bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
+          codesign -dv "$app" 2>&1 || true
           echo "bundle id: $bundle_id"
           xcrun simctl install "$SIM_UDID" "$app"
           # --console forwards the app's stdout/stderr to this process.
@@ -90,13 +91,29 @@ jobs:
           fi
           echo "---- console.log (app still running) ----"; cat console.log
           kill "$launch_pid" || true
-      - name: Show build log on failure
+      - name: Collect simulator logs and crash reports
+        if: always()
+        working-directory: spikes/ios/xcode
+        run: |
+          if [ -n "${SIM_UDID:-}" ]; then
+            xcrun simctl spawn "$SIM_UDID" log show --last 2m --style compact \
+              --predicate 'process == "AsteriaSpike"' > simulator-log.txt 2>&1 || true
+          fi
+          mkdir -p crash-reports
+          cp ~/Library/Logs/DiagnosticReports/AsteriaSpike* crash-reports/ 2>/dev/null || true
+          ls crash-reports > /dev/null
+      - name: Show diagnostics on failure
         if: failure()
         working-directory: spikes/ios/xcode
         run: |
           grep -n "error:" xcodebuild.log || true
           tail -n 100 xcodebuild.log || true
-          cat console.log || true
+          echo "---- console.log ----"; cat console.log || true
+          echo "---- simulator-log.txt (tail) ----"; tail -n 100 simulator-log.txt || true
+          for f in crash-reports/*; do
+            [ -f "$f" ] && { echo "---- $f (head) ----"; head -n 80 "$f"; }
+          done
+          exit 0
       - name: Upload screenshot and console output
         if: always()
         uses: actions/upload-artifact@v4
@@ -106,4 +123,6 @@ jobs:
             spikes/ios/xcode/screenshot.png
             spikes/ios/xcode/console.log
             spikes/ios/xcode/xcodebuild.log
+            spikes/ios/xcode/simulator-log.txt
+            spikes/ios/xcode/crash-reports/
           if-no-files-found: warn
