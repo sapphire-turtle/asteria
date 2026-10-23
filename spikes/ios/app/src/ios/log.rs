@@ -24,3 +24,47 @@ pub fn install_panic_hook() {
         default(info);
     }));
 }
+
+/// Targets whose debug records are worth the volume while chasing startup problems.
+const DEBUG_TARGETS: [&str; 4] = ["eframe", "egui", "winit", "wgpu"];
+
+/// A `log::Log` that writes records to [`log`], so errors that eframe, wgpu and winit
+/// report through the `log` crate (and tracing, via its `log` feature) are visible.
+struct NsLogger;
+
+impl NsLogger {
+    fn wanted(metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+            || (metadata.level() == log::Level::Debug
+                && DEBUG_TARGETS
+                    .iter()
+                    .any(|prefix| metadata.target().starts_with(prefix)))
+    }
+}
+
+impl log::Log for NsLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        Self::wanted(metadata)
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            log(&format!(
+                "[{} {}] {}",
+                record.level(),
+                record.target(),
+                record.args()
+            ));
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Route the `log` crate to NSLog. Call once, before `run()`.
+pub fn install_logger() {
+    static LOGGER: NsLogger = NsLogger;
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Debug);
+    }
+}

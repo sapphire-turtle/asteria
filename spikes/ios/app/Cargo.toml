@@ -17,6 +17,10 @@ eframe = { version = "0.36", default-features = false, features = ["wgpu", "defa
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
+log = "0.4"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString"] }
 objc2-ui-kit = { version = "0.3", features = ["UIPasteboard"] }
+# The `log` feature makes winit's tracing events reach the `log` logger when no
+# tracing subscriber is installed.
+tracing = { version = "0.1", default-features = false, features = ["log"] }

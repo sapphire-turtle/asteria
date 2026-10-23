@@ -84,8 +84,9 @@ pub(crate) fn copy_report(ctx: &egui::Context, text: &str) {
 #[cfg(target_os = "ios")]
 #[unsafe(no_mangle)]
 pub extern "C" fn asteria_spike_main() {
-    use ios::log::{install_panic_hook, log};
+    use ios::log::{install_logger, install_panic_hook, log};
     install_panic_hook();
+    install_logger();
     log("asteria_spike_main: start");
     match std::panic::catch_unwind(run) {
         Ok(Ok(())) => log("asteria_spike_main: eframe returned"),
