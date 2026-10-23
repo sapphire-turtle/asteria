@@ -49,11 +49,25 @@ fn rejects_non_opus_ogg_and_garbage() {
     assert!(read_ogg_opus(&[]).is_err());
     assert!(read_ogg_opus(b"OggS").is_err());
     assert!(read_ogg_opus(&[0xff; 4096]).is_err());
-    // A valid Ogg stream whose first packet is not OpusHead: patch the magic in the sample.
+    // A valid Ogg stream (correct CRCs) whose first packet is not OpusHead.
+    let mut writer = ogg::PacketWriter::new(Vec::new());
+    writer
+        .write_packet(b"NotOpus!".to_vec(), 1, ogg::PacketWriteEndInfo::EndPage, 0)
+        .unwrap();
+    writer
+        .write_packet(
+            b"audio".to_vec(),
+            1,
+            ogg::PacketWriteEndInfo::EndStream,
+            960,
+        )
+        .unwrap();
+    let err = read_ogg_opus(&writer.into_inner()).unwrap_err();
+    assert!(matches!(err, ProbeError::NotOpus(_)), "got {err:?}");
+    // Corrupting the sample's magic breaks the page CRC: rejected by the Ogg layer.
     let mut bytes = SAMPLE.to_vec();
     let at = bytes.windows(8).position(|w| w == b"OpusHead").unwrap();
     bytes[at..at + 8].copy_from_slice(b"NotOpus!");
-    // The page CRC no longer matches, so this fails in the Ogg layer, which is also an Err.
     assert!(read_ogg_opus(&bytes).is_err());
     // Truncated mid-stream must not panic.
     let _ = read_ogg_opus(&SAMPLE[..SAMPLE.len() / 2]);
