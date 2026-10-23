@@ -83,19 +83,53 @@ jobs:
           codesign -dv "$app" 2>&1 || true
           echo "bundle id: $bundle_id"
           xcrun simctl install "$SIM_UDID" "$app"
-          # --console forwards the app's stdout/stderr to this process.
-          xcrun simctl launch --console "$SIM_UDID" "$bundle_id" > console.log 2>&1 &
-          launch_pid=$!
-          sleep 20
-          xcrun simctl io "$SIM_UDID" screenshot screenshot.png
-          # The launcher stays alive for as long as the app does.
-          if ! kill -0 "$launch_pid" 2>/dev/null; then
-            echo "::error::the app exited within 20 seconds"
-            echo "---- console.log ----"; cat console.log
+          out="$PWD/console.log"; err="$PWD/console-stderr.log"
+          : > "$out"; : > "$err"
+          # SpringBoard may not be ready right after boot, so launching can hang or
+          # fail; retry with a per-attempt timeout until simctl prints a pid.
+          pid=""
+          for attempt in 1 2 3 4 5 6; do
+            echo "launch attempt $attempt"
+            result=$(perl -e 'alarm 30; exec @ARGV' xcrun simctl launch \
+              --stdout="$out" --stderr="$err" "$SIM_UDID" "$bundle_id" 2>&1) || true
+            echo "$result"
+            pid=$(echo "$result" | sed -n "s/^$bundle_id: *\([0-9][0-9]*\)\$/\1/p")
+            [ -n "$pid" ] && break
+            sleep 10
+          done
+          if [ -z "$pid" ]; then
+            echo "::error::the app never launched"
             exit 1
           fi
-          echo "---- console.log (app still running) ----"; cat console.log
-          kill "$launch_pid" || true
+          echo "launched with pid $pid"
+          sleep 20
+          # The app must still be running in the simulator...
+          if ! xcrun simctl spawn "$SIM_UDID" launchctl list \
+              | grep "UIKitApplication:$bundle_id" | grep -qE '^[0-9]+'; then
+            echo "::error::the app is not running after 20 seconds"
+            xcrun simctl spawn "$SIM_UDID" launchctl list | grep -i asteria || true
+            echo "---- console ----"; cat "$out" "$err"
+            exit 1
+          fi
+          # ...and must have reached our code without returning from eframe.
+          for i in 1 2 3 4 5; do
+            xcrun simctl spawn "$SIM_UDID" log show --last 3m --style compact --info --debug \
+              --predicate 'process == "AsteriaSpike"' > simulator-log.txt 2>&1 || true
+            grep -q "asteria_spike_main: start" simulator-log.txt && break
+            sleep 5
+          done
+          if ! grep -q "asteria_spike_main: start" simulator-log.txt; then
+            echo "::error::no 'asteria_spike_main: start' in the unified log"
+            tail -n 50 simulator-log.txt; cat "$out" "$err"
+            exit 1
+          fi
+          if grep -qE "run failed|panicked|eframe returned|panic:" simulator-log.txt; then
+            echo "::error::the app logged a failure or exited its event loop"
+            grep -E "asteria_spike" simulator-log.txt
+            exit 1
+          fi
+          xcrun simctl io "$SIM_UDID" screenshot screenshot.png
+          echo "---- console ----"; cat "$out" "$err"
       - name: Collect simulator logs and crash reports
         if: always()
         working-directory: spikes/ios/xcode
@@ -127,6 +161,7 @@ jobs:
           path: |
             spikes/ios/xcode/screenshot.png
             spikes/ios/xcode/console.log
+            spikes/ios/xcode/console-stderr.log
             spikes/ios/xcode/xcodebuild.log
             spikes/ios/xcode/simulator-log.txt
             spikes/ios/xcode/crash-reports/
