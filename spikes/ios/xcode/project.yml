@@ -55,6 +55,14 @@ targets:
       - sdk: CoreAudio.framework
       - sdk: CoreText.framework
       - sdk: CoreFoundation.framework
+      # wgpu_hal's Metal surface uses CoreGraphics colour spaces. The rest are
+      # linked by objc2-* crates that objc2-ui-kit pulls in on iOS.
+      - sdk: CoreGraphics.framework
+      - sdk: CoreImage.framework
+      - sdk: CoreLocation.framework
+      - sdk: CoreData.framework
+      - sdk: CloudKit.framework
+      - sdk: UserNotifications.framework
 schemes:
   AsteriaSpike:
     build:
