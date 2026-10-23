@@ -45,7 +45,9 @@ impl Source {
 /// Something that asks playback to change: a button, a remote command or a system event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
-    /// Start `Source` from its beginning, or keep playing it if it already plays.
+    /// Start `Source` (from its beginning when it is not the current source), or keep
+    /// playing it if it already plays. After a pause, `Play` of the same source resumes
+    /// from where it paused.
     Play(Source),
     /// Pause at the person's request.
     Pause,

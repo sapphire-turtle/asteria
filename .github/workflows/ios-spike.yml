@@ -6,6 +6,9 @@ on:
       - "spikes/**"
       - ".github/workflows/ios-spike.yml"
 
+permissions:
+  contents: read
+
 jobs:
   linux:
     runs-on: ubuntu-latest
@@ -19,7 +22,7 @@ jobs:
         run: cargo --version
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: spikes/ios
+          workspaces: "spikes/ios -> ../../target"
       - name: Format
         run: cargo fmt --manifest-path spikes/ios/Cargo.toml --all --check
       - name: Clippy
@@ -41,11 +44,15 @@ jobs:
         run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: spikes/ios
+          workspaces: |
+            spikes/ios -> ../../target
+            spikes/ios
       - name: Clippy (device)
         run: cargo clippy --manifest-path spikes/ios/Cargo.toml --target aarch64-apple-ios --all-targets -- -D warnings
       - name: Clippy (simulator)
         run: cargo clippy --manifest-path spikes/ios/Cargo.toml --target aarch64-apple-ios-sim --all-targets -- -D warnings
+      - name: Compare Opus decoders (aarch64 / Apple libm)
+        run: cargo run --release --manifest-path spikes/ios/Cargo.toml -p opus-probe
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate the Xcode project
@@ -58,6 +65,13 @@ jobs:
           xcodebuild -project AsteriaSpike.xcodeproj -scheme AsteriaSpike \
             -sdk iphonesimulator -configuration Debug -derivedDataPath build \
             CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO build 2>&1 | tee xcodebuild.log | tail -n 200
+      - name: Build for a device (link check, unsigned)
+        working-directory: spikes/ios/xcode
+        run: |
+          set -o pipefail
+          xcodebuild -project AsteriaSpike.xcodeproj -scheme AsteriaSpike \
+            -sdk iphoneos -configuration Debug -derivedDataPath build-device \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee xcodebuild-device.log | tail -n 100
       - name: Boot a simulator
         run: |
           udid=$(xcrun simctl list devices available --json \
@@ -145,8 +159,9 @@ jobs:
         if: failure()
         working-directory: spikes/ios/xcode
         run: |
-          grep -n "error:" xcodebuild.log || true
+          grep -n "error:" xcodebuild.log xcodebuild-device.log || true
           tail -n 100 xcodebuild.log || true
+          echo "---- xcodebuild-device.log (tail) ----"; tail -n 100 xcodebuild-device.log || true
           echo "---- console.log ----"; cat console.log || true
           echo "---- simulator-log.txt (tail) ----"; tail -n 100 simulator-log.txt || true
           for f in crash-reports/*; do
@@ -163,6 +178,7 @@ jobs:
             spikes/ios/xcode/console.log
             spikes/ios/xcode/console-stderr.log
             spikes/ios/xcode/xcodebuild.log
+            spikes/ios/xcode/xcodebuild-device.log
             spikes/ios/xcode/simulator-log.txt
             spikes/ios/xcode/crash-reports/
           if-no-files-found: warn
