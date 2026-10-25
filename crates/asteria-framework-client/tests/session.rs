@@ -1,8 +1,9 @@
 //! `Session` against a real server on a temporary library, and against a stub that answers
 //! slowly.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+mod common;
+
+use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use asteria_framework::{Library, MediaKind};
 use asteria_framework_api::{ClientInfo, FolderListParams, HandshakeError};
-use asteria_framework_client::profiles::{ProfileId, ServerProfile, Token};
+use asteria_framework_client::profiles::ServerProfile;
 use asteria_framework_client::rpc::ClientError;
 use asteria_framework_client::session::{
     Reply, Request, RequestId, Response, Session, SessionState,
@@ -21,12 +22,12 @@ use asteria_framework_server::{
     scan, spawn_writer, token_hash,
 };
 use corundum_framework::egui;
-use grain_id::GrainId;
-use serde_json::{Value, json};
-use url::Url;
+use serde_json::json;
 
-/// How long a test waits for something that should happen promptly.
-const DEADLINE: Duration = Duration::from_secs(20);
+use common::{
+    DEADLINE, StubRequest, StubResponse, library_info, photos_client, photos_server_info, profile,
+    serve, wait_settled,
+};
 
 struct Photos;
 impl MediaFilter for Photos {
@@ -117,33 +118,6 @@ impl Drop for TestServer {
         if let Some(rt) = self.rt.take() {
             rt.shutdown_background();
         }
-    }
-}
-
-fn profile(addr: SocketAddr, token: &str) -> ServerProfile {
-    ServerProfile {
-        id: ProfileId(GrainId::random()),
-        name: "test".into(),
-        url: Url::parse(&format!("http://{addr}")).unwrap(),
-        token: Token::new(token),
-    }
-}
-
-fn photos_client() -> ClientInfo {
-    asteria_photos_api::client_info()
-}
-
-/// Polls until the session leaves `Connecting`, collecting any replies on the way.
-fn wait_settled(session: &mut Session) -> Vec<Reply> {
-    let start = Instant::now();
-    let mut replies = Vec::new();
-    loop {
-        replies.extend(session.poll());
-        if !matches!(session.state(), SessionState::Connecting) {
-            return replies;
-        }
-        assert!(start.elapsed() < DEADLINE, "session never settled");
-        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -303,9 +277,8 @@ struct StubShared {
 /// "from-held"; later ones are answered at once with a folder named "from-prompt". With
 /// `change_library`, every `library.info` after the first names "other-library".
 fn start_stub(change_library: bool) -> Stub {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
     let (events_tx, events) = mpsc::channel();
+    let events_tx = Mutex::new(events_tx);
     let (release, release_rx) = mpsc::channel::<()>();
     let shared = Arc::new(StubShared {
         release: Mutex::new(Some(release_rx)),
@@ -313,79 +286,29 @@ fn start_stub(change_library: bool) -> Stub {
         change_library,
         library_infos: AtomicUsize::new(0),
     });
-    let threads_shared = shared.clone();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { return };
-            let events_tx = events_tx.clone();
-            let shared = threads_shared.clone();
-            std::thread::spawn(move || serve_stub_connection(stream, events_tx, &shared));
-        }
-    });
-    Stub {
-        addr,
-        events,
-        release,
-        shared,
-    }
-}
-
-fn serve_stub_connection(stream: TcpStream, events: mpsc::Sender<StubEvent>, shared: &StubShared) {
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut writer = stream;
-    loop {
-        // Request line and headers.
-        let mut content_length = 0usize;
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            return;
-        }
-        loop {
-            line.clear();
-            if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                return;
-            }
-            let trimmed = line.trim_end();
-            if trimmed.is_empty() {
-                break;
-            }
-            if let Some((name, value)) = trimmed.split_once(':')
-                && name.eq_ignore_ascii_case("content-length")
-            {
-                content_length = value.trim().parse().unwrap();
-            }
-        }
-        let mut body = vec![0; content_length];
-        reader.read_exact(&mut body).unwrap();
-        let req: Value = serde_json::from_slice(&body).unwrap();
-        let id = req["id"].as_u64().unwrap();
-        let method = req["method"].as_str().unwrap();
-        shared.methods.lock().unwrap().push(method.to_string());
-        let result = match method {
-            "server.info" => json!({
-                "app": "asteria-photos",
-                "app_api": asteria_photos_api::APP_API,
-                "server_version": "0.0.0",
-                "epoch": "e1",
-            }),
-            "library.info" => json!({
-                "library_id": if shared.change_library
-                    && shared.library_infos.fetch_add(1, Ordering::SeqCst) > 0
+    let handler_shared = shared.clone();
+    let addr = serve(move |req: &StubRequest| {
+        let shared = &handler_shared;
+        let (id, method) = req.rpc().expect("the stub only answers /rpc");
+        shared.methods.lock().unwrap().push(method.clone());
+        let events_tx = events_tx.lock().unwrap().clone();
+        let mut held = false;
+        let result = match method.as_str() {
+            "server.info" => photos_server_info(),
+            "library.info" => library_info(
+                if shared.change_library && shared.library_infos.fetch_add(1, Ordering::SeqCst) > 0
                 {
                     "other-library"
                 } else {
                     "stub-library"
                 },
-                "owner": "owner",
-                "epoch": "e1",
-                "item_count": 0,
-                "scanning": false,
-            }),
+            ),
             "folder.list" => {
-                let held = shared.release.lock().unwrap().take();
-                match held {
+                let rx = shared.release.lock().unwrap().take();
+                match rx {
                     Some(rx) => {
-                        events.send(StubEvent::Holding).unwrap();
+                        held = true;
+                        events_tx.send(StubEvent::Holding).unwrap();
                         let _ = rx.recv();
                         json!({"folders": ["from-held"], "items": [], "next_cursor": null})
                     }
@@ -394,21 +317,19 @@ fn serve_stub_connection(stream: TcpStream, events: mpsc::Sender<StubEvent>, sha
             }
             other => panic!("stub got unexpected method {other}"),
         };
-        let body = json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string();
-        let head = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
-            body.len()
-        );
-        let written = writer
-            .write_all(head.as_bytes())
-            .and_then(|()| writer.write_all(body.as_bytes()))
-            .and_then(|()| writer.flush());
-        if body.contains("from-held") {
-            let _ = events.send(StubEvent::Released);
+        let mut resp = StubResponse::rpc_result(id, result);
+        if held {
+            resp.after_write = Some(Box::new(move || {
+                let _ = events_tx.send(StubEvent::Released);
+            }));
         }
-        if written.is_err() {
-            return;
-        }
+        resp
+    });
+    Stub {
+        addr,
+        events,
+        release,
+        shared,
     }
 }
 

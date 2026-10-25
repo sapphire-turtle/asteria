@@ -15,6 +15,7 @@ use corundum_framework::egui;
 use serde::Serialize;
 use serde::de::IgnoredAny;
 
+use crate::images::ImageLoader;
 use crate::media_cache::MediaCache;
 use crate::profiles::{ProfileId, ServerProfile};
 use crate::rpc::{ClientError, RpcClient};
@@ -90,7 +91,7 @@ struct Stamped {
 /// request queued during `Connecting` from reaching a server the handshake rejected, without
 /// waiting for the UI thread to `poll` the failure.
 #[derive(Clone)]
-enum Gate {
+pub(crate) enum Gate {
     /// The handshake has not finished.
     Pending,
     /// The handshake succeeded with this library.
@@ -129,6 +130,7 @@ pub struct Session {
     /// Filled by the handshake job once the library id is known (and only if a cache root was
     /// given and the id is a safe directory name).
     cache: Arc<OnceLock<Arc<MediaCache>>>,
+    images: ImageLoader,
 }
 
 impl fmt::Debug for Session {
@@ -162,6 +164,15 @@ impl Session {
     ) -> Session {
         let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         let (events_tx, events) = mpsc::channel();
+        let gate = Arc::new(Mutex::new(Gate::Pending));
+        let cache = Arc::new(OnceLock::new());
+        let images = ImageLoader::new(
+            ctx.clone(),
+            profile.url.clone(),
+            profile.token.clone(),
+            gate.clone(),
+            cache.clone(),
+        );
         let mut session = Session {
             generation,
             profile: profile.id,
@@ -172,8 +183,9 @@ impl Session {
             events_tx,
             events,
             worker: None,
-            gate: Arc::new(Mutex::new(Gate::Pending)),
-            cache: Arc::new(OnceLock::new()),
+            gate,
+            cache,
+            images,
         };
         let (url, token) = (profile.url.clone(), profile.token.clone());
         // The client itself is built on the worker thread.
@@ -194,7 +206,7 @@ impl Session {
                             None => tracing::warn!("library id is not a safe cache directory name"),
                         }
                     }
-                    *lock(&gate) = match &result {
+                    *lock_gate(&gate) = match &result {
                         Ok(library) => Gate::Open {
                             library_id: library.library_id.clone(),
                         },
@@ -213,7 +225,11 @@ impl Session {
                     }));
                 }
             }
-            Err(e) => session.state = SessionState::Failed(ClientError::Io(e.to_string())),
+            Err(e) => {
+                let e = ClientError::Io(e.to_string());
+                *lock_gate(&session.gate) = Gate::Closed(e.clone());
+                session.state = SessionState::Failed(e);
+            }
         }
         session
     }
@@ -233,6 +249,11 @@ impl Session {
     /// worker threads: its methods do disk I/O, so not the UI thread.
     pub fn media_cache(&self) -> Option<Arc<MediaCache>> {
         self.cache.get().cloned()
+    }
+
+    /// Thumbnails and previews of this session's server, as egui textures.
+    pub fn images(&mut self) -> &mut ImageLoader {
+        &mut self.images
     }
 
     pub fn state(&self) -> &SessionState {
@@ -294,6 +315,8 @@ impl Session {
                 }
             }
         }
+        // Lets image requests through (or fails them) once the handshake has settled.
+        self.images.poll();
         replies
     }
 
@@ -342,7 +365,7 @@ impl Session {
     }
 }
 
-fn lock(gate: &Mutex<Gate>) -> std::sync::MutexGuard<'_, Gate> {
+pub(crate) fn lock_gate(gate: &Mutex<Gate>) -> std::sync::MutexGuard<'_, Gate> {
     gate.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -354,7 +377,7 @@ fn gated(
     rpc: Result<&RpcClient, ClientError>,
     request: Request,
 ) -> Result<Response, ClientError> {
-    let library_id = match lock(gate).clone() {
+    let library_id = match lock_gate(gate).clone() {
         Gate::Open { library_id } => library_id,
         Gate::Closed(e) => return Err(e),
         // With one worker thread the handshake always runs first; kept as a guard.
@@ -368,7 +391,7 @@ fn gated(
     if let Response::LibraryInfo(info) = &response
         && info.library_id != library_id
     {
-        *lock(gate) = Gate::Closed(ClientError::LibraryChanged);
+        *lock_gate(gate) = Gate::Closed(ClientError::LibraryChanged);
         return Err(ClientError::LibraryChanged);
     }
     Ok(response)
