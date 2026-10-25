@@ -35,7 +35,7 @@ tracing = "0.1"
 getrandom = "0.4"
 base64 = "0.23"
 # The app's directories and, for the clients, the look shared with sapphire.
-corundum-framework = "0.1.0"
+corundum-framework = "0.2.0"
 walkdir = "2"
 tokio = { version = "1", features = ["rt", "sync", "process", "time", "io-util", "macros"] }
 tokio-util = "0.7"
