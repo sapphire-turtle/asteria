@@ -13,7 +13,7 @@ use asteria_framework_client::rpc::ClientError;
 use asteria_framework_client::session::{
     Reply, Request, RequestId, Response, Session, SessionState,
 };
-use asteria_framework_client::settings::servers::error_text;
+use asteria_framework_client::settings::servers::{error_detail, error_text};
 use asteria_framework_client::widgets::thumb_grid::ThumbGrid;
 use corundum_framework::egui;
 use corundum_framework::gui::{icons, tr};
@@ -49,6 +49,8 @@ pub struct BrowseState {
     /// Why the last `folder.list` failed, and which page it was; cleared by the next success.
     error: Option<(ClientError, Page)>,
     selected: Option<ItemId>,
+    /// The item last opened (double-clicked, or Enter on the selection).
+    opened: Option<ItemId>,
     /// The `library.info` waited for.
     info: Option<RequestId>,
     next_info: Instant,
@@ -71,6 +73,7 @@ impl BrowseState {
             listing: None,
             error: None,
             selected: None,
+            opened: None,
             info: None,
             next_info: Instant::now() + IDLE_POLL,
         }
@@ -93,6 +96,11 @@ impl BrowseState {
 
     pub fn selected(&self) -> Option<&ItemId> {
         self.selected.as_ref()
+    }
+
+    /// The item last opened from the grid, in this folder.
+    pub fn opened(&self) -> Option<&ItemId> {
+        self.opened.as_ref()
     }
 
     /// Why the last page could not be loaded.
@@ -119,6 +127,7 @@ impl BrowseState {
         self.next_cursor = None;
         self.error = None;
         self.selected = None;
+        self.opened = None;
         self.request_page(session, None, Page::First);
     }
 
@@ -222,7 +231,8 @@ impl BrowseState {
     }
 
     /// The library screen's body: where the user is, the scan's progress, the subfolders and
-    /// the grid. Returns the item opened (double-clicked, or Enter on the selection).
+    /// the grid. Returns the item opened this frame (double-clicked, or Enter on the
+    /// selection); it is also kept as [`opened`](Self::opened).
     pub fn ui(&mut self, ui: &mut egui::Ui, session: &mut Session) -> Option<ItemId> {
         let mut go_to = None;
         egui::Panel::top("asteria_photos_location").show(ui, |ui| {
@@ -269,10 +279,13 @@ impl BrowseState {
             if let Some((e, page)) = self.error.clone() {
                 ui.horizontal_wrapped(|ui| {
                     let reason = error_text(ui.ctx(), &e);
-                    ui.colored_label(
+                    let label = ui.colored_label(
                         ui.visuals().error_fg_color,
                         tr!(ui, "asteria-photos-library-failed", reason = reason),
                     );
+                    if let Some(detail) = error_detail(&e) {
+                        label.on_hover_text(detail);
+                    }
                     if ui.button(tr!(ui, "asteria-photos-library-retry")).clicked() {
                         self.error = None;
                         match page {
@@ -304,7 +317,10 @@ impl BrowseState {
             if let Some(id) = r.selected {
                 self.selected = Some(id);
             }
-            opened = r.double_clicked;
+            if let Some(id) = r.double_clicked {
+                self.opened = Some(id.clone());
+                opened = Some(id);
+            }
             let near_end = r
                 .last_visible
                 .is_some_and(|last| last + PREFETCH_ROWS * r.columns >= self.items.len());

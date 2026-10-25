@@ -23,6 +23,7 @@ asteria-photos-status-connected = Connected
 asteria-photos-status-connecting = Connecting
 asteria-photos-status-failed = Not connected: { $reason }
 asteria-photos-status-manage = Manage servers...
+asteria-photos-status-hover = { $name }: { $status }
 
 # Saving the server list.
 asteria-photos-save-failed = The server list could not be saved: { $reason }

@@ -9,20 +9,21 @@
 //! change is written by a background thread, so the UI thread does no disk I/O.
 
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::thread::JoinHandle;
 
 use asteria_framework_api::ItemId;
 use asteria_framework_client::profiles::{ProfileId, Profiles};
-use asteria_framework_client::rpc::ClientError;
-use asteria_framework_client::session::{Session, SessionState};
-use asteria_framework_client::settings::servers::{ServersChange, ServersPage, error_text};
+use asteria_framework_client::profiles::{ServerProfile, Token};
+use asteria_framework_client::session::SessionState;
+use asteria_framework_client::settings::servers::{
+    ServersChange, ServersPage, error_detail, error_text,
+};
 use corundum_framework::egui;
 use corundum_framework::gui::settings::{ListItem, SettingsLayout, SettingsSection};
 use corundum_framework::gui::theme::{Swatch, Tone};
 use corundum_framework::gui::{COMPACT_WIDTH, Destination, Shell, ShellApp, Side, icons, tr};
 
-use crate::browse::BrowseState;
+pub use crate::connection::Connection;
+use crate::saver::Saver;
 
 /// The screens: the library on the rail, Settings at its foot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,114 +48,6 @@ pub struct AppPaths {
     pub cache: Option<PathBuf>,
 }
 
-/// One server in use: its session and what is browsed on it. Dropping it drops both, and
-/// with them every request still running for that server.
-#[derive(Debug)]
-pub struct Connection {
-    session: Session,
-    browse: BrowseState,
-    /// Opened by the app itself after the server's library changed. Such a connection
-    /// is not reopened again by itself, so a server that keeps changing cannot loop.
-    reopened: bool,
-}
-
-impl Connection {
-    fn open(state: &State, reopened: bool) -> Option<Connection> {
-        let profile = state.profiles.active()?;
-        let mut session = Session::open_with_cache(
-            profile,
-            asteria_photos_api::client_info(),
-            state.ctx.clone(),
-            state.paths.cache.clone(),
-        );
-        let mut browse = BrowseState::new();
-        // Queued behind the handshake; it fails with the handshake if that fails.
-        browse.open(&mut session, "");
-        Some(Connection {
-            session,
-            browse,
-            reopened,
-        })
-    }
-
-    pub fn session(&self) -> &Session {
-        &self.session
-    }
-
-    pub fn browse(&self) -> &BrowseState {
-        &self.browse
-    }
-
-    /// Hands the session's replies to the browse state.
-    fn poll(&mut self, ctx: &egui::Context) {
-        for reply in self.session.poll() {
-            self.browse.handle(&reply);
-        }
-        self.browse.tick(&mut self.session, ctx);
-    }
-
-    /// Whether the server now serves another library (and this connection may be reopened).
-    fn library_changed(&self) -> bool {
-        !self.reopened
-            && matches!(
-                self.session.state(),
-                SessionState::Failed(ClientError::LibraryChanged)
-            )
-    }
-}
-
-/// Writes `servers.toml` on its own thread, the latest state only, and hands back what
-/// went wrong. Dropping it waits for the last write, so a change made just before the
-/// window closes is not lost.
-struct Saver {
-    tx: Option<mpsc::Sender<Profiles>>,
-    errors: mpsc::Receiver<String>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Saver {
-    fn spawn(path: PathBuf, ctx: egui::Context) -> std::io::Result<Saver> {
-        let (tx, rx) = mpsc::channel::<Profiles>();
-        let (err_tx, errors) = mpsc::channel();
-        let thread = std::thread::Builder::new()
-            .name("photos-servers-save".into())
-            .spawn(move || {
-                while let Ok(mut profiles) = rx.recv() {
-                    // Only the newest state matters.
-                    while let Ok(newer) = rx.try_recv() {
-                        profiles = newer;
-                    }
-                    // The error never holds the file's contents, so no token.
-                    if let Err(e) = profiles.save(&path) {
-                        tracing::warn!(path = %path.display(), error = %e, "saving servers.toml failed");
-                        let _ = err_tx.send(e.to_string());
-                        ctx.request_repaint();
-                    }
-                }
-            })?;
-        Ok(Saver {
-            tx: Some(tx),
-            errors,
-            thread: Some(thread),
-        })
-    }
-
-    fn save(&self, profiles: &Profiles) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(profiles.clone());
-        }
-    }
-}
-
-impl Drop for Saver {
-    fn drop(&mut self) {
-        self.tx = None;
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
 /// The app. Hold one; call [`show`](Self::show) every frame with the window's root `Ui`.
 pub struct PhotosApp {
     shell: Shell<Screen>,
@@ -175,8 +68,8 @@ struct State {
     save_blocked: Option<String>,
     /// A screen to open after this frame (from the status bar's menu, say).
     open_screen: Option<Screen>,
-    /// The item last opened from the grid (Task 9 shows it in the detail pane).
-    opened: Option<ItemId>,
+    /// Whether the shell lays out for a phone this frame (no status bar).
+    compact: bool,
 }
 
 impl PhotosApp {
@@ -185,6 +78,7 @@ impl PhotosApp {
     /// Settings, ready to add one.
     pub fn new(paths: AppPaths, ctx: &egui::Context) -> PhotosApp {
         crate::i18n::register(ctx);
+        // Ruling R11: read on the UI thread, but before the first frame; the file is tiny.
         let (profiles, load_error) = match Profiles::load(&paths.servers) {
             Ok(p) => (p, None),
             Err(e) => {
@@ -234,7 +128,7 @@ impl PhotosApp {
             saver,
             save_blocked,
             open_screen: None,
-            opened: None,
+            compact: false,
         };
         state.connect(false);
         if state.profiles.servers.is_empty() {
@@ -249,6 +143,7 @@ impl PhotosApp {
     /// Draw one frame into the window's root `ui`, after taking in what arrived.
     pub fn show(&mut self, ui: &mut egui::Ui) {
         self.state.poll();
+        self.state.compact = is_compact(ui);
         self.shell.show(ui, &mut self.state);
         self.state.apply_servers_changes();
         self.apply_open_screen();
@@ -303,7 +198,7 @@ impl PhotosApp {
 
     /// The item last opened (double-clicked) in the grid.
     pub fn opened_item(&self) -> Option<&ItemId> {
-        self.state.opened.as_ref()
+        self.state.connection.as_ref()?.browse.opened()
     }
 
     /// The Settings page of the servers, as the user works it.
@@ -317,8 +212,9 @@ impl State {
     fn connect(&mut self, reopened: bool) {
         // The old session goes first: its pending results die with it.
         self.connection = None;
-        self.opened = None;
-        self.connection = Connection::open(self, reopened);
+        self.connection = self.profiles.active().map(|profile| {
+            Connection::open(profile, &self.ctx, self.paths.cache.clone(), reopened)
+        });
     }
 
     fn switch_to(&mut self, id: ProfileId) {
@@ -355,8 +251,7 @@ impl State {
     /// Takes in what arrived: save failures, and the session's replies.
     fn poll(&mut self) {
         if let Some(saver) = &self.saver {
-            let errors: Vec<String> = saver.errors.try_iter().collect();
-            for e in errors {
+            for e in saver.errors() {
                 let why = tr!(self.ctx, "asteria-photos-save-failed", reason = e);
                 self.servers_page.show_error(why);
             }
@@ -381,7 +276,7 @@ impl State {
         let Some(change) = self.servers_page.take_change() else {
             return;
         };
-        let before = self.profiles.active().cloned();
+        let before = endpoint(self.profiles.active());
         let result = match change {
             ServersChange::Added { name, url, token } => {
                 self.profiles.add(name, url.as_str(), token).and_then(|id| {
@@ -416,9 +311,9 @@ impl State {
             return;
         }
         self.save();
-        let after = self.profiles.active();
-        // Another server, or the same one with a new address or token.
-        if before.as_ref() != after {
+        // Another server, or the same one with a new address or token; a new name alone
+        // keeps the connection.
+        if before != endpoint(self.profiles.active()) {
             self.connect(false);
         }
         self.ctx.request_repaint();
@@ -457,8 +352,9 @@ impl State {
                 let reason = error_text(ui.ctx(), e);
                 let mut retry = false;
                 let mut manage = false;
+                let detail = error_detail(e);
                 egui::CentralPanel::default().show(ui, |ui| {
-                    ui.colored_label(
+                    let label = ui.colored_label(
                         ui.visuals().error_fg_color,
                         tr!(
                             ui,
@@ -467,6 +363,9 @@ impl State {
                             reason = reason
                         ),
                     );
+                    if let Some(detail) = detail {
+                        label.on_hover_text(detail);
+                    }
                     ui.horizontal(|ui| {
                         retry = ui.button(tr!(ui, "asteria-photos-library-retry")).clicked();
                         manage = ui
@@ -494,9 +393,7 @@ impl State {
                 });
             }
             SessionState::Ready { .. } => {
-                if let Some(id) = c.browse.ui(ui, &mut c.session) {
-                    self.opened = Some(id);
-                }
+                c.browse.ui(ui, &mut c.session);
             }
         }
     }
@@ -579,7 +476,12 @@ impl State {
                 }
                 (picked, manage)
             });
-        menu.0.on_hover_text(format!("{name}: {status}"));
+        menu.0.on_hover_text(tr!(
+            ui,
+            "asteria-photos-status-hover",
+            name = name.as_str(),
+            status = status.as_str()
+        ));
         if let Some(inner) = menu.1 {
             let (picked, manage) = inner.inner;
             if let Some(id) = picked {
@@ -590,6 +492,21 @@ impl State {
             }
         }
     }
+}
+
+/// What a connection depends on: the server, its address and its token (not its name).
+fn endpoint(p: Option<&ServerProfile>) -> Option<(ProfileId, String, Token)> {
+    p.map(|p| (p.id, p.url.as_str().to_string(), p.token.clone()))
+}
+
+/// Whether the shell lays this frame out as a phone's (a bottom bar, no status bar), by
+/// corundum's own rule: the root `ui`'s width less the system's bars and notches.
+fn is_compact(ui: &egui::Ui) -> bool {
+    let safe = ui.ctx().content_rect();
+    let full = ui.max_rect();
+    let left = (safe.left() - full.left()).max(0.0);
+    let right = (full.right() - safe.right()).max(0.0);
+    full.width() - left - right < COMPACT_WIDTH
 }
 
 impl ShellApp<Screen> for State {
@@ -603,7 +520,7 @@ impl ShellApp<Screen> for State {
     /// Wide, the status bar holds the switcher ([`status_ui`](Self::status_ui)); narrow
     /// there is no status bar, so it sits at the bottom bar's end.
     fn foot_ui(&mut self, ui: &mut egui::Ui) -> Option<Screen> {
-        if ui.ctx().content_rect().width() < COMPACT_WIDTH {
+        if self.compact {
             self.switcher_ui(ui, true);
         }
         None

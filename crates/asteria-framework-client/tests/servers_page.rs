@@ -192,3 +192,37 @@ fn connection_test_reports_an_unreachable_server() {
         SessionState::Failed(ClientError::Unreachable(_))
     ));
 }
+
+#[test]
+fn technical_details_stay_out_of_the_sentence() {
+    use asteria_framework_client::settings::servers::error_detail;
+    let ctx = egui::Context::default();
+    i18n::register(&ctx);
+    for e in [
+        ClientError::Protocol("weird-detail".into()),
+        ClientError::Rpc {
+            code: -32000,
+            message: "weird-detail".into(),
+        },
+        ClientError::Io("weird-detail".into()),
+    ] {
+        let t = error_text(&ctx, &e);
+        assert!(
+            !t.contains("weird-detail") && !t.contains("asteria-client-"),
+            "{t}"
+        );
+        assert!(error_detail(&e).unwrap().contains("weird-detail"));
+    }
+    for e in [
+        ClientError::NotFound,
+        ClientError::Unprocessable,
+        ClientError::LibraryChanged,
+        ClientError::Retry {
+            after: Duration::from_secs(2),
+        },
+    ] {
+        let t = error_text(&ctx, &e);
+        assert!(!t.is_empty() && !t.contains("asteria-client-"), "{t}");
+        assert_eq!(error_detail(&e), None);
+    }
+}

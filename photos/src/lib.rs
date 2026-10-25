@@ -3,8 +3,10 @@
 
 pub mod app;
 pub mod browse;
+pub mod connection;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub mod desktop;
 pub mod i18n;
+mod saver;
 
 pub use app::PhotosApp;

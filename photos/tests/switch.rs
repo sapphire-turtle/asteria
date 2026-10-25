@@ -298,3 +298,51 @@ fn the_library_draws_wide_and_narrow() {
         }
     }
 }
+
+#[test]
+fn renaming_the_server_in_use_keeps_the_connection() {
+    let (a, _) = stub("lib-a", |_, id| {
+        StubResponse::rpc_result(id, listing(&[], &["a-item"]))
+    });
+    let (fx, ids) = fixture(&[("A", a)], 0);
+    let ctx = egui::Context::default();
+    let mut app = PhotosApp::new(fx.paths.clone(), &ctx);
+    run_until(
+        &ctx,
+        &mut app,
+        "A's listing",
+        |_| {},
+        |app| item_ids(app) == ["a-item"],
+    );
+    let generation = app.connection().unwrap().session().generation();
+    let edit =
+        |app: &mut PhotosApp,
+         change: &dyn Fn(&mut asteria_framework_client::settings::servers::ServerForm)| {
+            let page = app.servers_page_mut();
+            page.begin_edit(ids[0]);
+            change(page.form_mut().unwrap());
+            page.submit().unwrap();
+        };
+    // A new name: the same connection, and the name is saved.
+    edit(&mut app, &|f| f.name = "Renamed".into());
+    frame(&ctx, &mut app);
+    frame(&ctx, &mut app);
+    assert_eq!(app.connection().unwrap().session().generation(), generation);
+    assert_eq!(app.profiles().active().unwrap().name, "Renamed");
+    let start = Instant::now();
+    while asteria_framework_client::profiles::Profiles::load(&fx.paths.servers)
+        .unwrap()
+        .active()
+        .unwrap()
+        .name
+        != "Renamed"
+    {
+        assert!(start.elapsed() < DEADLINE, "the new name was never saved");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // A new token: connected afresh.
+    edit(&mut app, &|f| f.token = "other".into());
+    frame(&ctx, &mut app);
+    frame(&ctx, &mut app);
+    assert_ne!(app.connection().unwrap().session().generation(), generation);
+}
