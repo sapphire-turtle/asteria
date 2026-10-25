@@ -10,7 +10,7 @@ use asteria_framework_api::{HandshakeError, RpcOutcome, RpcRequest, RpcResponse}
 use bytes::Bytes;
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
-use reqwest::header::{AUTHORIZATION, RETRY_AFTER};
+use reqwest::header::{AUTHORIZATION, HeaderValue, RETRY_AFTER};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use url::Url;
@@ -57,6 +57,10 @@ pub enum ClientError {
     NotFound,
     #[error("unexpected answer from the server: {0}")]
     Protocol(String),
+    /// `library.info` named another library than the handshake did: the server now serves a
+    /// different library, so everything known about the old one (listings, cache) is stale.
+    #[error("the server now serves a different library")]
+    LibraryChanged,
     #[error("local error: {0}")]
     Io(String),
 }
@@ -66,7 +70,8 @@ pub struct RpcClient {
     http: Client,
     /// Always ends in `/`, so relative paths join below it.
     base: Url,
-    token: Token,
+    /// `Bearer <token>`, marked sensitive so `http` never prints it.
+    auth: HeaderValue,
     next_id: AtomicU64,
 }
 
@@ -81,12 +86,20 @@ impl fmt::Debug for RpcClient {
 impl RpcClient {
     /// A client for the server at `base` (`http(s)://host:port`, optionally with a path
     /// prefix), using [`CONNECT_TIMEOUT`] and [`REQUEST_TIMEOUT`].
+    ///
+    /// Building the HTTP client starts a thread and may load the system's root certificates,
+    /// so call this off the UI thread too.
     pub fn new(base: &Url, token: Token) -> Result<RpcClient, ClientError> {
         let http = Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|e| ClientError::Io(describe(e)))?;
+        let mut auth =
+            HeaderValue::from_str(&format!("Bearer {}", token.expose())).map_err(|_| {
+                ClientError::Io("the access token has characters a header cannot carry".into())
+            })?;
+        auth.set_sensitive(true);
         let mut base = base.clone();
         if !base.path().ends_with('/') {
             let path = format!("{}/", base.path());
@@ -95,7 +108,7 @@ impl RpcClient {
         Ok(RpcClient {
             http,
             base,
-            token,
+            auth,
             next_id: AtomicU64::new(1),
         })
     }
@@ -116,7 +129,7 @@ impl RpcClient {
         let resp = self
             .http
             .post(self.url("rpc")?)
-            .header(AUTHORIZATION, self.bearer())
+            .header(AUTHORIZATION, self.auth.clone())
             .json(&request)
             .send()
             .map_err(transport)?;
@@ -144,7 +157,7 @@ impl RpcClient {
         let resp = self
             .http
             .get(self.url(path.trim_start_matches('/'))?)
-            .header(AUTHORIZATION, self.bearer())
+            .header(AUTHORIZATION, self.auth.clone())
             .send()
             .map_err(transport)?;
         check_status(resp)?.bytes().map_err(transport)
@@ -154,10 +167,6 @@ impl RpcClient {
         self.base
             .join(path)
             .map_err(|e| ClientError::Protocol(format!("bad path {path:?}: {e}")))
-    }
-
-    fn bearer(&self) -> String {
-        format!("Bearer {}", self.token.expose())
     }
 }
 
@@ -220,6 +229,7 @@ mod tests {
         let debug = format!("{client:?}");
         assert!(!debug.contains("s3cret-token"), "{debug}");
         assert!(debug.contains("http://127.0.0.1:1/x/"), "{debug}");
+        assert!(client.auth.is_sensitive());
     }
 
     #[test]

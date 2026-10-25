@@ -3,7 +3,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 
 use asteria_framework_api::{
     ClientInfo, FOLDER_LIST, FolderListParams, FolderListing, LIBRARY_INFO, LIBRARY_RESCAN,
@@ -28,7 +28,8 @@ pub enum SessionState {
     Connecting,
     /// Connected. `library` is the latest `library.info` answer.
     Ready { library: LibraryInfo },
-    /// The handshake failed; the session will not recover. Open a new one to retry.
+    /// The handshake failed, or the server switched to another library
+    /// ([`ClientError::LibraryChanged`]); the session will not recover. Open a new one to retry.
     Failed(ClientError),
 }
 
@@ -41,7 +42,8 @@ pub struct RequestId(pub u64);
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
     /// `library.info`. On success the session's [`SessionState::Ready`] library is updated,
-    /// and a changed `epoch` raises [`Session::take_refetch_listing`].
+    /// and a changed `epoch` raises [`Session::take_refetch_listing`]. A different
+    /// `library_id` fails the request and the session with [`ClientError::LibraryChanged`].
     LibraryInfo,
     /// `library.rescan`.
     LibraryRescan,
@@ -82,6 +84,19 @@ struct Stamped {
     event: Event,
 }
 
+/// What the worker knows about the handshake. Only worker jobs read or write it; it keeps a
+/// request queued during `Connecting` from reaching a server the handshake rejected, without
+/// waiting for the UI thread to `poll` the failure.
+#[derive(Clone)]
+enum Gate {
+    /// The handshake has not finished.
+    Pending,
+    /// The handshake succeeded with this library.
+    Open { library_id: String },
+    /// No more requests go to the server; each gets this error instead.
+    Closed(ClientError),
+}
+
 /// The `{}` sent as the params of methods that take none.
 #[derive(Serialize)]
 struct NoParams {}
@@ -108,6 +123,7 @@ pub struct Session {
     events: mpsc::Receiver<Stamped>,
     /// `None` if the worker could not be started; the session is then `Failed`.
     worker: Option<Worker>,
+    gate: Arc<Mutex<Gate>>,
 }
 
 impl fmt::Debug for Session {
@@ -138,18 +154,28 @@ impl Session {
             events_tx,
             events,
             worker: None,
+            gate: Arc::new(Mutex::new(Gate::Pending)),
         };
-        let worker = RpcClient::new(&profile.url, profile.token.clone())
-            .map(Arc::new)
-            .and_then(|rpc| {
-                Worker::spawn("asteria-session", 1, rpc).map_err(|e| ClientError::Io(e.to_string()))
-            });
-        match worker {
+        let (url, token) = (profile.url.clone(), profile.token.clone());
+        // The client itself is built on the worker thread.
+        match Worker::spawn("asteria-session", 1, move || {
+            RpcClient::new(&url, token.clone())
+        }) {
             Ok(worker) => {
                 session.worker = Some(worker);
-                session.submit(move |rpc| Event::Connected(handshake(rpc, &client)));
+                let gate = session.gate.clone();
+                session.submit(move |rpc| {
+                    let result = rpc.and_then(|rpc| handshake(rpc, &client));
+                    *lock(&gate) = match &result {
+                        Ok(library) => Gate::Open {
+                            library_id: library.library_id.clone(),
+                        },
+                        Err(e) => Gate::Closed(e.clone()),
+                    };
+                    Event::Connected(result)
+                });
             }
-            Err(e) => session.state = SessionState::Failed(e),
+            Err(e) => session.state = SessionState::Failed(ClientError::Io(e.to_string())),
         }
         session
     }
@@ -169,8 +195,9 @@ impl Session {
     }
 
     /// Queues `request`; its [`Reply`] comes out of [`poll`](Self::poll) with the returned
-    /// id. Requests run one at a time in the order made, after the handshake. If the session
-    /// has failed, the reply carries the failure without anything being sent.
+    /// id. Requests run one at a time in the order made, after the handshake. If the
+    /// handshake failed (even if [`poll`](Self::poll) has not reported it yet), or the session
+    /// has failed since, the reply carries that failure and nothing is sent.
     pub fn request(&mut self, request: Request) -> RequestId {
         let id = RequestId(self.next_request);
         self.next_request += 1;
@@ -182,10 +209,11 @@ impl Session {
             self.send_local(Event::Reply(reply));
             return id;
         }
+        let gate = self.gate.clone();
         self.submit(move |rpc| {
             Event::Reply(Reply {
                 id,
-                result: run(rpc, request),
+                result: gated(&gate, rpc, request),
             })
         });
         id
@@ -210,8 +238,12 @@ impl Session {
                     };
                 }
                 Event::Reply(reply) => {
-                    if let Ok(Response::LibraryInfo(info)) = &reply.result {
-                        self.library_info_arrived(info);
+                    match &reply.result {
+                        Ok(Response::LibraryInfo(info)) => self.library_info_arrived(info),
+                        Err(ClientError::LibraryChanged) => {
+                            self.state = SessionState::Failed(ClientError::LibraryChanged);
+                        }
+                        _ => {}
                     }
                     replies.push(reply);
                 }
@@ -220,15 +252,15 @@ impl Session {
         replies
     }
 
-    /// Whether the library changed (its epoch moved) since the last call, so the listing on
-    /// screen should be fetched again. Clears the mark.
+    /// Whether the library's contents changed (its epoch moved) since the last call, so the
+    /// listing on screen should be fetched again. Clears the mark.
     pub fn take_refetch_listing(&mut self) -> bool {
         std::mem::take(&mut self.refetch_listing)
     }
 
     fn library_info_arrived(&mut self, info: &LibraryInfo) {
         if let SessionState::Ready { library } = &mut self.state {
-            if library.epoch != info.epoch || library.library_id != info.library_id {
+            if library.epoch != info.epoch {
                 self.refetch_listing = true;
             }
             *library = info.clone();
@@ -236,7 +268,7 @@ impl Session {
     }
 
     /// Runs `work` on the worker and delivers its event to this session only.
-    fn submit(&self, work: impl FnOnce(&RpcClient) -> Event + Send + 'static) {
+    fn submit(&self, work: impl FnOnce(Result<&RpcClient, ClientError>) -> Event + Send + 'static) {
         let Some(worker) = &self.worker else { return };
         let generation = self.generation;
         let tx = self.events_tx.clone();
@@ -263,6 +295,38 @@ impl Session {
         });
         self.ctx.request_repaint();
     }
+}
+
+fn lock(gate: &Mutex<Gate>) -> std::sync::MutexGuard<'_, Gate> {
+    gate.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Runs `request` only if the handshake let it through. A `library.info` naming another
+/// library closes the gate: this request and every later one fail with
+/// [`ClientError::LibraryChanged`], and `poll` moves the session to `Failed`.
+fn gated(
+    gate: &Mutex<Gate>,
+    rpc: Result<&RpcClient, ClientError>,
+    request: Request,
+) -> Result<Response, ClientError> {
+    let library_id = match lock(gate).clone() {
+        Gate::Open { library_id } => library_id,
+        Gate::Closed(e) => return Err(e),
+        // With one worker thread the handshake always runs first; kept as a guard.
+        Gate::Pending => {
+            return Err(ClientError::Protocol(
+                "request ran before the handshake finished".into(),
+            ));
+        }
+    };
+    let response = run(rpc?, request)?;
+    if let Response::LibraryInfo(info) = &response
+        && info.library_id != library_id
+    {
+        *lock(gate) = Gate::Closed(ClientError::LibraryChanged);
+        return Err(ClientError::LibraryChanged);
+    }
+    Ok(response)
 }
 
 fn handshake(rpc: &RpcClient, client: &ClientInfo) -> Result<LibraryInfo, ClientError> {

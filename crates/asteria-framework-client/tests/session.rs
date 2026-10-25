@@ -5,15 +5,17 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use asteria_framework::{Library, MediaKind};
 use asteria_framework_api::{ClientInfo, FolderListParams, HandshakeError};
 use asteria_framework_client::profiles::{ProfileId, ServerProfile, Token};
 use asteria_framework_client::rpc::ClientError;
-use asteria_framework_client::session::{Reply, Request, Response, Session, SessionState};
+use asteria_framework_client::session::{
+    Reply, Request, RequestId, Response, Session, SessionState,
+};
 use asteria_framework_server::{
     AppState, Cache, MediaFilter, Processor, ServerConfig, TokenEntry, Tokens, new_token, router,
     scan, spawn_writer, token_hash,
@@ -251,35 +253,59 @@ struct Stub {
     addr: SocketAddr,
     events: mpsc::Receiver<StubEvent>,
     release: mpsc::Sender<()>,
+    shared: Arc<StubShared>,
 }
 
-/// Answers `server.info` and `library.info` at once. The first `folder.list` is held until
-/// `release` fires and is answered with a folder named "from-held"; later ones are answered
-/// at once with a folder named "from-prompt".
-fn start_stub() -> Stub {
+impl Stub {
+    /// The methods received so far, in order.
+    fn methods(&self) -> Vec<String> {
+        self.shared.methods.lock().unwrap().clone()
+    }
+}
+
+/// State the stub's connection threads share.
+struct StubShared {
+    /// Taken by the first `folder.list`, which waits on it.
+    release: Mutex<Option<mpsc::Receiver<()>>>,
+    methods: Mutex<Vec<String>>,
+    /// Answer `library.info` with another library id after the first time.
+    change_library: bool,
+    library_infos: AtomicUsize,
+}
+
+/// Answers `server.info` (as asteria-photos) and `library.info` at once. The first
+/// `folder.list` is held until `release` fires and is answered with a folder named
+/// "from-held"; later ones are answered at once with a folder named "from-prompt". With
+/// `change_library`, every `library.info` after the first names "other-library".
+fn start_stub(change_library: bool) -> Stub {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let (events_tx, events) = mpsc::channel();
     let (release, release_rx) = mpsc::channel::<()>();
-    let release_rx = Arc::new(std::sync::Mutex::new(Some(release_rx)));
+    let shared = Arc::new(StubShared {
+        release: Mutex::new(Some(release_rx)),
+        methods: Mutex::new(Vec::new()),
+        change_library,
+        library_infos: AtomicUsize::new(0),
+    });
+    let threads_shared = shared.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { return };
             let events_tx = events_tx.clone();
-            let release_rx = release_rx.clone();
-            std::thread::spawn(move || serve_stub_connection(stream, events_tx, release_rx));
+            let shared = threads_shared.clone();
+            std::thread::spawn(move || serve_stub_connection(stream, events_tx, &shared));
         }
     });
     Stub {
         addr,
         events,
         release,
+        shared,
     }
 }
 
-type HeldRelease = Arc<std::sync::Mutex<Option<mpsc::Receiver<()>>>>;
-
-fn serve_stub_connection(stream: TcpStream, events: mpsc::Sender<StubEvent>, release: HeldRelease) {
+fn serve_stub_connection(stream: TcpStream, events: mpsc::Sender<StubEvent>, shared: &StubShared) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut writer = stream;
     loop {
@@ -308,7 +334,9 @@ fn serve_stub_connection(stream: TcpStream, events: mpsc::Sender<StubEvent>, rel
         reader.read_exact(&mut body).unwrap();
         let req: Value = serde_json::from_slice(&body).unwrap();
         let id = req["id"].as_u64().unwrap();
-        let result = match req["method"].as_str().unwrap() {
+        let method = req["method"].as_str().unwrap();
+        shared.methods.lock().unwrap().push(method.to_string());
+        let result = match method {
             "server.info" => json!({
                 "app": "asteria-photos",
                 "app_api": asteria_photos_api::APP_API,
@@ -316,14 +344,20 @@ fn serve_stub_connection(stream: TcpStream, events: mpsc::Sender<StubEvent>, rel
                 "epoch": "e1",
             }),
             "library.info" => json!({
-                "library_id": "stub-library",
+                "library_id": if shared.change_library
+                    && shared.library_infos.fetch_add(1, Ordering::SeqCst) > 0
+                {
+                    "other-library"
+                } else {
+                    "stub-library"
+                },
                 "owner": "owner",
                 "epoch": "e1",
                 "item_count": 0,
                 "scanning": false,
             }),
             "folder.list" => {
-                let held = release.lock().unwrap().take();
+                let held = shared.release.lock().unwrap().take();
                 match held {
                     Some(rx) => {
                         events.send(StubEvent::Holding).unwrap();
@@ -370,7 +404,7 @@ fn list_root() -> Request {
 
 #[test]
 fn results_after_drop_are_discarded() {
-    let stub = start_stub();
+    let stub = start_stub(false);
     let ctx = egui::Context::default();
 
     let mut a = Session::open(&profile(stub.addr, "t"), photos_client(), ctx.clone());
@@ -380,6 +414,7 @@ fn results_after_drop_are_discarded() {
         "{:?}",
         a.state()
     );
+    let a_generation = a.generation();
     let a_id = a.request(list_root());
     assert!(matches!(
         stub.events.recv_timeout(DEADLINE).unwrap(),
@@ -392,7 +427,7 @@ fn results_after_drop_are_discarded() {
     assert!(start.elapsed() < Duration::from_secs(1), "drop blocked");
 
     let mut b = Session::open(&profile(stub.addr, "t"), photos_client(), ctx);
-    assert_ne!(b.generation(), 0);
+    assert_ne!(b.generation(), a_generation);
     let mut seen = wait_settled(&mut b);
     assert!(
         matches!(b.state(), SessionState::Ready { .. }),
@@ -421,4 +456,70 @@ fn results_after_drop_are_discarded() {
     }
     assert_eq!(seen.len(), 1, "{seen:?}");
     assert_eq!(folders(&seen[0]), vec!["from-prompt".to_string()]);
+}
+
+/// Polls until every one of `ids` is answered; returns the replies in the order of `ids`.
+fn wait_replies(session: &mut Session, ids: &[RequestId]) -> Vec<Reply> {
+    let start = Instant::now();
+    let mut got: Vec<Reply> = Vec::new();
+    while !ids.iter().all(|id| got.iter().any(|r| r.id == *id)) {
+        assert!(start.elapsed() < DEADLINE, "no reply to all of {ids:?}");
+        got.extend(session.poll());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    ids.iter()
+        .map(|id| got.iter().find(|r| r.id == *id).unwrap().clone())
+        .collect()
+}
+
+#[test]
+fn requests_made_while_connecting_do_not_pass_a_failed_handshake() {
+    let stub = start_stub(false);
+    let music = ClientInfo {
+        app: asteria_music_api::APP.into(),
+        app_api: asteria_music_api::APP_API,
+    };
+    let mut session = Session::open(&profile(stub.addr, "t"), music, egui::Context::default());
+    // Made before the handshake's answer has been polled.
+    let id = session.request(list_root());
+    let reply = wait_replies(&mut session, &[id]).remove(0);
+    assert!(
+        matches!(
+            reply.result,
+            Err(ClientError::Handshake(HandshakeError::AppMismatch { .. }))
+        ),
+        "{reply:?}"
+    );
+    assert!(matches!(
+        session.state(),
+        SessionState::Failed(ClientError::Handshake(_))
+    ));
+    assert_eq!(stub.methods(), vec!["server.info".to_string()]);
+}
+
+#[test]
+fn another_library_id_fails_the_session() {
+    let stub = start_stub(true);
+    let mut session = Session::open(
+        &profile(stub.addr, "t"),
+        photos_client(),
+        egui::Context::default(),
+    );
+    wait_settled(&mut session);
+    assert!(
+        matches!(session.state(), SessionState::Ready { .. }),
+        "{:?}",
+        session.state()
+    );
+    let info = session.request(Request::LibraryInfo);
+    // Queued behind the check that will fail.
+    let list = session.request(list_root());
+    let replies = wait_replies(&mut session, &[info, list]);
+    assert_eq!(replies[0].result, Err(ClientError::LibraryChanged));
+    assert_eq!(replies[1].result, Err(ClientError::LibraryChanged));
+    assert_eq!(
+        session.state(),
+        &SessionState::Failed(ClientError::LibraryChanged)
+    );
+    assert!(!stub.methods().iter().any(|m| m == "folder.list"));
 }
