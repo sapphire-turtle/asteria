@@ -18,3 +18,19 @@ asteria-photos-server serve --config ~/.config/asteria/photos.toml
 - トークンは平文（素の HTTP）で流れる。サーバーは LAN か Tailscale などの VPN の中だけで公開し、インターネットに直接出さない。
 - 1つのライブラリを扱うサーバーは1つだけ。`serve` は `<library>/.asteria/server.lock` をロックし、2つ目はエラーで終了する。
 - サムネイルには `vipsthumbnail`（libvips-tools）、動画には `ffmpeg` が必要。ログは `RUST_LOG` で調整（既定 `info`）。
+
+## photos クライアントの起動
+
+```sh
+# Linux では eframe のためにいくつかのシステムパッケージが要る（Debian/Ubuntu の名前）。
+sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev
+cargo run -p asteria-photos --release
+```
+
+- クライアントは `asteria-photos-server` が配信するライブラリを見るもの。サムネイルはサーバーが作るので、libvips や ffmpeg は要らない。
+- 初回はサーバーが未登録なので、設定が「サーバー」ページで追加フォームを開いた状態で始まる。名前、アドレス（`http://192.168.1.10:7810` など）、`init`（または `token add`）が表示したアクセストークンを入れ、「接続を確かめる」で確かめてから保存する。左のレールで「ライブラリ」を開くと写真が見える。
+- サーバーは複数登録できる。ステータスバー（右下。幅が狭いときはアイコンだけ）に使用中のサーバーと接続の状態が出る。メニューから別のサーバーを選ぶと切り替わり、「サーバーを管理…」（設定 › サーバー）では追加、編集、削除ができる。使用中のサーバーは次回の起動でも覚えていて、切り替えるとライブラリのルートから表示し直す。
+- サーバーにつながらない、トークンが通らない、バージョンが合わない、といったときは、ライブラリに理由と「もう一度」ボタンが出る。オフライン用のキャッシュはまだない。
+- サーバーとトークンは、アプリの設定ディレクトリの `servers.toml` に保存される（Linux は `~/.config/asteria-photos/`、macOS は `~/Library/Application Support/asteria-photos/`、Windows は `%APPDATA%\asteria-photos\`）。Unix ではこのファイルを自分だけが読める権限（0600）にする。トークンは OS のキーチェーンには入れない。取得したサムネイルはアプリのキャッシュディレクトリ（Linux は `~/.cache/asteria-photos/`）に置かれ、消しても問題ない。
+- 写真をクリックで選ぶと、右にプレビューと詳細が出る。ダブルクリックか Enter で全画面表示になり、左右キーで同じフォルダ内を前後に移動、Esc で閉じる。
+- 詳細ペインでは、評価（星をクリック。同じ星をもう一度押すと解除）、カラーラベル、キーワードと階層タグ、説明（入力欄からフォーカスが外れると保存）を編集できる。編集はサーバーがライブラリのサイドカーに書き込む。サーバーがサイドカーを読めない写真は、理由つきで読み取り専用になる。
