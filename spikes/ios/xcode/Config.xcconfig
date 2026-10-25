@@ -1,4 +1,0 @@
-// Always-present entry point for project.yml (XcodeGen fails on a missing
-// configFiles path, so the optional Local.xcconfig is included from here).
-#include "Local.xcconfig.example"
-#include? "Local.xcconfig"

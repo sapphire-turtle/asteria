@@ -8,8 +8,6 @@ members = [
     "crates/asteria-framework-server",
     "photos-server",
 ]
-# The iOS spike is its own workspace with its own lockfile.
-exclude = ["spikes"]
 
 [workspace.package]
 version = "0.1.0"

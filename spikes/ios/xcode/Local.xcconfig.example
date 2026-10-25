@@ -1,4 +1,0 @@
-// Defaults for the spike. Copy to Local.xcconfig (gitignored) to override.
-PRODUCT_BUNDLE_IDENTIFIER = io.github.sapphireturtle.asteria.spike
-// Your Apple developer team ID; only needed for a real device.
-DEVELOPMENT_TEAM =
