@@ -5,8 +5,8 @@ use std::time::{Duration, Instant, SystemTime};
 use asteria_framework::{Library, MediaKind};
 use asteria_framework_server::{Cache, MediaFilter, ScanReport, scan};
 
-struct Gallery;
-impl MediaFilter for Gallery {
+struct Photos;
+impl MediaFilter for Photos {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }
@@ -40,7 +40,7 @@ fn env() -> Env {
 }
 
 fn run(e: &Env) -> ScanReport {
-    scan(&e.lib, &e.cache, &Gallery).unwrap()
+    scan(&e.lib, &e.cache, &Photos).unwrap()
 }
 
 fn red(to: &Path) {
@@ -348,7 +348,7 @@ fn missing_library_identity_aborts_without_removing() {
     // An unmounted library looks like an empty directory, or one without `.asteria`.
     fs::rename(e.root.join(".asteria"), e.root.join("asteria-away")).unwrap();
     fs::remove_file(e.root.join("a.jpg")).unwrap();
-    assert!(scan(&e.lib, &e.cache, &Gallery).is_err());
+    assert!(scan(&e.lib, &e.cache, &Photos).is_err());
     assert_eq!(paths(&e), ["a.jpg"]);
 }
 
@@ -361,6 +361,6 @@ fn other_library_identity_aborts_without_removing() {
     fs::remove_file(e.root.join("a.jpg")).unwrap();
     fs::remove_dir_all(e.root.join(".asteria")).unwrap();
     Library::init(&e.root, "someone else").unwrap();
-    assert!(scan(&e.lib, &e.cache, &Gallery).is_err());
+    assert!(scan(&e.lib, &e.cache, &Photos).is_err());
     assert_eq!(paths(&e), ["a.jpg"]);
 }

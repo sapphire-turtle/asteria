@@ -1,4 +1,4 @@
-//! Gallery browse/update wire types.
+//! Photos browse/update wire types.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +17,7 @@ pub enum MediaKind {
 #[serde(transparent)]
 pub struct ItemId(pub String);
 
-/// One media file as the gallery API presents it.
+/// One media file as the photos API presents it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaItem {
     pub id: ItemId,

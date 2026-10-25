@@ -1,9 +1,9 @@
-//! Wire types shared between the asteria-gallery server and its clients.
+//! Wire types shared between the asteria-photos server and its clients.
 
 pub use asteria_framework_api::*;
 
 /// Application identifier sent in the handshake.
-pub const APP: &str = "asteria-gallery";
+pub const APP: &str = "asteria-photos";
 /// Version of this application's API.
 pub const APP_API: u32 = parse_major(env!("CARGO_PKG_VERSION_MAJOR"));
 
@@ -24,7 +24,7 @@ mod tests {
         assert_eq!(
             client_info(),
             ClientInfo {
-                app: "asteria-gallery".into(),
+                app: "asteria-photos".into(),
                 app_api: 2
             }
         );
@@ -37,7 +37,7 @@ mod wire_tests {
     fn client_info_wire_format() {
         assert_eq!(
             serde_json::to_string(&super::client_info()).unwrap(),
-            r#"{"app":"asteria-gallery","app_api":2}"#
+            r#"{"app":"asteria-photos","app_api":2}"#
         );
     }
 }

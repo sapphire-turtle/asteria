@@ -1,5 +1,5 @@
 [package]
-name = "asteria-gallery-server"
+name = "asteria-photos-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,10 +7,10 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-asteria-framework = { path = "../asteria-framework" }
-asteria-framework-api = { path = "../asteria-framework-api" }
-asteria-framework-server = { path = "../asteria-framework-server" }
-asteria-gallery-api = { path = "../asteria-gallery-api" }
+asteria-framework = { path = "../crates/asteria-framework" }
+asteria-framework-api = { path = "../crates/asteria-framework-api" }
+asteria-framework-server = { path = "../crates/asteria-framework-server" }
+asteria-photos-api = { path = "../crates/asteria-photos-api" }
 clap.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "signal", "net"] }
 tokio-util.workspace = true

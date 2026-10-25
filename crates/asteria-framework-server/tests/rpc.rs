@@ -49,7 +49,7 @@ async fn missing_or_wrong_token_is_401() {
 async fn server_info_reports_app_and_epoch() {
     let e = env();
     let v = call(&e.app, &e.owner_token, "server.info", json!({})).await;
-    assert_eq!(v["result"]["app"], "asteria-gallery");
+    assert_eq!(v["result"]["app"], "asteria-photos");
     assert_eq!(v["result"]["app_api"], 1);
     assert_eq!(v["result"]["server_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(v["result"]["epoch"], e.cache.epoch());
@@ -182,7 +182,7 @@ async fn errors_map_to_codes() {
 
     // A broken sidecar makes the item read-only.
     fs::write(e.root.join("a.jpg.xmp"), "<not xml").unwrap();
-    scan(&e.lib, &e.cache, &Gallery).unwrap();
+    scan(&e.lib, &e.cache, &Photos).unwrap();
     let v = call(&e.app, t, "media.get", json!({"id": id})).await;
     assert!(v["result"]["read_only_reason"].is_string());
     let v = call(&e.app, t, "media.update", json!({"id": id, "rating": 2})).await;
@@ -237,7 +237,7 @@ async fn params_may_be_omitted() {
     assert_eq!(status, StatusCode::OK);
     let v: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v["id"], 4);
-    assert_eq!(v["result"]["app"], "asteria-gallery");
+    assert_eq!(v["result"]["app"], "asteria-photos");
 }
 
 fn bulk(e: &Env, n: usize) {

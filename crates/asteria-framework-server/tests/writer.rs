@@ -10,8 +10,8 @@ use asteria_framework_server::{
 };
 use grain_id::GrainId;
 
-struct Gallery;
-impl MediaFilter for Gallery {
+struct Photos;
+impl MediaFilter for Photos {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }
@@ -36,7 +36,7 @@ fn env() -> Env {
         root.join("a.jpg"),
     )
     .unwrap();
-    scan(&lib, &cache, &Gallery).unwrap();
+    scan(&lib, &cache, &Photos).unwrap();
     let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
     Env {
         _dir: dir,
@@ -95,7 +95,7 @@ async fn read_only_item_is_refused_untouched() {
     let e = env();
     let xmp = e.root.join("a.jpg.xmp");
     fs::write(&xmp, b"<not xmp").unwrap();
-    scan(&e.lib, &e.cache, &Gallery).unwrap();
+    scan(&e.lib, &e.cache, &Photos).unwrap();
     let mut p = params(id(&e));
     p.rating = Some(3);
     let r = e.writer.update(e.lib.owner(), p).await;

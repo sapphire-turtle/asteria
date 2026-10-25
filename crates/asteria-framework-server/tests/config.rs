@@ -58,8 +58,8 @@ fn tokens_are_distinct_and_long() {
 #[test]
 fn cache_dir_is_per_app_and_library() {
     let id = asteria_framework::LibraryId(uuid::Uuid::nil());
-    let dir = asteria_framework_server::cache_dir_for("asteria-gallery", &id).unwrap();
-    assert!(dir.ends_with("asteria-gallery/00000000-0000-0000-0000-000000000000"));
+    let dir = asteria_framework_server::cache_dir_for("asteria-photos", &id).unwrap();
+    assert!(dir.ends_with("asteria-photos/00000000-0000-0000-0000-000000000000"));
 }
 
 #[test]

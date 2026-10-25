@@ -1,9 +1,9 @@
-//! Wire types shared between the asteria-player server and its clients.
+//! Wire types shared between the asteria-music server and its clients.
 
 pub use asteria_framework_api::*;
 
 /// Application identifier sent in the handshake.
-pub const APP: &str = "asteria-player";
+pub const APP: &str = "asteria-music";
 /// Version of this application's API.
 pub const APP_API: u32 = parse_major(env!("CARGO_PKG_VERSION_MAJOR"));
 

@@ -148,7 +148,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "asteria-gallery-api"
+name = "asteria-music-api"
+version = "2.1.0"
+dependencies = [
+ "asteria-framework-api",
+]
+
+[[package]]
+name = "asteria-photos-api"
 version = "2.1.0"
 dependencies = [
  "asteria-framework-api",
@@ -156,13 +163,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "asteria-gallery-server"
+name = "asteria-photos-server"
 version = "0.1.0"
 dependencies = [
  "asteria-framework",
  "asteria-framework-api",
  "asteria-framework-server",
- "asteria-gallery-api",
+ "asteria-photos-api",
  "axum",
  "clap",
  "grain-id",
@@ -173,13 +180,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "asteria-player-api"
-version = "2.1.0"
-dependencies = [
- "asteria-framework-api",
 ]
 
 [[package]]
