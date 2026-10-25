@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use corundum_gui::egui::{self, Event, TouchId, TouchPhase};
+use corundum_framework::egui::{self, Event, TouchId, TouchPhase};
 
 use super::{Answer, checklist};
 use crate::report::Report;

@@ -1,7 +1,7 @@
 //! The audio screen (spec section 8, item 2): play a tone or the Opus sample, pause and
 //! stop it, see the engine's state, and answer the background-playback checklist.
 
-use corundum_gui::egui;
+use corundum_framework::egui;
 
 use super::{Answer, checklist, reset_checklist};
 use crate::audio::{Command, Engine, PlayState, Source};

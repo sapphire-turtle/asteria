@@ -1,6 +1,6 @@
 //! The report screen: the report as text, and a button to copy it off the device.
 
-use corundum_gui::egui;
+use corundum_framework::egui;
 
 use crate::report::Report;
 
