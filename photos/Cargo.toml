@@ -19,6 +19,7 @@ asteria-framework-client = { path = "../crates/asteria-framework-client" }
 asteria-photos-api = { path = "../crates/asteria-photos-api" }
 corundum-framework = { workspace = true, features = ["gui", "serde", "eframe"] }
 tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [dev-dependencies]
 # A real photos server on a temporary library, run in-process (tests/support/server.rs).
