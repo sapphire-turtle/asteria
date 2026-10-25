@@ -34,9 +34,8 @@ lofty = "0.22"
 tracing = "0.1"
 getrandom = "0.4"
 base64 = "0.23"
-# The app's directories and, for the clients, the look shared with sapphire. A git
-# dependency until its first release on crates.io; then drop `git`.
-corundum-framework = { version = "0.1.0", git = "https://github.com/sapphire-turtle/corundum-framework" }
+# The app's directories and, for the clients, the look shared with sapphire.
+corundum-framework = "0.1.0"
 walkdir = "2"
 tokio = { version = "1", features = ["rt", "sync", "process", "time", "io-util", "macros"] }
 tokio-util = "0.7"

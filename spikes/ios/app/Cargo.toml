@@ -12,8 +12,7 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 blake3 = { version = "1", features = ["pure"] }
 # The window, the shell, the fonts and the icons, with the eframe and egui they are built on.
-# A git dependency until corundum-framework's first release on crates.io; then drop `git`.
-corundum-framework = { version = "0.1.0", git = "https://github.com/sapphire-turtle/corundum-framework", features = ["eframe"] }
+corundum-framework = { version = "0.1.0", features = ["eframe"] }
 cpal = "0.18"
 log = "0.4"
 opus-probe = { path = "../opus-probe" }
