@@ -22,6 +22,12 @@ yanked = "warn"
 # still load-bearing. Re-check them when the dependency they name moves.
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "proc-macro pulled in by lofty, used only as a test dev-dependency; revisit when asteria-music uses lofty at runtime (Plan 5)" },
+    # Unmaintained, with no vulnerability and no safe upgrade. Same entries as corundum-framework,
+    # whose eframe window brings them in for asteria-photos.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained (author-declared); corundum's gui crate reads font files with it directly and through fontdb. The suggested alternative (skrifa) is a different font stack." },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant is unmaintained as a standalone crate (merged into zbus 6). Reached via eframe > egui-winit > accesskit_winit > accesskit_unix (Linux screen reader support), whose latest release still pins zbus ^5.19 and atspi ^0.29. Drop when accesskit_unix moves to zbus 6." },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names is unmaintained as a standalone crate (merged into zbus 6). Same path and reason as RUSTSEC-2026-0370." },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is unmaintained as a standalone crate (merged into zbus 6). Same path and reason as RUSTSEC-2026-0370." },
 ]
 
 [licenses]
@@ -51,7 +57,13 @@ exceptions = [
     # dependency cannot slip in unnoticed:
     { name = "asteria-framework", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-framework-server", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-framework-client", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-photos", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-photos-server", allow = ["GPL-3.0-or-later"] },
+    # egui's fallback UI font is under the OFL and the Ubuntu Font Licence: they govern the
+    # typefaces it embeds, not code, so they are scoped to this crate rather than allowed
+    # for every dependency.
+    { name = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
 ]
 
 [bans]

@@ -1,0 +1,15 @@
+[package]
+name = "asteria-framework-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# egui only: no eframe, so the crate also builds for iOS and Android.
+corundum-framework = { workspace = true, features = ["gui", "serde"] }
+reqwest.workspace = true
+image.workspace = true
+serde.workspace = true
+toml.workspace = true

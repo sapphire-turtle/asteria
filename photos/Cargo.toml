@@ -1,0 +1,18 @@
+[package]
+name = "asteria-photos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "asteria-photos"
+path = "src/main.rs"
+
+[dependencies]
+asteria-framework-client = { path = "../crates/asteria-framework-client" }
+corundum-framework = { workspace = true, features = ["gui", "serde", "eframe"] }
