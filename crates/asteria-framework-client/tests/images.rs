@@ -58,12 +58,26 @@ type Log = Arc<Mutex<Vec<(Instant, String)>>>;
 fn media_stub(
     media: impl Fn(&str, usize) -> StubResponse + Send + Sync + 'static,
 ) -> (SocketAddr, Log) {
+    media_stub_holding_handshake(None, media)
+}
+
+/// Like [`media_stub`]; with `handshake`, `server.info` is answered only once it fires.
+fn media_stub_holding_handshake(
+    handshake: Option<mpsc::Receiver<()>>,
+    media: impl Fn(&str, usize) -> StubResponse + Send + Sync + 'static,
+) -> (SocketAddr, Log) {
     let log: Log = Arc::default();
     let handler_log = log.clone();
+    let handshake = Mutex::new(handshake);
     let addr = serve(move |req: &StubRequest| {
         if let Some((id, method)) = req.rpc() {
             let result = match method.as_str() {
-                "server.info" => photos_server_info(),
+                "server.info" => {
+                    if let Some(rx) = handshake.lock().unwrap().take() {
+                        let _ = rx.recv_timeout(DEADLINE);
+                    }
+                    photos_server_info()
+                }
                 "library.info" => library_info("stub-library"),
                 other => panic!("stub got unexpected method {other}"),
             };
@@ -291,4 +305,206 @@ fn preview_budget_evicts_the_least_recently_requested() {
     // Asked again, it comes back from the disk cache.
     assert_ready(&wait_loaded(&mut session, &ctx, &items[0], Preset::Preview));
     assert_eq!(log.lock().unwrap().len(), 9);
+}
+
+#[test]
+fn transient_failure_is_retried_after_backoff() {
+    let (addr, log) = media_stub(|_, nth| {
+        if nth == 0 {
+            StubResponse::new(500, Vec::new())
+        } else {
+            webp_response()
+        }
+    });
+    let cache = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut session = ready_session(addr, &ctx, cache.path());
+    session
+        .images()
+        .set_failure_backoff(Duration::from_millis(200), Duration::from_secs(1));
+    let one = item(1);
+    let state = wait_loaded(&mut session, &ctx, &one, Preset::Thumb);
+    assert!(
+        matches!(state, ImageState::Failed(ClientError::Protocol(_))),
+        "{state:?}"
+    );
+    let failed_at = Instant::now();
+    // Requests during the backoff keep the failure and send nothing.
+    let state = frame(&ctx, || session.images().request(&one, Preset::Thumb));
+    assert!(matches!(state, ImageState::Failed(_)), "{state:?}");
+    assert_eq!(log.lock().unwrap().len(), 1);
+    // After it, a request loads it again.
+    let start = Instant::now();
+    let state = loop {
+        session.poll();
+        let state = frame(&ctx, || session.images().request(&one, Preset::Thumb));
+        if matches!(state, ImageState::Ready(_)) {
+            break state;
+        }
+        assert!(start.elapsed() < DEADLINE, "never retried: {state:?}");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_ready(&state);
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 2);
+    assert!(log[1].0 >= failed_at + Duration::from_millis(150));
+}
+
+#[test]
+fn queued_fetches_out_of_view_are_skipped() {
+    // The first six media requests wait for a permit; later ones are answered at once.
+    let (permit, permits) = mpsc::channel::<()>();
+    let permits = Mutex::new(permits);
+    let (addr, log) = media_stub(move |_, nth| {
+        if nth < 6 {
+            let _ = permits.lock().unwrap().recv_timeout(DEADLINE);
+        }
+        webp_response()
+    });
+    let cache = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut session = ready_session(addr, &ctx, cache.path());
+    let passed: Vec<MediaItem> = (0..50).map(item).collect();
+    let landed = [item(100), item(101)];
+
+    // Pass 1: a fast scroll shows fifty items; six start at once.
+    frame(&ctx, || {
+        for it in &passed {
+            session.images().request(it, Preset::Thumb);
+        }
+    });
+    wait_logged(&log, 6);
+    // Passes 2 to 4: the view has settled on two other items.
+    for _ in 0..3 {
+        frame(&ctx, || {
+            for it in &landed {
+                session.images().request(it, Preset::Thumb);
+            }
+        });
+    }
+    for _ in 0..6 {
+        permit.send(()).unwrap();
+    }
+    for it in &landed {
+        assert_ready(&wait_loaded(&mut session, &ctx, it, Preset::Thumb));
+    }
+    // The other 44 of pass 1 are dropped as the pool reaches them, not fetched.
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(300) {
+        session.poll();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let fetched = paths(&log);
+    assert_eq!(fetched.len(), 8, "{fetched:?}");
+    assert!(fetched.contains(&"/media/item-100/thumb".to_string()));
+    assert!(fetched.contains(&"/media/item-101/thumb".to_string()));
+    // Requested again, a skipped item is queued afresh.
+    assert_ready(&wait_loaded(&mut session, &ctx, &passed[49], Preset::Thumb));
+    assert_eq!(log.lock().unwrap().len(), 9);
+}
+
+#[test]
+fn an_idle_ui_does_not_starve_its_requests() {
+    let (permit, permits) = mpsc::channel::<()>();
+    let permits = Mutex::new(permits);
+    let (addr, log) = media_stub(move |_, nth| {
+        if nth < 6 {
+            let _ = permits.lock().unwrap().recv_timeout(DEADLINE);
+        }
+        webp_response()
+    });
+    let cache = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut session = ready_session(addr, &ctx, cache.path());
+    // One pass asks for ten; no pass follows. The four left in the queue are still fetched.
+    frame(&ctx, || {
+        for n in 0..10 {
+            session.images().request(&item(n), Preset::Thumb);
+        }
+    });
+    wait_logged(&log, 6);
+    for _ in 0..6 {
+        permit.send(()).unwrap();
+    }
+    wait_logged(&log, 10);
+}
+
+#[test]
+fn requests_before_the_handshake_wait_for_it() {
+    let (handshake, handshake_rx) = mpsc::channel::<()>();
+    let (addr, log) = media_stub_holding_handshake(Some(handshake_rx), |_, _| webp_response());
+    let cache = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut session = Session::open_with_cache(
+        &profile(addr, "t"),
+        photos_client(),
+        ctx.clone(),
+        Some(cache.path().to_path_buf()),
+    );
+    let one = item(1);
+    for _ in 0..3 {
+        session.poll();
+        let state = frame(&ctx, || session.images().request(&one, Preset::Thumb));
+        assert!(matches!(state, ImageState::Loading), "{state:?}");
+    }
+    assert!(matches!(session.state(), SessionState::Connecting));
+    assert!(log.lock().unwrap().is_empty());
+    handshake.send(()).unwrap();
+    assert_ready(&wait_loaded(&mut session, &ctx, &one, Preset::Thumb));
+    assert_eq!(log.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn image_results_after_drop_are_discarded() {
+    // The first media request (session A's) waits for `release_a`, and reports when its
+    // answer is written; the second (session B's) waits for `release_b`.
+    let (release_a, a_rx) = mpsc::channel::<()>();
+    let (release_b, b_rx) = mpsc::channel::<()>();
+    let (written, written_rx) = mpsc::channel::<()>();
+    let held = Mutex::new((a_rx, b_rx, written));
+    let (addr, log) = media_stub(move |_, nth| {
+        let held = held.lock().unwrap();
+        let rx = if nth == 0 { &held.0 } else { &held.1 };
+        let _ = rx.recv_timeout(DEADLINE);
+        let mut resp = webp_response();
+        if nth == 0 {
+            let written = held.2.clone();
+            resp.after_write = Some(Box::new(move || {
+                let _ = written.send(());
+            }));
+        }
+        resp
+    });
+    let ctx = egui::Context::default();
+    let one = item(1);
+    let open = || {
+        let mut s = Session::open(&profile(addr, "t"), photos_client(), ctx.clone());
+        wait_settled(&mut s);
+        s
+    };
+
+    let mut a = open();
+    frame(&ctx, || a.images().request(&one, Preset::Thumb));
+    wait_logged(&log, 1);
+    drop(a);
+
+    // B asks for the same image, so its first job has the same key and ticket as A's.
+    let mut b = open();
+    let state = frame(&ctx, || b.images().request(&one, Preset::Thumb));
+    assert!(matches!(state, ImageState::Loading));
+    wait_logged(&log, 2);
+    release_a.send(()).unwrap();
+    written_rx.recv_timeout(DEADLINE).unwrap();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(300) {
+        b.poll();
+        let state = frame(&ctx, || b.images().request(&one, Preset::Thumb));
+        assert!(
+            matches!(state, ImageState::Loading),
+            "A's image leaked: {state:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    release_b.send(()).unwrap();
+    assert_ready(&wait_loaded(&mut b, &ctx, &one, Preset::Thumb));
 }

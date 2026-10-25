@@ -23,6 +23,8 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The wait used for a 503 that has no usable `Retry-After` (the server sends `2`).
 pub const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(2);
+/// The longest `Retry-After` honoured; a longer one is cut to this.
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 /// Why a request to the server did not produce a result.
 ///
@@ -184,13 +186,15 @@ fn check_status(resp: Response) -> Result<Response, ClientError> {
     }
 }
 
-/// `Retry-After` in seconds; an HTTP date or a missing header means [`DEFAULT_RETRY_AFTER`].
+/// `Retry-After` in seconds, at most [`MAX_RETRY_AFTER`]; an HTTP date or a missing header
+/// means [`DEFAULT_RETRY_AFTER`].
 fn retry_after(resp: &Response) -> Duration {
     resp.headers()
         .get(RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map_or(DEFAULT_RETRY_AFTER, Duration::from_secs)
+        .min(MAX_RETRY_AFTER)
 }
 
 /// A failure of the HTTP exchange itself.

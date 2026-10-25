@@ -9,7 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, mpsc};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use asteria_framework_api::{ItemId, MediaItem};
 use corundum_framework::egui;
@@ -22,8 +22,18 @@ use crate::session::{Gate, lock_gate};
 
 /// How many images are fetched (or read from disk) and decoded at the same time.
 pub const MAX_CONCURRENT: usize = 6;
-/// How many times one image is fetched while the server keeps answering 503, before it fails.
+/// How many fetches one image gets in total (the first one included) while the server keeps
+/// answering 503; after the last one it fails with [`ClientError::Retry`].
 pub const MAX_ATTEMPTS: u32 = 30;
+/// The wait after an image first fails for a reason that may pass (the server could not be
+/// reached, an unexpected status, a local error). It doubles with each further failure, up to
+/// [`MAX_FAILURE_BACKOFF`].
+pub const FIRST_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
+/// The longest wait before a failed image is tried again.
+pub const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
+/// A queued image that has not been requested in this many of the latest egui passes has
+/// scrolled out of view: the pool drops it instead of fetching it.
+pub const STALE_AFTER_PASSES: u64 = 2;
 
 /// The sizes the server renders (`GET /media/{id}/{preset}`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,9 +69,13 @@ pub enum ImageState {
     /// Queued, or being fetched or decoded.
     Loading,
     Ready(egui::TextureHandle),
-    /// Will not be tried again in this session. [`ClientError::Unprocessable`] means the
-    /// server cannot render this file; [`ClientError::Retry`] means it stayed busy for
-    /// [`MAX_ATTEMPTS`] attempts.
+    /// It could not be loaded. Some failures are final for the session
+    /// ([`ClientError::Unprocessable`]: the server cannot render this file; also
+    /// [`ClientError::NotFound`], [`ClientError::Unauthorized`], a failed handshake, a changed
+    /// library and an image that does not decode). Others (the server unreachable, still busy
+    /// after [`MAX_ATTEMPTS`] fetches, an unexpected answer) are tried again by a
+    /// [`request`](ImageLoader::request) made after a backoff of [`FIRST_FAILURE_BACKOFF`],
+    /// doubling up to [`MAX_FAILURE_BACKOFF`].
     Failed(ClientError),
 }
 
@@ -93,6 +107,8 @@ struct Entry {
     last_touch: u64,
     /// Read by the pool to choose the next job: the pass it was last requested in.
     priority: Arc<AtomicU64>,
+    /// Failures in a row that may pass, for the backoff.
+    failures: u32,
 }
 
 enum EntryState {
@@ -100,7 +116,11 @@ enum EntryState {
     Held,
     Loading,
     Ready(egui::TextureHandle),
-    Failed(ClientError),
+    /// `retry_at` is `None` if the failure is final for the session.
+    Failed {
+        error: ClientError,
+        retry_at: Option<Instant>,
+    },
 }
 
 /// Loads images for one session. See the [module docs](self).
@@ -112,10 +132,11 @@ enum EntryState {
 /// - With a `file_hash` and a cache, the disk cache is read first and a fetched image is
 ///   stored there.
 /// - Up to [`MAX_CONCURRENT`] images load at once, on threads of their own (not the
-///   session's request worker). Images requested in the current egui pass are taken from the
-///   queue before those that were not: these have scrolled out of view.
-/// - A 503 is retried after its `Retry-After`, up to [`MAX_ATTEMPTS`] fetches. Any other
-///   failure (422 included) is final for this session.
+///   session's request worker). Images requested in the latest egui pass are taken from the
+///   queue first; one not requested in the last [`STALE_AFTER_PASSES`] passes has scrolled
+///   out of view and is dropped from the queue unfetched (a later request queues it again).
+/// - A 503 is retried after its `Retry-After`, up to [`MAX_ATTEMPTS`] fetches in total. For
+///   other failures, see [`ImageState::Failed`].
 /// - At most [`Preset::texture_budget`] textures per preset are kept; past that, the least
 ///   recently requested ones (not requested in the current pass) are dropped and loaded again
 ///   if requested later.
@@ -132,6 +153,10 @@ pub struct ImageLoader {
     held: Vec<Key>,
     /// The egui pass last seen by `request`.
     frame: Option<u64>,
+    /// The same, for the pool.
+    newest_pass: Arc<AtomicU64>,
+    /// The first and the longest wait before a failure that may pass is retried.
+    backoff: (Duration, Duration),
     next_ticket: u64,
     touch: u64,
     /// Started on the first fetch.
@@ -166,6 +191,8 @@ impl ImageLoader {
             entries: HashMap::new(),
             held: Vec::new(),
             frame: None,
+            newest_pass: Arc::new(AtomicU64::new(0)),
+            backoff: (FIRST_FAILURE_BACKOFF, MAX_FAILURE_BACKOFF),
             next_ticket: 0,
             touch: 0,
             pool: None,
@@ -181,6 +208,7 @@ impl ImageLoader {
         let frame = self.ctx.cumulative_pass_nr();
         if self.frame != Some(frame) {
             self.frame = Some(frame);
+            self.newest_pass.store(frame, Ordering::Relaxed);
             self.poll();
         }
         self.touch += 1;
@@ -191,7 +219,20 @@ impl ImageLoader {
             entry.last_frame = frame;
             entry.last_touch = self.touch;
             entry.priority.store(frame, Ordering::Relaxed);
-            return entry.state.public();
+            let cooled_down = matches!(
+                entry.state,
+                EntryState::Failed { retry_at: Some(at), .. } if Instant::now() >= at
+            );
+            if !cooled_down {
+                return entry.state.public();
+            }
+            // Try again, as a new job: a late result of the old one is ignored.
+            entry.ticket = self.next_ticket;
+            self.next_ticket += 1;
+            entry.state = EntryState::Held;
+            self.held.push(key.clone());
+            self.release_held();
+            return self.entries[&key].state.public();
         }
         // New, or the file changed since it was loaded.
         let ticket = self.next_ticket;
@@ -200,9 +241,10 @@ impl ImageLoader {
             self.held.push(key.clone());
             EntryState::Held
         } else {
-            EntryState::Failed(ClientError::Protocol(
-                "the item id cannot be used in a URL".into(),
-            ))
+            EntryState::Failed {
+                error: ClientError::Protocol("the item id cannot be used in a URL".into()),
+                retry_at: None,
+            }
         };
         self.entries.insert(
             key.clone(),
@@ -213,6 +255,7 @@ impl ImageLoader {
                 last_frame: frame,
                 last_touch: self.touch,
                 priority: Arc::new(AtomicU64::new(frame)),
+                failures: 0,
             },
         );
         self.release_held();
@@ -223,7 +266,8 @@ impl ImageLoader {
     /// handshake. [`request`](Self::request) and [`Session::poll`](crate::session::Session::poll)
     /// call it; there is no need to call it yourself.
     pub fn poll(&mut self) {
-        let mut uploaded = [false; 2];
+        let (mut thumbs, mut previews) = (false, false);
+        let (first, longest) = self.backoff;
         while let Ok(done) = self.results.try_recv() {
             let Some(entry) = self.entries.get_mut(&done.key) else {
                 continue; // Evicted while loading.
@@ -231,10 +275,19 @@ impl ImageLoader {
             if entry.ticket != done.ticket {
                 continue; // Replaced while loading.
             }
-            entry.state = match done.result {
-                Ok(image) => {
+            entry.state = match done.outcome {
+                Outcome::Skipped => {
+                    // Out of view when its turn came; a later request starts it afresh.
+                    self.entries.remove(&done.key);
+                    continue;
+                }
+                Outcome::Image(image) => {
                     let (id, preset) = &done.key;
-                    uploaded[*preset as usize] = true;
+                    match preset {
+                        Preset::Thumb => thumbs = true,
+                        Preset::Preview => previews = true,
+                    }
+                    entry.failures = 0;
                     let name = format!("asteria-media/{}/{}", id.0, preset.as_str());
                     EntryState::Ready(self.ctx.load_texture(
                         name,
@@ -242,15 +295,29 @@ impl ImageLoader {
                         egui::TextureOptions::LINEAR,
                     ))
                 }
-                Err(e) => EntryState::Failed(e),
+                Outcome::Failed(Failure { error, permanent }) => {
+                    let retry_at = (!permanent).then(|| {
+                        entry.failures += 1;
+                        Instant::now() + backoff(first, longest, entry.failures)
+                    });
+                    EntryState::Failed { error, retry_at }
+                }
             };
         }
         self.release_held();
-        for preset in [Preset::Thumb, Preset::Preview] {
-            if uploaded[preset as usize] {
-                self.evict(preset);
-            }
+        if thumbs {
+            self.evict(Preset::Thumb);
         }
+        if previews {
+            self.evict(Preset::Preview);
+        }
+    }
+
+    /// Sets the wait before an image that failed for a reason that may pass is tried again:
+    /// `first` after the first failure, doubling up to `longest`. The defaults are
+    /// [`FIRST_FAILURE_BACKOFF`] and [`MAX_FAILURE_BACKOFF`].
+    pub fn set_failure_backoff(&mut self, first: Duration, longest: Duration) {
+        self.backoff = (first, longest);
     }
 
     /// Queues the held entries once the handshake has succeeded, or fails them if it has not.
@@ -261,9 +328,16 @@ impl ImageLoader {
         let gate = lock_gate(&self.gate).clone();
         let failure = match gate {
             Gate::Pending => return,
-            Gate::Open { .. } => self.start_pool().err(),
-            Gate::Closed(e) => Some(e),
+            Gate::Open { .. } => self.start_pool().err().map(|error| Failure {
+                error,
+                permanent: false,
+            }),
+            Gate::Closed(error) => Some(Failure {
+                error,
+                permanent: true,
+            }),
         };
+        let (first, longest) = self.backoff;
         for key in std::mem::take(&mut self.held) {
             let Some(entry) = self.entries.get_mut(&key) else {
                 continue;
@@ -271,8 +345,15 @@ impl ImageLoader {
             if !matches!(entry.state, EntryState::Held) {
                 continue;
             }
-            if let Some(e) = &failure {
-                entry.state = EntryState::Failed(e.clone());
+            if let Some(f) = &failure {
+                let retry_at = (!f.permanent).then(|| {
+                    entry.failures += 1;
+                    Instant::now() + backoff(first, longest, entry.failures)
+                });
+                entry.state = EntryState::Failed {
+                    error: f.error.clone(),
+                    retry_at,
+                };
                 continue;
             }
             entry.state = EntryState::Loading;
@@ -296,7 +377,8 @@ impl ImageLoader {
             let pool = Pool::spawn(
                 PoolContext {
                     connect: Box::new(move || RpcClient::new(&url, token.clone())),
-                    client: OnceLock::new(),
+                    client: Mutex::new(None),
+                    newest_pass: self.newest_pass.clone(),
                     gate: self.gate.clone(),
                     cache: self.cache.clone(),
                     results: Mutex::new(self.results_tx.clone()),
@@ -342,9 +424,15 @@ impl EntryState {
         match self {
             EntryState::Held | EntryState::Loading => ImageState::Loading,
             EntryState::Ready(texture) => ImageState::Ready(texture.clone()),
-            EntryState::Failed(e) => ImageState::Failed(e.clone()),
+            EntryState::Failed { error, .. } => ImageState::Failed(error.clone()),
         }
     }
+}
+
+/// The wait after the `failures`-th failure in a row: `first`, doubling up to `longest`.
+fn backoff(first: Duration, longest: Duration, failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    first.saturating_mul(1 << doublings).min(longest)
 }
 
 /// Item ids are UUID strings; anything else is refused rather than put into a URL path.
@@ -372,14 +460,56 @@ struct Job {
 struct Done {
     key: Key,
     ticket: u64,
-    result: Result<egui::ColorImage, ClientError>,
+    outcome: Outcome,
+}
+
+enum Outcome {
+    Image(egui::ColorImage),
+    Failed(Failure),
+    /// Dropped unfetched: out of view when its turn came.
+    Skipped,
+}
+
+/// Why an image did not load, and whether that is final for the session.
+#[derive(Clone)]
+struct Failure {
+    error: ClientError,
+    permanent: bool,
+}
+
+impl Failure {
+    fn permanent(error: ClientError) -> Failure {
+        Failure {
+            error,
+            permanent: true,
+        }
+    }
+}
+
+impl From<ClientError> for Failure {
+    /// Failures of the exchange with the server: final if the server's answer will not change
+    /// in this session.
+    fn from(error: ClientError) -> Failure {
+        let permanent = matches!(
+            error,
+            ClientError::Unprocessable
+                | ClientError::NotFound
+                | ClientError::Unauthorized
+                | ClientError::Handshake(_)
+                | ClientError::LibraryChanged
+        );
+        Failure { error, permanent }
+    }
 }
 
 /// What the pool threads share besides the queue.
 struct PoolContext {
     connect: Box<dyn Fn() -> Result<RpcClient, ClientError> + Send + Sync>,
-    /// Built by the first job that needs the network, on a pool thread.
-    client: OnceLock<Result<RpcClient, ClientError>>,
+    /// Built by the first job that needs the network, on a pool thread. A failed build is not
+    /// kept: the next job tries again.
+    client: Mutex<Option<Arc<RpcClient>>>,
+    /// The latest egui pass in which the UI requested an image.
+    newest_pass: Arc<AtomicU64>,
     gate: Arc<Mutex<Gate>>,
     cache: Arc<OnceLock<Arc<MediaCache>>>,
     results: Mutex<mpsc::Sender<Done>>,
@@ -450,19 +580,32 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// A pool thread: takes the most wanted job, runs it, repeats until the pool is dropped.
 fn run(shared: &Shared) {
-    while let Some(mut job) = next_job(shared) {
-        let result = load(&shared.cx, &job);
-        job.attempts += 1;
-        if let Err(ClientError::Retry { after }) = &result
-            && job.attempts < MAX_ATTEMPTS
-        {
-            // Back in the queue after the wait; no thread sleeps through it.
-            lock(&shared.queue)
-                .deferred
-                .push((Instant::now() + *after, job));
-            shared.wake.notify_one();
-            continue;
-        }
+    while let Some(next) = next_job(shared) {
+        let (job, outcome) = match next {
+            Next::Skip(job) => (job, Outcome::Skipped),
+            Next::Run(mut job) => {
+                let result = load(&shared.cx, &job);
+                job.attempts += 1;
+                if let Err(Failure {
+                    error: ClientError::Retry { after },
+                    ..
+                }) = &result
+                    && job.attempts < MAX_ATTEMPTS
+                {
+                    // Back in the queue after the wait; no thread sleeps through it.
+                    lock(&shared.queue)
+                        .deferred
+                        .push((Instant::now() + *after, job));
+                    shared.wake.notify_one();
+                    continue;
+                }
+                let outcome = match result {
+                    Ok(image) => Outcome::Image(image),
+                    Err(failure) => Outcome::Failed(failure),
+                };
+                (job, outcome)
+            }
+        };
         // Dropped while the job ran: the result belongs to no one.
         if shared.cancelled.load(Ordering::Acquire) {
             return;
@@ -470,7 +613,7 @@ fn run(shared: &Shared) {
         let done = Done {
             key: (job.id, job.preset),
             ticket: job.ticket,
-            result,
+            outcome,
         };
         if lock(&shared.cx.results).send(done).is_ok() {
             shared.cx.ui.request_repaint();
@@ -478,9 +621,19 @@ fn run(shared: &Shared) {
     }
 }
 
-/// Waits for a job to run: the one requested in the latest pass, the oldest first among
-/// equals. Deferred jobs join the queue when their time comes. `None` once the pool is dropped.
-fn next_job(shared: &Shared) -> Option<Job> {
+/// What a pool thread does next.
+enum Next {
+    Run(Job),
+    /// Not requested in the last [`STALE_AFTER_PASSES`] passes: report it, fetch nothing.
+    Skip(Job),
+}
+
+/// Waits for a job: the one requested in the latest pass, the oldest first among equals.
+/// Deferred jobs join the queue when their time comes. `None` once the pool is dropped.
+///
+/// Staleness is measured against the latest pass in which the UI requested anything, so an
+/// idle UI (no new passes) never makes the images it asked for stale.
+fn next_job(shared: &Shared) -> Option<Next> {
     let mut queue = lock(&shared.queue);
     loop {
         if queue.closed {
@@ -504,8 +657,14 @@ fn next_job(shared: &Shared) -> Option<Job> {
             .rev()
             .max_by_key(|(_, job)| job.priority.load(Ordering::Relaxed))
             .map(|(i, _)| i);
-        if let Some(i) = best {
-            return queue.ready.remove(i);
+        if let Some(job) = best.and_then(|i| queue.ready.remove(i)) {
+            let newest = shared.cx.newest_pass.load(Ordering::Relaxed);
+            let requested = job.priority.load(Ordering::Relaxed);
+            return Some(if newest.saturating_sub(requested) >= STALE_AFTER_PASSES {
+                Next::Skip(job)
+            } else {
+                Next::Run(job)
+            });
         }
         let next_due = queue.deferred.iter().map(|(due, _)| *due).min();
         queue = match next_due {
@@ -522,8 +681,8 @@ fn next_job(shared: &Shared) -> Option<Job> {
 }
 
 /// Reads the image from the disk cache, or fetches it (and caches it), then decodes it.
-fn load(cx: &PoolContext, job: &Job) -> Result<egui::ColorImage, ClientError> {
-    check_gate(&cx.gate)?;
+fn load(cx: &PoolContext, job: &Job) -> Result<egui::ColorImage, Failure> {
+    check_gate(&cx.gate).map_err(Failure::permanent)?;
     let preset = job.preset.as_str();
     let cache = cx.cache.get();
     if let Some(cache) = cache
@@ -538,13 +697,9 @@ fn load(cx: &PoolContext, job: &Job) -> Result<egui::ColorImage, ClientError> {
             Err(e) => tracing::debug!("cached image unreadable, fetching it: {e}"),
         }
     }
-    let client = cx
-        .client
-        .get_or_init(|| (cx.connect)())
-        .as_ref()
-        .map_err(Clone::clone)?;
+    let client = client(cx)?;
     let bytes = client.get_bytes(&format!("media/{}/{preset}", job.id.0))?;
-    let image = decode(&bytes)?;
+    let image = decode(&bytes).map_err(Failure::permanent)?;
     // Only images that decode are kept, and only while the session still serves this library.
     if let Some(cache) = cache
         && check_gate(&cx.gate).is_ok()
@@ -553,6 +708,17 @@ fn load(cx: &PoolContext, job: &Job) -> Result<egui::ColorImage, ClientError> {
         tracing::warn!("cannot store an image in the cache: {e}");
     }
     Ok(image)
+}
+
+/// The pool's client, built on first use.
+fn client(cx: &PoolContext) -> Result<Arc<RpcClient>, ClientError> {
+    let mut slot = lock(&cx.client);
+    if let Some(client) = &*slot {
+        return Ok(client.clone());
+    }
+    let client = Arc::new((cx.connect)()?);
+    *slot = Some(client.clone());
+    Ok(client)
 }
 
 /// Lets a job through only while the handshake's library is being served.
