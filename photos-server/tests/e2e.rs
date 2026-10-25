@@ -21,7 +21,7 @@ mod linux {
     use reqwest::blocking::Client;
     use serde_json::{Value, json};
 
-    const BIN: &str = env!("CARGO_BIN_EXE_asteria-gallery-server");
+    const BIN: &str = env!("CARGO_BIN_EXE_asteria-photos-server");
     /// A 1x1 PNG.
     const PNG: &[u8] = &[
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
@@ -304,7 +304,7 @@ mod linux {
 
         // 1. handshake
         let info = api.call("server.info", json!({}));
-        assert_eq!(info["app"], "asteria-gallery");
+        assert_eq!(info["app"], "asteria-photos");
 
         // 2. scan
         api.wait_scanned(2);
@@ -393,7 +393,7 @@ mod linux {
         );
         drop(second);
         assert!(inflight.exists(), "the first server's tmp file was removed");
-        assert_eq!(api.call("server.info", json!({}))["app"], "asteria-gallery");
+        assert_eq!(api.call("server.info", json!({}))["app"], "asteria-photos");
         std::fs::remove_file(&inflight).unwrap();
 
         // 9. the rating is on disk in the sidecar, and survives a restart with the cache deleted

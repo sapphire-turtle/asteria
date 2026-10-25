@@ -203,7 +203,7 @@ async fn corrupt_image_is_422_and_not_retried() {
         [0xFF, 0xD8, 0xFF, 0x00, 1, 2, 3, 4, 5, 6],
     )
     .unwrap();
-    asteria_framework_server::scan(&e.lib, &e.cache, &Gallery).unwrap();
+    asteria_framework_server::scan(&e.lib, &e.cache, &Photos).unwrap();
     hash_all(&e);
     let id = item_id(&e, "bad.jpg");
     let uri = format!("/media/{id}/thumb");
@@ -286,7 +286,7 @@ async fn video_thumb() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    asteria_framework_server::scan(&e.lib, &e.cache, &Gallery).unwrap();
+    asteria_framework_server::scan(&e.lib, &e.cache, &Photos).unwrap();
     hash_all(&e);
     let id = item_id(&e, "v.mp4");
     let (s, h, b) = get(

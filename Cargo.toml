@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
-    "asteria-framework-api",
-    "asteria-gallery-api",
-    "asteria-player-api",
-    "asteria-framework",
-    "asteria-framework-server",
-    "asteria-gallery-server",
+    "crates/asteria-framework-api",
+    "crates/asteria-photos-api",
+    "crates/asteria-music-api",
+    "crates/asteria-framework",
+    "crates/asteria-framework-server",
+    "photos-server",
 ]
 # The iOS spike is its own workspace with its own lockfile.
 exclude = ["spikes"]

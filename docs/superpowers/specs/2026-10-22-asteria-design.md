@@ -5,7 +5,7 @@
 
 ## 1. 目的とスコープ
 
-AIエージェントに整理を手伝ってもらえる、セルフホストの**画像管理アプリ（asteria-gallery）**と**音楽再生アプリ（asteria-player）**を作る。
+AIエージェントに整理を手伝ってもらえる、セルフホストの**画像管理アプリ（asteria-photos）**と**音楽再生アプリ（asteria-music）**を作る。
 
 ### 要件
 
@@ -15,20 +15,20 @@ AIエージェントに整理を手伝ってもらえる、セルフホストの
 4. **原本はファイル、DB はキャッシュ**。DB はいつ消しても原本から作り直せること。マイグレーションは書かない。
 5. 特定のアプリにロックインされないよう、メタデータは標準形式（XMP、M3U8、埋め込みタグ）に寄せる。
 6. iPhone の写真を、アプリを開いている間に一括でアップロードできる。バックグラウンドでのアップロードは不要。
-7. iPhone でも player を使う。画面ロック中や他のアプリを使っている間も再生を続ける（バックグラウンド再生）。
+7. iPhone でも music を使う。画面ロック中や他のアプリを使っている間も再生を続ける（バックグラウンド再生）。
 
 ### スコープ外（意図的に入れないもの）
 
-- 汎用のマルチメディアビューアやファイラー（3D、PDF など）にはしない。gallery は写真と動画、player は音楽だけを扱い、それ以外の画像はジャケットとしてのみ表示する。
+- 汎用のマルチメディアビューアやファイラー（3D、PDF など）にはしない。photos は写真と動画、music は音楽だけを扱い、それ以外の画像はジャケットとしてのみ表示する。
 - 近似検索（ベクトル）。キャッシュとして後から追加できる設計にしておき、今回は実装しない。
 - 複数ユーザー向けの認証と権限管理。**保存形式**は最初から複数ユーザーに対応させるが、**実装**は単一ユーザー（トークン1本）で始める。
-- 複数サーバーへの同時接続、Web クライアント、gallery のバックグラウンドアップロード。
-- エージェント用の MCP ゲートウェイ（gallery と player の両方を束ねるもの）。必要になったら追加する。
+- 複数サーバーへの同時接続、Web クライアント、photos のバックグラウンドアップロード。
+- エージェント用の MCP ゲートウェイ（photos と music の両方を束ねるもの）。必要になったら追加する。
 
 ### 想定する運用
 
 - サーバーは自宅で動かし、LAN か VPN（Tailscale など）経由でアクセスする。
-- `~/Vault/Pictures` を asteria-gallery-server が、`~/Vault/Music` を asteria-player-server が公開する。
+- `~/Vault/Pictures` を asteria-photos-server が、`~/Vault/Music` を asteria-music-server が公開する。
 - 改修したらすぐ本番に投入する。問題が起きたらキャッシュを消して作り直す。
 
 ## 2. 全体構成
@@ -37,32 +37,35 @@ AIエージェントに整理を手伝ってもらえる、セルフホストの
 
 ```
 project-asteria/
-├─ asteria-framework-api/     MIT OR Apache-2.0  共通の wire 型
-├─ asteria-gallery-api/       MIT OR Apache-2.0  gallery の wire 型（framework-api を re-export）
-├─ asteria-player-api/        MIT OR Apache-2.0  player の wire 型（framework-api を re-export）
-├─ asteria-framework/         GPL-3.0-or-later   コア（ライブラリ、XMP、ハッシュ、ジャーナル、計画、操作ログのマージ）
-├─ asteria-framework-server/  GPL-3.0-or-later   HTTP（JSON-RPC＋バイナリ）、認証、DB キャッシュ、MCP、メディア処理
-├─ asteria-framework-client/  GPL-3.0-or-later   接続、オフラインキャッシュ、操作キュー、egui の共通部品
-├─ asteria-gallery-server/    GPL-3.0-or-later   bin
-├─ asteria-gallery/           GPL-3.0-or-later   bin（デスクトップと iOS。Xcode ラッパーは ios/ に置く）
-├─ asteria-player-server/     GPL-3.0-or-later   bin
-└─ asteria-player/            GPL-3.0-or-later   bin（デスクトップと iOS。Xcode ラッパーは ios/ に置く）
+├─ crates/                              ライブラリクレート
+│  ├─ asteria-framework-api/     MIT OR Apache-2.0  共通の wire 型
+│  ├─ asteria-photos-api/        MIT OR Apache-2.0  photos の wire 型（framework-api を re-export）
+│  ├─ asteria-music-api/         MIT OR Apache-2.0  music の wire 型（framework-api を re-export）
+│  ├─ asteria-framework/         GPL-3.0-or-later   コア（ライブラリ、XMP、ハッシュ、ジャーナル、計画、操作ログのマージ）
+│  ├─ asteria-framework-server/  GPL-3.0-or-later   HTTP（JSON-RPC＋バイナリ）、認証、DB キャッシュ、MCP、メディア処理
+│  └─ asteria-framework-client/  GPL-3.0-or-later   接続、オフラインキャッシュ、操作キュー、egui の共通部品
+├─ photos-server/   asteria-photos-server  GPL-3.0-or-later  bin
+├─ photos/          asteria-photos         GPL-3.0-or-later  bin（デスクトップと iOS。Xcode ラッパーは ios/ に置く）
+├─ music-server/    asteria-music-server   GPL-3.0-or-later  bin
+└─ music/           asteria-music          GPL-3.0-or-later  bin（デスクトップと iOS。Xcode ラッパーは ios/ に置く）
 ```
+
+ライブラリクレートは `crates/` にクレート名のまま置き、バイナリクレートはリポジトリ直下に `asteria-` を除いた短い名前のディレクトリで置く（パッケージ名は `asteria-` 付き）。
 
 ### 依存の向き
 
 - `asteria-framework-api` は何にも依存しない。依存してよいのは serde と ID 型だけ。
-- `asteria-gallery-api` と `asteria-player-api` は `asteria-framework-api` に依存し、それを re-export する。
+- `asteria-photos-api` と `asteria-music-api` は `asteria-framework-api` に依存し、それを re-export する。
 - `asteria-framework` は `asteria-framework-api` に依存する。`-server` と `-client` は `asteria-framework` に依存する。
-- 各アプリは、framework の該当クレートと自分の `*-api` に依存する。gallery と player は互いに依存しない。
+- 各アプリは、framework の該当クレートと自分の `*-api` に依存する。photos と music は互いに依存しない。
 - サーバーとクライアントを別クレートにするのは、サーバーに egui を、クライアントに ffmpeg や vips を持ち込まないため。
-- 現状、gallery の閲覧用 DTO（`MediaItem`、`LibraryInfo`、`FolderListing` など）は `asteria-framework-api` にある。これらを変えると、gallery-api と player-api の両方のメジャーバージョンが上がる。player 側に関係のない変更が増えるようなら、後で gallery-api に移す。
+- 現状、photos の閲覧用 DTO（`MediaItem`、`LibraryInfo`、`FolderListing` など）は `asteria-framework-api` にある。これらを変えると、photos-api と music-api の両方のメジャーバージョンが上がる。music 側に関係のない変更が増えるようなら、後で photos-api に移す。
 
 ### バージョン管理
 
 - `*-api` の3クレートは、それぞれ単独でバージョンを管理する。**メジャーバージョン＝API バージョン**とする。
-- バージョンを代表するのはアプリ側の API（`asteria-gallery-api` / `asteria-player-api`）。クライアントはハンドシェイクで、このバージョンだけを確認する。
-- `asteria-framework-api` に破壊的変更を入れたら、gallery-api と player-api の両方のメジャーバージョンを上げる。
+- バージョンを代表するのはアプリ側の API（`asteria-photos-api` / `asteria-music-api`）。クライアントはハンドシェイクで、このバージョンだけを確認する。
+- `asteria-framework-api` に破壊的変更を入れたら、photos-api と music-api の両方のメジャーバージョンを上げる。
 - `*-api` 以外のクレートは、ワークスペースで共通のバージョンにする。
 
 ### ライセンス
@@ -99,10 +102,10 @@ project-asteria/
 │  ├─ journal/YYYY-MM.jsonl          実行した操作の記録（追記のみ）
 │  ├─ plans/<plan-id>.toml           整理計画（承認待ち、実行済み、却下）
 │  ├─ trash/<op-id>/…                ゴミ箱（元のパスを保持する）
-│  ├─ searches/<user-id>/*.toml      gallery：保存したタグ検索（仮想アルバム）
-│  └─ playlists/<user-id>/*.m3u8     player：個人のプレイリスト
-│     playlists/shared/*.m3u8        player：共有のプレイリスト
-├─ Inbox/                            gallery：アップロードの受け取り先
+│  ├─ searches/<user-id>/*.toml      photos：保存したタグ検索（仮想アルバム）
+│  └─ playlists/<user-id>/*.m3u8     music：個人のプレイリスト
+│     playlists/shared/*.m3u8        music：共有のプレイリスト
+├─ Inbox/                            photos：アップロードの受け取り先
 └─ 2025/京都旅行/IMG_0001.HEIC
    2025/京都旅行/IMG_0001.HEIC.xmp
 ```
@@ -112,7 +115,7 @@ project-asteria/
 - 認証トークンはライブラリに入れず、サーバーの設定ディレクトリに置く。ライブラリはバックアップや同期の対象になり得るため。
 - DB キャッシュ、サムネイル、変換結果は `~/.cache/<アプリ名>/<ライブラリID>/` に置く。丸ごと削除しても再生成できる。
 
-### 3.2 フォルダとタグ（gallery）
+### 3.2 フォルダとタグ（photos）
 
 - フォルダがアルバムになる。
 - アルバムをまたぐ分類は、XMP の階層タグ（`lr:hierarchicalSubject`）で表す。
@@ -239,7 +242,7 @@ project-asteria/
 
 1. 起動時に全体をスキャンする。（パス・サイズ・更新時刻）をキャッシュと比べ、差分だけ処理する。
 2. 起動後は `notify` でファイルの変更を監視する。取りこぼしの保険として、定期的にも再スキャンする。
-3. ファイルの種類は、拡張子とマジックバイトで判定する。gallery は画像と動画、player は音声を扱い、player では同じフォルダの画像をジャケットとして扱う。
+3. ファイルの種類は、拡張子とマジックバイトで判定する。photos は画像と動画、music は音声を扱い、music では同じフォルダの画像をジャケットとして扱う。
 4. payload ハッシュは、スキャンの中で計算する。速さの調整はしない。一括で取り込んだ直後は、ハッシュが計算されるまでサムネイルが出ない（503 で再試行させる）が、それでよいとする（2026-10-22 決定）。
 5. 持ち主のいないサイドカーは、ハッシュで照合する。一致するファイルが1つだけで、そのファイルにまだサイドカーがなければ、自動で紐付け直してジャーナルに記録する。一致が複数ある場合はクライアントに通知する。
    - 照合は、移動の前に（ハッシュ、スコープ）でまとめて行う。一致するファイルが複数ある、または同じファイルを2つ以上のサイドカーが取り合う場合は「曖昧」とし、どれも動かさない。
@@ -286,7 +289,7 @@ project-asteria/
 ### 4.5 メディア処理
 
 - ffmpeg と vips を子プロセスとして呼ぶ。タイムアウトと同時実行数の上限を設ける。
-- 生成物は（ファイル全体のハッシュ、プリセット名）をキーにキャッシュする。ファイル全体のハッシュは `file/1` スコープの BLAKE3 で、スキャンのときに payload ハッシュと一緒に計算してキャッシュに持つ。EXIF の向きや ICC などメタデータだけを変えた場合も作り直される。gallery の画像はメタデータをほとんど書き換えない（評価などはサイドカーに書く）ので、作り直しが増えることはない（2026-10-22 決定）。
+- 生成物は（ファイル全体のハッシュ、プリセット名）をキーにキャッシュする。ファイル全体のハッシュは `file/1` スコープの BLAKE3 で、スキャンのときに payload ハッシュと一緒に計算してキャッシュに持つ。EXIF の向きや ICC などメタデータだけを変えた場合も作り直される。photos の画像はメタデータをほとんど書き換えない（評価などはサイドカーに書く）ので、作り直しが増えることはない（2026-10-22 決定）。
 - リクエストが来たときに生成するのを基本とする。オフライン用に指定されたものだけ、先に生成しておく。
 - 失敗したファイルは「処理不可」として理由を記録する。ファイルが変わるまで再試行しない。外部ツールがないことは処理不可にしない。
 - 実装の詳細（Plan 2）
@@ -329,7 +332,7 @@ MCP のツールは3種類に分ける。
 - 1つのクライアントは1つのサーバーにつなぐ。設定はサーバーの URL とトークン。
 - オンラインで閲覧するときのサムネイルなどは、一時キャッシュ（古いものから消える）に置く。
 - オフラインキャッシュ
-  - 対象はユーザーが選ぶ。gallery ではフォルダか保存したタグ検索、player ではアルバム、アーティスト、プレイリスト。
+  - 対象はユーザーが選ぶ。photos ではフォルダか保存したタグ検索、music ではアルバム、アーティスト、プレイリスト。
   - 端末ごとに容量の上限と品質を設定する。
   - メディアは（ファイル全体のハッシュ、プリセット名）をキーにしたファイルとして保存する（§4.5 と同じキー）。
   - メタデータの写しはキャッシュ扱いとし、スキーマが変わったら取り直す。
@@ -344,7 +347,7 @@ MCP のツールは3種類に分ける。
   - プレイリスト：追加、削除、移動の操作単位でマージする。エントリの同一性はハッシュで判断する。
 - タグや説明の編集、整理計画の承認は、オンラインのときだけ行える。
 
-### 5.3 アップロード（gallery）
+### 5.3 アップロード（photos）
 
 - デスクトップ：ファイルやフォルダをドラッグ＆ドロップすると、`Inbox/` に送る。
 - iOS
@@ -354,7 +357,7 @@ MCP のツールは3種類に分ける。
   - HEIC は変換せず、原本のまま送る。Live Photos は HEIC と MOV を同じベース名の組として送る。
 - 重複はサーバーが受け取った後にハッシュで判定し、重複分は破棄して報告する。
 
-### 5.4 再生エンジン（player）
+### 5.4 再生エンジン（music）
 
 - UI から独立したスレッドで動かす。デコード（symphonia）、出力（cpal）、キュー管理、次の曲への移行を、すべてこのスレッドで行う。
 - UI は再生エンジンにコマンドを送り、状態を表示するだけにする。
@@ -403,7 +406,7 @@ MCP のツールは3種類に分ける。
 - **キャッシュの作り直し**：キャッシュを削除して作り直したとき、元と同じ状態になることを確認する。
 - **結合テスト**：一時ディレクトリのライブラリでサーバーを起動し、JSON-RPC、バイナリの送受信、MCP を通しで確認する。
 - **CI**：Linux（x86_64 と arm64）、macOS、Windows でビルドとテストを行い、`cargo deny` を実行する。macOS では iOS 向けのビルドが通ることも確認する。vips と ffmpeg を入れるのは Linux のジョブだけで、ほかではこれらを使うテストは理由を出してスキップする。シンボリックリンクやシェルスクリプトに頼るテストは Unix だけで動かす。
-- **結合テスト（gallery-server の e2e）**は Linux だけで動かす（`XDG_CACHE_HOME` でキャッシュを分け、`kill -INT` で止めるため）。
+- **結合テスト（photos-server の e2e）**は Linux だけで動かす（`XDG_CACHE_HOME` でキャッシュを分け、`kill -INT` で止めるため）。
 - **iOS 実機**：検証用の試作とチェックリストで、手動で確認する。
 
 ## 8. リスクと早期検証
@@ -423,9 +426,9 @@ MCP のツールは3種類に分ける。
 2. framework のコア：ライブラリ、XMP、payload ハッシュ（第1段階）、ジャーナル。
 3. framework-server：スキャン、キャッシュ、JSON-RPC、バイナリの配信。
 4. 早期検証の試作（iOS）。
-5. gallery：サーバー、デスクトップクライアント、Inbox、アップロード。
-6. player：サーバー、デスクトップクライアント、再生エンジン。
+5. photos：サーバー、デスクトップクライアント、Inbox、アップロード。
+6. music：サーバー、デスクトップクライアント、再生エンジン。
 7. MCP と整理計画。
 8. オフラインキャッシュと操作キュー。
-9. iOS のクライアント（gallery のアップロード、player のバックグラウンド再生）。
+9. iOS のクライアント（photos のアップロード、music のバックグラウンド再生）。
 10. payload ハッシュの第2段階。

@@ -19,8 +19,8 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-pub struct Gallery;
-impl MediaFilter for Gallery {
+pub struct Photos;
+impl MediaFilter for Photos {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }
@@ -54,7 +54,7 @@ pub fn env_with(make: impl FnOnce(PathBuf) -> Processor) -> Env {
     fs::copy(&red, root.join("a.jpg")).unwrap();
     fs::create_dir(root.join("sub")).unwrap();
     fs::copy(&red, root.join("sub/b.jpg")).unwrap();
-    scan(&lib, &cache, &Gallery).unwrap();
+    scan(&lib, &cache, &Photos).unwrap();
     let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
 
     let owner_token = new_token();
@@ -81,11 +81,11 @@ pub fn env_with(make: impl FnOnce(PathBuf) -> Processor) -> Env {
         cache.clone(),
         writer,
         Arc::new(Tokens::from_config(&cfg)),
-        "asteria-gallery",
+        "asteria-photos",
         1,
         Arc::new(AtomicBool::new(false)),
         rescan,
-        Arc::new(Gallery),
+        Arc::new(Photos),
         processor.clone(),
     );
     Env {

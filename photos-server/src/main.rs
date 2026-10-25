@@ -1,4 +1,4 @@
-//! The Asteria gallery server: `init`, `token add` and `serve`.
+//! The Asteria Photos server: `init`, `token add` and `serve`.
 
 use std::error::Error;
 use std::fs::{File, TryLockError};
@@ -16,7 +16,7 @@ use asteria_framework_server::{
     AppState, Cache, MediaFilter, Processor, ScanLoop, ServerConfig, TokenEntry, Tokens,
     cache_dir_for, new_token, router, spawn_scan_loop, spawn_writer, token_hash,
 };
-use asteria_gallery_api::{APP, APP_API};
+use asteria_photos_api::{APP, APP_API};
 use clap::{Parser, Subcommand};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -31,7 +31,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 const LOCK_FILE: &str = "server.lock";
 
 #[derive(Parser)]
-#[command(version, about = "Asteria gallery server")]
+#[command(version, about = "Asteria Photos server")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -83,10 +83,10 @@ enum TokenCommand {
     },
 }
 
-/// The gallery shows images and videos.
-struct GalleryFilter;
+/// Photos shows images and videos.
+struct PhotosFilter;
 
-impl MediaFilter for GalleryFilter {
+impl MediaFilter for PhotosFilter {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }
@@ -245,7 +245,7 @@ async fn run(
     let closer = writer.clone();
     let scanning = Arc::new(AtomicBool::new(false));
     let (rescan_tx, rescan_rx) = mpsc::channel(1);
-    let filter: Arc<dyn MediaFilter> = Arc::new(GalleryFilter);
+    let filter: Arc<dyn MediaFilter> = Arc::new(PhotosFilter);
     let state = AppState::new(
         library.clone(),
         cache.clone(),

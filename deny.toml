@@ -21,7 +21,7 @@ yanked = "warn"
 # Every ignore needs a `reason`, so the next contributor can tell whether it is
 # still load-bearing. Re-check them when the dependency they name moves.
 ignore = [
-    { id = "RUSTSEC-2024-0436", reason = "proc-macro pulled in by lofty, used only as a test dev-dependency; revisit when asteria-player uses lofty at runtime (Plan 5)" },
+    { id = "RUSTSEC-2024-0436", reason = "proc-macro pulled in by lofty, used only as a test dev-dependency; revisit when asteria-music uses lofty at runtime (Plan 5)" },
 ]
 
 [licenses]
@@ -51,7 +51,7 @@ exceptions = [
     # dependency cannot slip in unnoticed:
     { name = "asteria-framework", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-framework-server", allow = ["GPL-3.0-or-later"] },
-    { name = "asteria-gallery-server", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-photos-server", allow = ["GPL-3.0-or-later"] },
 ]
 
 [bans]

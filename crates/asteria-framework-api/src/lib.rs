@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn handshake_accepts_same_app_and_api() {
         assert_eq!(
-            check_handshake(&client("asteria-gallery", 1), &server("asteria-gallery", 1)),
+            check_handshake(&client("asteria-photos", 1), &server("asteria-photos", 1)),
             Ok(())
         );
     }
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn handshake_rejects_api_mismatch() {
         assert_eq!(
-            check_handshake(&client("asteria-gallery", 2), &server("asteria-gallery", 1)),
+            check_handshake(&client("asteria-photos", 2), &server("asteria-photos", 1)),
             Err(HandshakeError::ApiMismatch {
                 client: 2,
                 server: 1
@@ -126,10 +126,10 @@ mod tests {
     #[test]
     fn handshake_rejects_other_app() {
         assert_eq!(
-            check_handshake(&client("asteria-player", 1), &server("asteria-gallery", 1)),
+            check_handshake(&client("asteria-music", 1), &server("asteria-photos", 1)),
             Err(HandshakeError::AppMismatch {
-                client: "asteria-player".into(),
-                server: "asteria-gallery".into()
+                client: "asteria-music".into(),
+                server: "asteria-photos".into()
             })
         );
     }
@@ -142,15 +142,15 @@ mod tests {
 
     #[test]
     fn server_info_wire_format() {
-        let s = server("asteria-gallery", 2);
-        let json = r#"{"app":"asteria-gallery","app_api":2,"server_version":"0.1.0","epoch":"e1"}"#;
+        let s = server("asteria-photos", 2);
+        let json = r#"{"app":"asteria-photos","app_api":2,"server_version":"0.1.0","epoch":"e1"}"#;
         assert_eq!(serde_json::to_string(&s).unwrap(), json);
         assert_eq!(serde_json::from_str::<ServerInfo>(json).unwrap(), s);
     }
 
     #[test]
     fn server_info_json_roundtrip() {
-        let s = server("asteria-gallery", 1);
+        let s = server("asteria-photos", 1);
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<ServerInfo>(&json).unwrap(), s);
     }

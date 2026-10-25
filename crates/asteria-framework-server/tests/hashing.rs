@@ -8,8 +8,8 @@ use asteria_framework::{Library, MediaKind};
 use asteria_framework_server::{Cache, MediaFilter, hash_pending, relink_orphans, scan};
 use chrono::Utc;
 
-struct Gallery;
-impl MediaFilter for Gallery {
+struct Photos;
+impl MediaFilter for Photos {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }
@@ -54,7 +54,7 @@ fn rate(e: &Env, rel: &str, v: i8) {
 }
 
 fn scan_all(e: &Env) {
-    scan(&e.lib, &e.cache, &Gallery).unwrap();
+    scan(&e.lib, &e.cache, &Photos).unwrap();
 }
 
 fn no_cancel() -> AtomicBool {
