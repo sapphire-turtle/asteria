@@ -11,10 +11,10 @@
 //!
 //! Every method does blocking disk I/O: call them from a worker thread, never the UI thread.
 
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 /// The size the cache is trimmed to unless told otherwise. Fixed for now; a setting comes later.
@@ -39,12 +39,14 @@ pub struct MediaCache {
     /// [`trim`](Self::trim) deletes the least recently used files until the total is at most this.
     pub limit_bytes: u64,
     puts: AtomicUsize,
+    /// Set while a trim runs, so overlapping calls return at once.
+    trimming: AtomicBool,
 }
 
 impl MediaCache {
     /// The cache for `library_id` under `cache_root`, limited to [`DEFAULT_LIMIT_BYTES`]. Does
     /// no I/O; directories are made on the first write. `None` if `library_id` is not a safe
-    /// single path component (empty, starting with `.`, or containing `/`, `\` or NUL).
+    /// single path component on every platform (letters, digits, `.`, `_`, `-`; no leading or trailing dot; no Windows device names).
     pub fn open(cache_root: &Path, library_id: &str) -> Option<MediaCache> {
         if !safe_component(library_id) {
             return None;
@@ -53,19 +55,29 @@ impl MediaCache {
             root: cache_root.join(library_id).join("temp"),
             limit_bytes: DEFAULT_LIMIT_BYTES,
             puts: AtomicUsize::new(0),
+            trimming: AtomicBool::new(false),
         })
     }
 
     /// The cached file for `file_hash` at `preset`, if there is one; a hit counts as a use for
     /// [`trim`](Self::trim). `None` for a missing, unknown (`None`) or malformed hash or preset.
+    /// A later trim may remove the returned file, so a caller that fails to open it treats that
+    /// as a miss.
     pub fn get(&self, file_hash: Option<&str>, preset: &str) -> Option<PathBuf> {
         let path = self.path(file_hash?, preset).ok()?;
-        let file = File::open(&path).ok()?;
-        if !file.metadata().ok()?.is_file() {
-            return None;
+        // Opened for writing: Windows needs that to change the modification time.
+        match fs::OpenOptions::new().write(true).open(&path) {
+            Ok(file) => {
+                if !file.metadata().ok()?.is_file() {
+                    return None;
+                }
+                // Best effort: a failed touch does not turn a hit into a miss.
+                let _ = file.set_modified(SystemTime::now());
+            }
+            // Read-only file or volume: still a hit if it can be read.
+            Err(_) if fs::metadata(&path).is_ok_and(|m| m.is_file()) => {}
+            Err(_) => return None,
         }
-        // Best effort: a cache on a read-only volume still serves hits.
-        let _ = file.set_modified(SystemTime::now());
         Some(path)
     }
 
@@ -93,7 +105,16 @@ impl MediaCache {
     /// Deletes files, least recently used first (by modification time), until the total size is
     /// at most [`limit_bytes`](Self::limit_bytes). Temporary files of writes in progress are not
     /// counted or deleted; stale ones are removed. Failures are skipped.
+    /// If another trim is already running, returns at once.
     pub fn trim(&self) {
+        if self.trimming.swap(true, Ordering::Acquire) {
+            return;
+        }
+        self.trim_files();
+        self.trimming.store(false, Ordering::Release);
+    }
+
+    fn trim_files(&self) {
         let mut files = Vec::new();
         let mut total = 0u64;
         let now = SystemTime::now();
@@ -154,10 +175,23 @@ impl MediaCache {
     }
 }
 
-/// A name that is one ordinary path component: not empty, not hidden (so not `.` or `..`
-/// either, and never mistaken for a temporary file), no separators or NUL.
+/// A name that is one ordinary path component on every platform: only `[A-Za-z0-9._-]`, not
+/// starting or ending with a dot (so no `.`, `..` or hidden names, which are also what
+/// temporary files look like), and not a Windows reserved device name. This also rules out
+/// separators, drive prefixes (`C:`), NUL, and trailing spaces.
 fn safe_component(name: &str) -> bool {
-    !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\', '\0'])
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = name.split('.').next().unwrap_or_default();
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name.ends_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && !RESERVED.iter().any(|r| stem.eq_ignore_ascii_case(r))
 }
 
 fn subdirs(dir: &Path) -> Vec<PathBuf> {

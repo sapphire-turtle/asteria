@@ -110,11 +110,14 @@ fn partial_write_is_not_visible() {
 #[test]
 fn unsafe_names_are_rejected() {
     let root = tempfile::tempdir().unwrap();
-    for lib in ["", ".", "..", "../x", "a/b", "a\\b", ".hidden", "a\0b"] {
+    for lib in [
+        "", ".", "..", "../x", "a/b", "a\\b", ".hidden", "a\0b", "C:", "C:x", "CON", "nul", "a.",
+        "Com1.txt", "a b", "a ",
+    ] {
         assert!(MediaCache::open(root.path(), lib).is_none(), "{lib:?}");
     }
     let c = open(root.path(), "lib-1");
-    for preset in ["", "..", "a/b", ".x", "a\\b"] {
+    for preset in ["", "..", "a/b", ".x", "a\\b", "C:", "aux"] {
         assert!(c.put(Some(&hash('d')), preset, b"x").is_err(), "{preset:?}");
         assert!(c.get(Some(&hash('d')), preset).is_none());
     }
@@ -146,4 +149,45 @@ fn put_trims_every_hundred_writes() {
         c.get(Some(&first), "thumb").is_none(),
         "the 100th put trimmed"
     );
+}
+
+#[test]
+fn real_names_are_accepted() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "0197a3c2-5b1e-7c3a-9d2f-3a4b5c6d7e8f";
+    assert!(MediaCache::open(root.path(), id).is_some());
+    let c = open(root.path(), "lib-1");
+    for preset in ["thumb", "preview"] {
+        assert!(c.put(Some(&hash('e')), preset, b"x").is_ok());
+    }
+}
+
+#[test]
+fn concurrent_puts_stay_intact() {
+    let root = tempfile::tempdir().unwrap();
+    let c = std::sync::Arc::new(open(root.path(), "lib-1"));
+    let handles: Vec<_> = (0..8u8)
+        .map(|t| {
+            let c = c.clone();
+            std::thread::spawn(move || {
+                for i in 0..20u8 {
+                    // Half the keys are shared by all threads, half are per thread.
+                    let key = if i % 2 == 0 { i } else { i + 100 + t };
+                    let h = format!("blake3:{:064x}", key);
+                    c.put(Some(&h), "thumb", &[key; 4096]).unwrap();
+                    if let Some(p) = c.get(Some(&h), "thumb") {
+                        assert_eq!(fs::read(p).unwrap(), vec![key; 4096]);
+                    }
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    for key in (0..20u8).step_by(2) {
+        let h = format!("blake3:{:064x}", key);
+        let p = c.get(Some(&h), "thumb").unwrap();
+        assert_eq!(fs::read(p).unwrap(), vec![key; 4096]);
+    }
 }

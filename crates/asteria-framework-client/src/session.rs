@@ -152,7 +152,7 @@ impl Session {
 
     /// Like [`open`](Self::open), and with `cache_root` given, opens the library's
     /// [`MediaCache`] under it as soon as the handshake learns the library id, trimming it on
-    /// the worker thread first. The cache is available from [`media_cache`](Self::media_cache)
+    /// the worker thread right after the handshake. The cache is available from [`media_cache`](Self::media_cache)
     /// by the time the state is [`SessionState::Ready`].
     pub fn open_with_cache(
         profile: &ServerProfile,
@@ -189,7 +189,6 @@ impl Session {
                     if let (Ok(library), Some(root)) = (&result, &cache_root) {
                         match MediaCache::open(root, &library.library_id) {
                             Some(opened) => {
-                                opened.trim();
                                 let _ = cache.set(Arc::new(opened));
                             }
                             None => tracing::warn!("library id is not a safe cache directory name"),
@@ -203,6 +202,16 @@ impl Session {
                     };
                     Event::Connected(result)
                 });
+                // A separate job, queued after the handshake's: a big cache must not delay Ready.
+                // It runs on the worker and is skipped if the session is dropped first.
+                let cache = session.cache.clone();
+                if let Some(worker) = &session.worker {
+                    worker.submit(Box::new(move |_| {
+                        if let Some(cache) = cache.get() {
+                            cache.trim();
+                        }
+                    }));
+                }
             }
             Err(e) => session.state = SessionState::Failed(ClientError::Io(e.to_string())),
         }
