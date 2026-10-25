@@ -1,4 +1,2 @@
 # Test fixtures are compared byte-for-byte (golden files, hash pins); never convert line endings.
 crates/asteria-framework/tests/fixtures/** -text
-# The spike fixture is a binary Ogg Opus file; never convert line endings.
-spikes/ios/opus-probe/fixtures/** -text
