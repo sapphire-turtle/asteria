@@ -167,6 +167,31 @@ fn handshake_ok_reports_library_id() {
 }
 
 #[test]
+fn handshake_opens_the_library_cache() {
+    let server = TestServer::start();
+    let root = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let profile = server.profile(&server.token);
+    let mut session = Session::open_with_cache(
+        &profile,
+        photos_client(),
+        ctx.clone(),
+        Some(root.path().to_path_buf()),
+    );
+    wait_settled(&mut session);
+    let cache = session
+        .media_cache()
+        .expect("cache opened by the handshake");
+    let hash = format!("blake3:{}", "a".repeat(64));
+    let stored = cache.put(Some(&hash), "thumb", b"x").unwrap().unwrap();
+    assert!(stored.starts_with(root.path().join(&server.library_id)));
+    // Without a cache root there is no cache.
+    let mut plain = Session::open(&profile, photos_client(), ctx);
+    wait_settled(&mut plain);
+    assert!(plain.media_cache().is_none());
+}
+
+#[test]
 fn wrong_token_is_unauthorized() {
     let server = TestServer::start();
     let mut session = Session::open(

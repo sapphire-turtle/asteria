@@ -2,8 +2,9 @@
 //! results) lives in a [`Session`]; switching servers means dropping it and opening another.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
 use asteria_framework_api::{
     ClientInfo, FOLDER_LIST, FolderListParams, FolderListing, LIBRARY_INFO, LIBRARY_RESCAN,
@@ -14,6 +15,7 @@ use corundum_framework::egui;
 use serde::Serialize;
 use serde::de::IgnoredAny;
 
+use crate::media_cache::MediaCache;
 use crate::profiles::{ProfileId, ServerProfile};
 use crate::rpc::{ClientError, RpcClient};
 use crate::worker::{Job, Worker};
@@ -124,6 +126,9 @@ pub struct Session {
     /// `None` if the worker could not be started; the session is then `Failed`.
     worker: Option<Worker>,
     gate: Arc<Mutex<Gate>>,
+    /// Filled by the handshake job once the library id is known (and only if a cache root was
+    /// given and the id is a safe directory name).
+    cache: Arc<OnceLock<Arc<MediaCache>>>,
 }
 
 impl fmt::Debug for Session {
@@ -142,6 +147,19 @@ impl Session {
     /// [`SessionState::Connecting`]; watch [`state`](Self::state) after each
     /// [`poll`](Self::poll).
     pub fn open(profile: &ServerProfile, client: ClientInfo, ctx: egui::Context) -> Session {
+        Self::open_with_cache(profile, client, ctx, None)
+    }
+
+    /// Like [`open`](Self::open), and with `cache_root` given, opens the library's
+    /// [`MediaCache`] under it as soon as the handshake learns the library id, trimming it on
+    /// the worker thread first. The cache is available from [`media_cache`](Self::media_cache)
+    /// by the time the state is [`SessionState::Ready`].
+    pub fn open_with_cache(
+        profile: &ServerProfile,
+        client: ClientInfo,
+        ctx: egui::Context,
+        cache_root: Option<PathBuf>,
+    ) -> Session {
         let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         let (events_tx, events) = mpsc::channel();
         let mut session = Session {
@@ -155,6 +173,7 @@ impl Session {
             events,
             worker: None,
             gate: Arc::new(Mutex::new(Gate::Pending)),
+            cache: Arc::new(OnceLock::new()),
         };
         let (url, token) = (profile.url.clone(), profile.token.clone());
         // The client itself is built on the worker thread.
@@ -164,8 +183,18 @@ impl Session {
             Ok(worker) => {
                 session.worker = Some(worker);
                 let gate = session.gate.clone();
+                let cache = session.cache.clone();
                 session.submit(move |rpc| {
                     let result = rpc.and_then(|rpc| handshake(rpc, &client));
+                    if let (Ok(library), Some(root)) = (&result, &cache_root) {
+                        match MediaCache::open(root, &library.library_id) {
+                            Some(opened) => {
+                                opened.trim();
+                                let _ = cache.set(Arc::new(opened));
+                            }
+                            None => tracing::warn!("library id is not a safe cache directory name"),
+                        }
+                    }
                     *lock(&gate) = match &result {
                         Ok(library) => Gate::Open {
                             library_id: library.library_id.clone(),
@@ -188,6 +217,13 @@ impl Session {
     /// The profile this session connects to.
     pub fn profile(&self) -> ProfileId {
         self.profile
+    }
+
+    /// This library's thumbnail cache, once the handshake has succeeded and a cache root was
+    /// given to [`open_with_cache`](Self::open_with_cache). Hand the `Arc` to jobs that run on
+    /// worker threads: its methods do disk I/O, so not the UI thread.
+    pub fn media_cache(&self) -> Option<Arc<MediaCache>> {
+        self.cache.get().cloned()
     }
 
     pub fn state(&self) -> &SessionState {
