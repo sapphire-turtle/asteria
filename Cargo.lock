@@ -333,13 +333,22 @@ dependencies = [
 name = "asteria-framework-client"
 version = "0.1.0"
 dependencies = [
+ "asteria-framework",
+ "asteria-framework-api",
+ "asteria-framework-server",
+ "asteria-music-api",
+ "asteria-photos-api",
+ "axum",
+ "bytes",
  "corundum-framework",
  "grain-id",
  "image",
  "reqwest",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "toml",
  "tracing",
  "url",

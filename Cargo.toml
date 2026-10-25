@@ -48,4 +48,5 @@ tower-http = { version = "0.7", default-features = false, features = ["fs"] }
 clap = { version = "4", features = ["derive"] }
 url = { version = "2", features = ["serde"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+bytes = "1"
 image = { version = "0.25", default-features = false, features = ["webp"] }
