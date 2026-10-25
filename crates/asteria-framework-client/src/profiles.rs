@@ -90,7 +90,9 @@ struct File {
     servers: Vec<ServerProfile>,
 }
 
-fn parse_url(s: &str) -> Result<Url> {
+/// The rule every profile's URL must meet: http or https, with a host. Surrounding spaces are
+/// ignored.
+pub fn parse_url(s: &str) -> Result<Url> {
     match Url::parse(s.trim()) {
         Ok(u) if matches!(u.scheme(), "http" | "https") && u.has_host() => Ok(u),
         _ => Err(Error::InvalidUrl(s.to_string())),
