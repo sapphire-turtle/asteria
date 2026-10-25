@@ -334,10 +334,15 @@ name = "asteria-framework-client"
 version = "0.1.0"
 dependencies = [
  "corundum-framework",
+ "grain-id",
  "image",
  "reqwest",
  "serde",
+ "tempfile",
+ "thiserror 2.0.21",
  "toml",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -5157,6 +5162,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]

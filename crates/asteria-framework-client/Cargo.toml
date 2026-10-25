@@ -13,3 +13,10 @@ reqwest.workspace = true
 image.workspace = true
 serde.workspace = true
 toml.workspace = true
+grain-id.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
