@@ -19,9 +19,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # rustup installs the rust-toolchain.toml toolchain on first use.
+      # With no argument, `rustup toolchain install` installs the toolchain that
+      # rust-toolchain.toml names (and does nothing if it is already there).
       - name: Install the pinned toolchain
-        run: rustup show active-toolchain || rustup toolchain install
+        run: rustup toolchain install
 
       - name: Add the iOS target
         run: rustup target add aarch64-apple-ios
