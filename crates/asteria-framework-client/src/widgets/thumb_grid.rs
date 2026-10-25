@@ -55,6 +55,9 @@ pub struct ThumbGridResponse {
     pub selected: Option<ItemId>,
     /// How many cells fit in a row at this width.
     pub columns: usize,
+    /// The index of the last item in the rows drawn this frame; `None` if none were. When it
+    /// nears the end of the items, it is time to fetch the next page.
+    pub last_visible: Option<usize>,
 }
 
 pub struct ThumbGrid<'a> {
@@ -189,7 +192,9 @@ impl<'a> ThumbGrid<'a> {
             for row in range {
                 ui.horizontal(|ui| {
                     let start = row * columns;
-                    for item in &self.items[start..(start + columns).min(self.items.len())] {
+                    let end = (start + columns).min(self.items.len());
+                    resp.last_visible = resp.last_visible.max(Some(end - 1));
+                    for item in &self.items[start..end] {
                         let is_selected = selected.as_ref() == Some(&item.id);
                         let r = draw_cell(ui, item, cell, is_selected, source);
                         if r.clicked() {

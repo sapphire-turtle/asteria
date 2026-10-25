@@ -263,3 +263,31 @@ fn keys_are_ignored_while_a_text_field_has_focus() {
     );
     assert_eq!(r.selected, Some(ItemId("item-1".into())));
 }
+
+#[test]
+fn last_visible_tells_how_far_the_drawn_rows_reach() {
+    let ctx = egui::Context::default();
+    let mut source = Counting::default();
+    // Many items: the last drawn one is the end of the last drawn row, far from the end.
+    let items: Vec<MediaItem> = (0..10_000).map(item).collect();
+    let r = frame(&ctx, vec![], 800.0, 600.0, |ui| {
+        ThumbGrid::new(&items)
+            .cell_size(100.0)
+            .show(ui, &mut source)
+    });
+    let last = r.last_visible.expect("rows were drawn");
+    assert_eq!(source.requested.last(), Some(&format!("item-{last}")));
+    assert!(last > r.columns && last < 100, "{last}");
+    // A few items: all of them are drawn.
+    let ctx = egui::Context::default();
+    let items: Vec<MediaItem> = (0..5).map(item).collect();
+    let r = frame(&ctx, vec![], 800.0, 600.0, |ui| {
+        ThumbGrid::new(&items).show(ui, &mut source)
+    });
+    assert_eq!(r.last_visible, Some(4));
+    // None: nothing drawn.
+    let r = frame(&ctx, vec![], 800.0, 600.0, |ui| {
+        ThumbGrid::new(&[]).show(ui, &mut source)
+    });
+    assert_eq!(r.last_visible, None);
+}
