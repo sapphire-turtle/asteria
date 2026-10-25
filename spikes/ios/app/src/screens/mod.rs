@@ -6,9 +6,25 @@ pub mod opus;
 pub mod photos;
 pub mod report;
 
-use corundum_gui::{Destination, egui, icons};
+use corundum_framework::egui;
+use corundum_framework::gui::i18n::Resources;
+use corundum_framework::gui::{Destination, icons};
 
 use crate::report::Report;
+
+/// The rail's labels. English only: the spike is not translated, and the shell looks every
+/// label up by id.
+pub const MESSAGES: Resources = Resources {
+    name: "asteria-ios-spike",
+    files: &[(
+        "en",
+        "spike-screen-display = Display\n\
+         spike-screen-audio = Audio\n\
+         spike-screen-photos = Photos\n\
+         spike-screen-opus = Opus\n\
+         spike-screen-report = Report\n",
+    )],
+};
 
 /// One screen of the spike, a destination on the shell's rail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,15 +42,18 @@ pub enum Screen {
 }
 
 impl Screen {
-    /// The rail entries, in order. corundum-gui has no display, speaker, image, audio
-    /// or clipboard icon, so these borrow the closest Lucide icons it does have.
+    /// The rail entries, in order. Their labels are message ids in [`MESSAGES`].
     pub fn destinations() -> Vec<Destination<Screen>> {
         vec![
-            Destination::new(Screen::Display, icons::info(), "Display"),
-            Destination::new(Screen::Audio, icons::chevron_right(), "Audio"),
-            Destination::new(Screen::Photos, icons::folder(), "Photos"),
-            Destination::new(Screen::Opus, icons::refresh_cw(), "Opus"),
-            Destination::new(Screen::Report, icons::file_text(), "Report"),
+            Destination::new(Screen::Display, icons::smartphone(), "spike-screen-display"),
+            Destination::new(Screen::Audio, icons::volume_2(), "spike-screen-audio"),
+            Destination::new(Screen::Photos, icons::images(), "spike-screen-photos"),
+            Destination::new(Screen::Opus, icons::music(), "spike-screen-opus"),
+            Destination::new(
+                Screen::Report,
+                icons::clipboard_copy(),
+                "spike-screen-report",
+            ),
         ]
     }
 }

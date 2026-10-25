@@ -4,7 +4,7 @@
 //! streamed reads of their originals, one by one or all 30 in a row. PhotoKit exists only
 //! on iOS; elsewhere the screen says so.
 
-use corundum_gui::egui;
+use corundum_framework::egui;
 
 use super::{Answer, checklist, reset_checklist};
 use crate::report::Report;

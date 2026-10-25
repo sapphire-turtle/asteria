@@ -4,7 +4,7 @@
 
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
-use corundum_gui::egui;
+use corundum_framework::egui;
 use opus_probe::{Candidate, Measurement, SAMPLE, measure, read_ogg_opus};
 
 use crate::report::Report;

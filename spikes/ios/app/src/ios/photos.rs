@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
-use corundum_gui::egui;
+use corundum_framework::egui;
 use objc2::rc::Retained;
 use objc2_foundation::{NSArray, NSData, NSError, NSPredicate, NSSortDescriptor, NSString};
 use objc2_photos::{

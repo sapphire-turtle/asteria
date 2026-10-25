@@ -67,7 +67,7 @@ fn restrict_permissions(path: &Path) -> Result<()> {
 
 /// `<cache_dir>/<app>/<library id>/`; falls back to `$HOME/.cache` when the platform has no cache dir.
 pub fn cache_dir_for(app: &str, library: &LibraryId) -> Result<PathBuf> {
-    let base = dirs::cache_dir()
+    let base = corundum_framework::platform::dirs::cache_dir()
         .or_else(|| {
             std::env::var_os("HOME")
                 .filter(|h| !h.is_empty())

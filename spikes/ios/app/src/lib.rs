@@ -1,4 +1,4 @@
-//! A spike app for iOS: what egui/eframe, corundum-gui and the platform do on a real
+//! A spike app for iOS: what egui/eframe, corundum-framework and the platform do on a real
 //! device (display, touch, audio, photos). The screens live in [`screens`]; what the run
 //! learns goes into the [`Report`].
 
@@ -9,9 +9,10 @@ pub mod photos;
 mod report;
 pub mod screens;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use corundum_gui::{Shell, egui};
+use corundum_framework::gui::{Shell, i18n, window};
+use corundum_framework::{eframe, egui};
 
 pub use report::{Report, SharedReport};
 pub use screens::Screen;
@@ -23,6 +24,10 @@ use screens::audio::AudioScreen;
 use screens::display::DisplayScreen;
 use screens::opus::OpusScreen;
 use screens::photos::PhotosScreen;
+
+/// The CJK font the window installed at start, for the report: `Some(None)` when the system
+/// has none.
+static CJK_FAMILY: OnceLock<Option<String>> = OnceLock::new();
 
 /// The app: the shell, its screens' state and the shared report.
 struct SpikeApp {
@@ -50,9 +55,10 @@ impl SpikeApp {
             format!("{} ({:?})", info.name, info.backend)
         });
         report.set("gpu.adapter", gpu.as_deref().unwrap_or("none"));
-        // Replaces egui's font set, so it comes before anything draws.
-        let cjk = corundum_gui::fonts::install_system_cjk_fallback(ctx);
-        report.set("fonts.cjk", cjk.as_deref().unwrap_or("none"));
+        let cjk = CJK_FAMILY.get().and_then(Option::as_deref);
+        report.set("fonts.cjk", cjk.unwrap_or("none"));
+        i18n::register(ctx, screens::MESSAGES);
+        i18n::install(ctx, &i18n::LanguageSettings::default());
         let display = DisplayScreen::new(&mut report);
         let audio = AudioScreen::new(&mut report);
         let photos = PhotosScreen::new(ctx, &mut report);
@@ -98,22 +104,16 @@ impl eframe::App for SpikeApp {
             &mut self.opus,
             &self.engine,
         );
-        // Works around a corundum-gui gap (to be filed upstream): its Shell draws under
-        // the status bar and over the home indicator, so hand it the safe area only.
-        let insets = ui.ctx().input(|i| i.safe_area_insets());
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.inner_margin(egui::Margin::from(insets.0)))
-            .show(ui, |ui| {
-                self.shell.ui(ui, |ui, screen| {
-                    egui::CentralPanel::default().show(ui, |ui| match screen {
-                        Screen::Display => display.ui(ui, &mut report),
-                        Screen::Audio => audio.ui(ui, engine, &mut report),
-                        Screen::Photos => photos.ui(ui, &mut report),
-                        Screen::Opus => opus.ui(ui, &mut report),
-                        Screen::Report => screens::report::ui(ui, &report),
-                    });
-                });
+        // The shell keeps the screens inside the safe area itself.
+        self.shell.ui(ui, |ui, screen| {
+            egui::CentralPanel::default().show(ui, |ui| match screen {
+                Screen::Display => display.ui(ui, &mut report),
+                Screen::Audio => audio.ui(ui, engine, &mut report),
+                Screen::Photos => photos.ui(ui, &mut report),
+                Screen::Opus => opus.ui(ui, &mut report),
+                Screen::Report => screens::report::ui(ui, &report),
             });
+        });
     }
 }
 
@@ -134,39 +134,14 @@ fn on_playback_change(ctx: egui::Context) -> impl FnMut(PlayState, f64) + Send +
 }
 
 /// Open the spike's window and run until it closes. On iOS this is called on the main
-/// thread and does not return until the app exits.
+/// thread and does not return until the app exits. corundum-framework sets up wgpu (the
+/// device limits clamped to the adapter's) and, on iOS, draws over the whole screen.
 pub fn run() -> eframe::Result {
-    let options = eframe::NativeOptions {
-        wgpu_options: wgpu_options(),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "Asteria Spike",
-        options,
-        Box::new(|cc| Ok(Box::new(SpikeApp::new(cc)))),
-    )
-}
-
-/// egui's wgpu setup, with the requested device limits clamped to what the adapter
-/// reports. wgpu's defaults exceed some adapters (the iOS simulator's Metal one), and
-/// requesting more than the adapter has makes device creation fail.
-fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
-    use eframe::egui_wgpu::WgpuSetup;
-
-    let mut options = eframe::egui_wgpu::WgpuConfiguration::default();
-    if let WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
-        let egui_default = Arc::clone(&setup.device_descriptor);
-        setup.device_descriptor = Arc::new(move |adapter| {
-            let mut descriptor = egui_default(adapter);
-            let supported = adapter.limits();
-            descriptor.required_limits =
-                descriptor.required_limits.or_worse_values_from(&supported);
-            log::info!("wgpu adapter: {:?}", adapter.get_info());
-            log::info!("wgpu requested limits: {:?}", descriptor.required_limits);
-            descriptor
-        });
-    }
-    options
+    let options = window::WindowOptions::new("Asteria Spike").fonts(|ctx| {
+        let family = corundum_framework::gui::fonts::install_system_cjk_fallback(ctx);
+        let _ = CJK_FAMILY.set(family);
+    });
+    window::run(options, |cc| Box::new(SpikeApp::new(cc)))
 }
 
 /// Put `text` on the system clipboard.

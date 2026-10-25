@@ -11,14 +11,12 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 blake3 = { version = "1", features = ["pure"] }
-corundum-gui = { git = "https://github.com/sapphire-turtle/sapphire-framework", rev = "bb7c34fbdf35ea7a46121aa70d53f3107d033619" }
-eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts"] }
+# The window, the shell, the fonts and the icons, with the eframe and egui they are built on.
+# A git dependency until corundum-framework's first release on crates.io; then drop `git`.
+corundum-framework = { version = "0.1.0", git = "https://github.com/sapphire-turtle/corundum-framework", features = ["eframe"] }
 cpal = "0.18"
 log = "0.4"
 opus-probe = { path = "../opus-probe" }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"
