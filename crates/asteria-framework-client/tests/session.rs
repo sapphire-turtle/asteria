@@ -3,7 +3,7 @@
 
 mod common;
 
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -211,11 +211,9 @@ fn app_mismatch_is_handshake_error() {
 
 #[test]
 fn unreachable_server_fails_without_hanging() {
-    // A port that was free a moment ago and has nothing listening now.
-    let addr = {
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap()
-    };
+    // Port 0 never accepts a connection: refused at once on Linux and macOS, an address error
+    // on Windows. (A port freed by the test could be taken by another test's stub meanwhile.)
+    let addr = SocketAddr::from(([127, 0, 0, 1], 0));
     let start = Instant::now();
     let mut session = Session::open(
         &profile(addr, "whatever"),
