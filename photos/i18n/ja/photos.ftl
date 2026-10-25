@@ -22,6 +22,7 @@ asteria-photos-status-none = サーバーなし
 asteria-photos-status-connected = 接続済み
 asteria-photos-status-connecting = 接続中
 asteria-photos-status-failed = 接続できません：{ $reason }
+asteria-photos-status-degraded = 応答がありません：{ $reason }
 asteria-photos-status-manage = サーバーを管理…
 asteria-photos-status-hover = { $name }：{ $status }
 

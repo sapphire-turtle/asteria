@@ -45,7 +45,8 @@ pub struct RequestId(pub u64);
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
     /// `library.info`. On success the session's [`SessionState::Ready`] library is updated,
-    /// and a changed `epoch` raises [`Session::take_refetch_listing`]. A different
+    /// and [`Session::take_refetch_listing`] is raised when the listing may have changed: a
+    /// new `epoch`, a scan that ended, or (between scans) a new `item_count`. A different
     /// `library_id` fails the request and the session with [`ClientError::LibraryChanged`].
     LibraryInfo,
     /// `library.rescan`.
@@ -100,6 +101,25 @@ pub(crate) enum Gate {
     Closed(ClientError),
 }
 
+/// Whether the server still answers, as the latest request to it (an RPC on the worker or an
+/// image fetch on the pool) found: set by a request that could not reach the server or was
+/// refused its token ([`ClientError::Unreachable`], [`ClientError::Unauthorized`]), cleared
+/// by one that succeeded. Shared by the worker and the image pool of one session.
+pub(crate) type Health = Arc<Mutex<Option<ClientError>>>;
+
+/// Records in `health` what a request to the server found (see [`Health`]); other failures
+/// (the server answered, but not with a result) change nothing.
+pub(crate) fn note_health<T>(health: &Mutex<Option<ClientError>>, result: &Result<T, ClientError>) {
+    let mut slot = health.lock().unwrap_or_else(|e| e.into_inner());
+    match result {
+        Ok(_) => *slot = None,
+        Err(e @ (ClientError::Unreachable(_) | ClientError::Unauthorized)) => {
+            *slot = Some(e.clone());
+        }
+        Err(_) => {}
+    }
+}
+
 /// The `{}` sent as the params of methods that take none.
 #[derive(Serialize)]
 struct NoParams {}
@@ -127,6 +147,10 @@ pub struct Session {
     /// `None` if the worker could not be started; the session is then `Failed`.
     worker: Option<Worker>,
     gate: Arc<Mutex<Gate>>,
+    /// Written by the worker and the image pool; read into `degraded` by `poll`.
+    health: Health,
+    /// What `health` said at the last `poll`.
+    degraded: Option<ClientError>,
     /// Filled by the handshake job once the library id is known (and only if a cache root was
     /// given and the id is a safe directory name).
     cache: Arc<OnceLock<Arc<MediaCache>>>,
@@ -153,9 +177,10 @@ impl Session {
     }
 
     /// Like [`open`](Self::open), and with `cache_root` given, opens the library's
-    /// [`MediaCache`] under it as soon as the handshake learns the library id, trimming it on
-    /// the worker thread right after the handshake. The cache is available from [`media_cache`](Self::media_cache)
-    /// by the time the state is [`SessionState::Ready`].
+    /// [`MediaCache`] under it as soon as the handshake learns the library id, and trims it on
+    /// a short-lived thread of its own (not the request worker, not the UI thread). The cache
+    /// is available from [`media_cache`](Self::media_cache) by the time the state is
+    /// [`SessionState::Ready`].
     pub fn open_with_cache(
         profile: &ServerProfile,
         client: ClientInfo,
@@ -166,12 +191,14 @@ impl Session {
         let (events_tx, events) = mpsc::channel();
         let gate = Arc::new(Mutex::new(Gate::Pending));
         let cache = Arc::new(OnceLock::new());
+        let health: Health = Arc::new(Mutex::new(None));
         let images = ImageLoader::new(
             ctx.clone(),
             profile.url.clone(),
             profile.token.clone(),
             gate.clone(),
             cache.clone(),
+            health.clone(),
         );
         let mut session = Session {
             generation,
@@ -184,6 +211,8 @@ impl Session {
             events,
             worker: None,
             gate,
+            health,
+            degraded: None,
             cache,
             images,
         };
@@ -193,6 +222,7 @@ impl Session {
             RpcClient::new(&url, token.clone())
         }) {
             Ok(worker) => {
+                let cancelled = worker.cancelled();
                 session.worker = Some(worker);
                 let gate = session.gate.clone();
                 let cache = session.cache.clone();
@@ -201,7 +231,9 @@ impl Session {
                     if let (Ok(library), Some(root)) = (&result, &cache_root) {
                         match MediaCache::open(root, &library.library_id) {
                             Some(opened) => {
-                                let _ = cache.set(Arc::new(opened));
+                                let opened = Arc::new(opened);
+                                let _ = cache.set(opened.clone());
+                                trim_in_background(opened, cancelled);
                             }
                             None => tracing::warn!("library id is not a safe cache directory name"),
                         }
@@ -214,16 +246,6 @@ impl Session {
                     };
                     Event::Connected(result)
                 });
-                // A separate job, queued after the handshake's: a big cache must not delay Ready.
-                // It runs on the worker and is skipped if the session is dropped first.
-                let cache = session.cache.clone();
-                if let Some(worker) = &session.worker {
-                    worker.submit(Box::new(move |_| {
-                        if let Some(cache) = cache.get() {
-                            cache.trim();
-                        }
-                    }));
-                }
             }
             Err(e) => {
                 let e = ClientError::Io(e.to_string());
@@ -260,6 +282,17 @@ impl Session {
         &self.state
     }
 
+    /// Why the server, connected so far, stopped answering: the latest request to it (a
+    /// request or an image fetch) could not reach it ([`ClientError::Unreachable`]) or had its
+    /// token refused ([`ClientError::Unauthorized`]). Cleared as soon as a request succeeds
+    /// again. Only while [`SessionState::Ready`]; updated by [`poll`](Self::poll).
+    pub fn degraded(&self) -> Option<&ClientError> {
+        match self.state {
+            SessionState::Ready { .. } => self.degraded.as_ref(),
+            _ => None,
+        }
+    }
+
     /// Queues `request`; its [`Reply`] comes out of [`poll`](Self::poll) with the returned
     /// id. Requests run one at a time in the order made, after the handshake. If the
     /// handshake failed (even if [`poll`](Self::poll) has not reported it yet), or the session
@@ -276,10 +309,11 @@ impl Session {
             return id;
         }
         let gate = self.gate.clone();
+        let health = self.health.clone();
         self.submit(move |rpc| {
             Event::Reply(Reply {
                 id,
-                result: gated(&gate, rpc, request),
+                result: gated(&gate, &health, rpc, request),
             })
         });
         id
@@ -317,18 +351,29 @@ impl Session {
         }
         // Lets image requests through (or fails them) once the handshake has settled.
         self.images.poll();
+        // Read after the replies: the worker records a request's outcome before sending it.
+        self.degraded = self
+            .health
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         replies
     }
 
-    /// Whether the library's contents changed (its epoch moved) since the last call, so the
-    /// listing on screen should be fetched again. Clears the mark.
+    /// Whether the library's contents may have changed since the last call, so the listing on
+    /// screen should be fetched again. Clears the mark. A `library.info` answer raises it when
+    /// its epoch moved (the server rebuilt its cache), when a scan ended, or when, with no scan
+    /// before or now, the item count changed (the server's watcher found changes).
     pub fn take_refetch_listing(&mut self) -> bool {
         std::mem::take(&mut self.refetch_listing)
     }
 
     fn library_info_arrived(&mut self, info: &LibraryInfo) {
         if let SessionState::Ready { library } = &mut self.state {
-            if library.epoch != info.epoch {
+            let scan_ended = library.scanning && !info.scanning;
+            let idle_change =
+                !library.scanning && !info.scanning && library.item_count != info.item_count;
+            if library.epoch != info.epoch || scan_ended || idle_change {
                 self.refetch_listing = true;
             }
             *library = info.clone();
@@ -374,6 +419,7 @@ pub(crate) fn lock_gate(gate: &Mutex<Gate>) -> std::sync::MutexGuard<'_, Gate> {
 /// [`ClientError::LibraryChanged`], and `poll` moves the session to `Failed`.
 fn gated(
     gate: &Mutex<Gate>,
+    health: &Mutex<Option<ClientError>>,
     rpc: Result<&RpcClient, ClientError>,
     request: Request,
 ) -> Result<Response, ClientError> {
@@ -387,7 +433,9 @@ fn gated(
             ));
         }
     };
-    let response = run(rpc?, request)?;
+    let response = run(rpc?, request);
+    note_health(health, &response);
+    let response = response?;
     if let Response::LibraryInfo(info) = &response
         && info.library_id != library_id
     {
@@ -395,6 +443,21 @@ fn gated(
         return Err(ClientError::LibraryChanged);
     }
     Ok(response)
+}
+
+/// Trims `cache` on a short-lived thread of its own: a big cache must not delay the session's
+/// requests (or the UI). Skipped if the session is dropped before the thread starts.
+fn trim_in_background(cache: Arc<MediaCache>, cancelled: Arc<AtomicBool>) {
+    let spawned = std::thread::Builder::new()
+        .name("asteria-cache-trim".into())
+        .spawn(move || {
+            if !cancelled.load(Ordering::Acquire) {
+                cache.trim();
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("cannot start trimming the cache: {e}");
+    }
 }
 
 fn handshake(rpc: &RpcClient, client: &ClientInfo) -> Result<LibraryInfo, ClientError> {

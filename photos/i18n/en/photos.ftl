@@ -22,6 +22,7 @@ asteria-photos-status-none = No server
 asteria-photos-status-connected = Connected
 asteria-photos-status-connecting = Connecting
 asteria-photos-status-failed = Not connected: { $reason }
+asteria-photos-status-degraded = Not responding: { $reason }
 asteria-photos-status-manage = Manage servers...
 asteria-photos-status-hover = { $name }: { $status }
 

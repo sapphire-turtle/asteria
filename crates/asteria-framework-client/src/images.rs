@@ -18,7 +18,7 @@ use url::Url;
 use crate::media_cache::MediaCache;
 use crate::profiles::Token;
 use crate::rpc::{ClientError, RpcClient};
-use crate::session::{Gate, lock_gate};
+use crate::session::{Gate, Health, lock_gate, note_health};
 
 /// How many images are fetched (or read from disk) and decoded at the same time.
 pub const MAX_CONCURRENT: usize = 6;
@@ -148,6 +148,7 @@ pub struct ImageLoader {
     token: Token,
     gate: Arc<Mutex<Gate>>,
     cache: Arc<OnceLock<Arc<MediaCache>>>,
+    health: Health,
     entries: HashMap<Key, Entry>,
     /// Entries waiting for the handshake, in request order.
     held: Vec<Key>,
@@ -180,6 +181,7 @@ impl ImageLoader {
         token: Token,
         gate: Arc<Mutex<Gate>>,
         cache: Arc<OnceLock<Arc<MediaCache>>>,
+        health: Health,
     ) -> ImageLoader {
         let (results_tx, results) = mpsc::channel();
         ImageLoader {
@@ -188,6 +190,7 @@ impl ImageLoader {
             token,
             gate,
             cache,
+            health,
             entries: HashMap::new(),
             held: Vec::new(),
             frame: None,
@@ -381,6 +384,7 @@ impl ImageLoader {
                     newest_pass: self.newest_pass.clone(),
                     gate: self.gate.clone(),
                     cache: self.cache.clone(),
+                    health: self.health.clone(),
                     results: Mutex::new(self.results_tx.clone()),
                     ui: self.ctx.clone(),
                 },
@@ -512,6 +516,8 @@ struct PoolContext {
     newest_pass: Arc<AtomicU64>,
     gate: Arc<Mutex<Gate>>,
     cache: Arc<OnceLock<Arc<MediaCache>>>,
+    /// The session's view of whether the server answers; each fetch reports to it.
+    health: Health,
     results: Mutex<mpsc::Sender<Done>>,
     ui: egui::Context,
 }
@@ -584,7 +590,7 @@ fn run(shared: &Shared) {
         let (job, outcome) = match next {
             Next::Skip(job) => (job, Outcome::Skipped),
             Next::Run(mut job) => {
-                let result = load(&shared.cx, &job);
+                let result = load(shared, &job);
                 job.attempts += 1;
                 if let Err(Failure {
                     error: ClientError::Retry { after },
@@ -681,7 +687,8 @@ fn next_job(shared: &Shared) -> Option<Next> {
 }
 
 /// Reads the image from the disk cache, or fetches it (and caches it), then decodes it.
-fn load(cx: &PoolContext, job: &Job) -> Result<egui::ColorImage, Failure> {
+fn load(shared: &Shared, job: &Job) -> Result<egui::ColorImage, Failure> {
+    let cx = &shared.cx;
     check_gate(&cx.gate).map_err(Failure::permanent)?;
     let preset = job.preset.as_str();
     let cache = cx.cache.get();
@@ -698,10 +705,14 @@ fn load(cx: &PoolContext, job: &Job) -> Result<egui::ColorImage, Failure> {
         }
     }
     let client = client(cx)?;
-    let bytes = client.get_bytes(&format!("media/{}/{preset}", job.id.0))?;
+    let fetched = client.get_bytes(&format!("media/{}/{preset}", job.id.0));
+    note_health(&cx.health, &fetched);
+    let bytes = fetched?;
     let image = decode(&bytes).map_err(Failure::permanent)?;
-    // Only images that decode are kept, and only while the session still serves this library.
+    // Only images that decode are kept, only while the session still serves this library, and
+    // not once the session is gone (its results belong to no one).
     if let Some(cache) = cache
+        && !shared.cancelled.load(Ordering::Acquire)
         && check_gate(&cx.gate).is_ok()
         && let Err(e) = cache.put(job.file_hash.as_deref(), preset, &bytes)
     {

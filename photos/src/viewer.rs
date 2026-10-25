@@ -7,9 +7,9 @@
 //! budget of eight.
 
 use asteria_framework_api::MediaKind;
+use asteria_framework_client::errors::error_text;
 use asteria_framework_client::images::{ImageState, Preset};
 use asteria_framework_client::session::Session;
-use asteria_framework_client::settings::servers::error_text;
 use corundum_framework::egui;
 use corundum_framework::gui::{icons, tr};
 

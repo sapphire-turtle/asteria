@@ -12,11 +12,11 @@
 use std::time::{Duration, Instant};
 
 use asteria_framework_api::{FolderListParams, ItemId, MediaItem};
+use asteria_framework_client::errors::{error_detail, error_text};
 use asteria_framework_client::rpc::ClientError;
 use asteria_framework_client::session::{
     Reply, Request, RequestId, Response, Session, SessionState,
 };
-use asteria_framework_client::settings::servers::{error_detail, error_text};
 use asteria_framework_client::widgets::thumb_grid::ThumbGrid;
 use corundum_framework::egui;
 use corundum_framework::gui::{icons, tr};
@@ -224,8 +224,8 @@ impl BrowseState {
     }
 
     /// Ask `library.info` now (unless it is already asked). The session compares the answer
-    /// with what it knew: a new epoch makes the listing be fetched again, another library
-    /// fails the session.
+    /// with what it knew: a new epoch, a scan that ended or a new item count between scans
+    /// makes the listing be fetched again, another library fails the session.
     pub fn refresh_library(&mut self, session: &mut Session) {
         if self.info.is_none() {
             self.info = Some(session.request(Request::LibraryInfo));
@@ -289,7 +289,10 @@ impl BrowseState {
         }
     }
 
-    /// Per-frame upkeep: fetch the listing again when the library's epoch moved, and ask
+    /// Per-frame upkeep: fetch the listing again (keeping it on screen until the new first
+    /// page arrives) when the session says the library changed (a new epoch, a scan that
+    /// ended, a new item count between scans; see
+    /// [`Session::take_refetch_listing`]), and ask
     /// `library.info` again on schedule (often while the server scans). Asks egui to wake
     /// for the next check.
     pub fn tick(&mut self, session: &mut Session, ctx: &egui::Context) {

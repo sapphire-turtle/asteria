@@ -1,7 +1,7 @@
 # asteria-framework-client の文字列。キーは `asteria-client-<area>-<what>`。
 
 # サムネイルのグリッド。
-asteria-client-grid-failed = サムネイルを読み込めませんでした
+asteria-client-grid-failed = サムネイルを読み込めませんでした: { $reason }
 asteria-client-grid-video = 動画
 asteria-client-grid-read-only = 読み取り専用: { $reason }
 asteria-client-grid-rating = 5段階中 { $stars }
@@ -30,8 +30,8 @@ asteria-client-servers-testing = 接続しています…
 asteria-client-servers-test-ok = 接続できました。{ $count } 件、オーナー: { $owner }
 asteria-client-servers-test-failed = 接続できませんでした: { $reason }
 asteria-client-servers-error-name = 名前を入力してください。
-asteria-client-servers-error-url = http:// か https:// で始まるアドレスを入力してください（例: http://192.168.1.10:8080）。
-asteria-client-servers-error-unreachable = サーバーに届きません（{ $detail }）
+asteria-client-servers-error-url = http:// か https:// で始まるアドレスを入力してください（例: http://192.168.1.10:7810）。
+asteria-client-servers-error-unreachable = サーバーに接続できません（{ $detail }）
 asteria-client-servers-error-unauthorized = サーバーがアクセストークンを受け付けませんでした
 asteria-client-servers-error-app-mismatch = このサーバーは別のアプリ用です
 asteria-client-servers-error-api-mismatch = サーバーとアプリのバージョンが合いません（アプリ {$client}、サーバー {$server}）

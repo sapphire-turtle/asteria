@@ -467,3 +467,97 @@ fn another_library_id_fails_the_session() {
     );
     assert!(!stub.methods().iter().any(|m| m == "folder.list"));
 }
+
+#[test]
+fn a_server_that_stops_answering_degrades_the_session_until_it_answers_again() {
+    // The handshake goes through; then `library.info` is refused (401) while `failing` is set.
+    let failing = Arc::new(AtomicBool::new(false));
+    let fail = failing.clone();
+    let addr = serve(move |req: &StubRequest| {
+        let (id, method) = req.rpc().expect("the stub only answers /rpc");
+        match method.as_str() {
+            "server.info" => StubResponse::rpc_result(id, photos_server_info()),
+            "library.info" if fail.load(Ordering::SeqCst) => StubResponse::new(401, Vec::new()),
+            "library.info" => StubResponse::rpc_result(id, library_info("stub-library")),
+            other => panic!("stub got unexpected method {other}"),
+        }
+    });
+    let mut session = Session::open(
+        &profile(addr, "t"),
+        photos_client(),
+        egui::Context::default(),
+    );
+    wait_settled(&mut session);
+    assert!(matches!(session.state(), SessionState::Ready { .. }));
+    assert_eq!(session.degraded(), None);
+
+    failing.store(true, Ordering::SeqCst);
+    let id = session.request(Request::LibraryInfo);
+    // The poll that hands out the failed reply already shows the session degraded.
+    let start = Instant::now();
+    loop {
+        let replies = session.poll();
+        if let Some(reply) = replies.iter().find(|r| r.id == id) {
+            assert_eq!(reply.result, Err(ClientError::Unauthorized));
+            break;
+        }
+        assert!(start.elapsed() < DEADLINE, "no reply");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(session.degraded(), Some(&ClientError::Unauthorized));
+    // Still connected: the session is not failed, it is waiting for the server to come back.
+    assert!(matches!(session.state(), SessionState::Ready { .. }));
+
+    failing.store(false, Ordering::SeqCst);
+    let id = session.request(Request::LibraryInfo);
+    let reply = wait_replies(&mut session, &[id]).remove(0);
+    assert!(reply.result.is_ok(), "{reply:?}");
+    assert_eq!(session.degraded(), None);
+}
+
+#[test]
+fn a_scan_that_ends_or_a_new_item_count_asks_for_the_listing_again() {
+    // library.info answers, in turn: the handshake's (scanning), still scanning with more
+    // items, done, done with the same count, then done with a new count (all one epoch).
+    let answers = [(true, 1), (true, 5), (false, 9), (false, 9), (false, 10)];
+    let n = Arc::new(AtomicUsize::new(0));
+    let calls = n.clone();
+    let addr = serve(move |req: &StubRequest| {
+        let (id, method) = req.rpc().expect("the stub only answers /rpc");
+        match method.as_str() {
+            "server.info" => StubResponse::rpc_result(id, photos_server_info()),
+            "library.info" => {
+                let (scanning, count) = answers[calls.fetch_add(1, Ordering::SeqCst).min(4)];
+                StubResponse::rpc_result(
+                    id,
+                    json!({
+                        "library_id": "stub-library",
+                        "owner": "owner",
+                        "epoch": "e1",
+                        "item_count": count,
+                        "scanning": scanning,
+                    }),
+                )
+            }
+            other => panic!("stub got unexpected method {other}"),
+        }
+    });
+    let mut session = Session::open(
+        &profile(addr, "t"),
+        photos_client(),
+        egui::Context::default(),
+    );
+    wait_settled(&mut session);
+    let ask = |session: &mut Session| {
+        let id = session.request(Request::LibraryInfo);
+        wait_replies(session, &[id]);
+        session.take_refetch_listing()
+    };
+    assert!(
+        !ask(&mut session),
+        "still scanning: the count moves, nothing to fetch yet"
+    );
+    assert!(ask(&mut session), "the scan ended");
+    assert!(!ask(&mut session), "nothing changed");
+    assert!(ask(&mut session), "the watcher found a change");
+}

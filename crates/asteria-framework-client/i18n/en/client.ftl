@@ -1,7 +1,7 @@
 # asteria-framework-client's strings. Keys are `asteria-client-<area>-<what>`.
 
 # The thumbnail grid.
-asteria-client-grid-failed = The thumbnail could not be loaded
+asteria-client-grid-failed = The thumbnail could not be loaded: { $reason }
 asteria-client-grid-video = Video
 asteria-client-grid-read-only = Read-only: { $reason }
 asteria-client-grid-rating = Rated { $stars } of 5
@@ -30,7 +30,7 @@ asteria-client-servers-testing = Connecting...
 asteria-client-servers-test-ok = Connected. { $count } items, owner: { $owner }
 asteria-client-servers-test-failed = Could not connect: { $reason }
 asteria-client-servers-error-name = Enter a name.
-asteria-client-servers-error-url = Enter an http:// or https:// address, such as http://192.168.1.10:8080.
+asteria-client-servers-error-url = Enter an http:// or https:// address, such as http://192.168.1.10:7810.
 asteria-client-servers-error-unreachable = the server cannot be reached ({ $detail })
 asteria-client-servers-error-unauthorized = the server did not accept the access token
 asteria-client-servers-error-app-mismatch = this server is for a different app

@@ -346,3 +346,65 @@ fn renaming_the_server_in_use_keeps_the_connection() {
     frame(&ctx, &mut app);
     assert_ne!(app.connection().unwrap().session().generation(), generation);
 }
+
+#[test]
+fn choosing_a_server_that_stopped_answering_reconnects() {
+    // Connects, then refuses `library.info` (401) while `failing` is set.
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fail = failing.clone();
+    let addr = serve(move |req| {
+        let Some((id, method)) = req.rpc() else {
+            return StubResponse::new(404, Vec::new());
+        };
+        match method.as_str() {
+            "server.info" => StubResponse::rpc_result(id, photos_server_info()),
+            "library.info" if fail.load(std::sync::atomic::Ordering::SeqCst) => {
+                StubResponse::new(401, Vec::new())
+            }
+            "library.info" => StubResponse::rpc_result(id, library_info("lib")),
+            "folder.list" => StubResponse::rpc_result(id, listing(&[], &["x"])),
+            _ => StubResponse::new(404, Vec::new()),
+        }
+    });
+    let (fx, ids) = fixture(&[("A", addr)], 0);
+    let ctx = egui::Context::default();
+    let mut app = PhotosApp::new(fx.paths.clone(), &ctx);
+    let generation = |app: &PhotosApp| app.connection().unwrap().session().generation();
+    run_until(
+        &ctx,
+        &mut app,
+        "the listing",
+        |_| {},
+        |app| item_ids(app) == ["x"],
+    );
+    let first = generation(&app);
+    // Healthy: choosing it again keeps the connection.
+    app.switch_to(ids[0]);
+    assert_eq!(generation(&app), first);
+
+    failing.store(true, std::sync::atomic::Ordering::SeqCst);
+    app.refresh_library();
+    run_until(
+        &ctx,
+        &mut app,
+        "the session to show it stopped answering",
+        |_| {},
+        |app| app.connection().unwrap().session().degraded().is_some(),
+    );
+    // Still connected (the listing stays), but choosing it again starts afresh.
+    assert!(matches!(
+        app.connection().unwrap().session().state(),
+        SessionState::Ready { .. }
+    ));
+    failing.store(false, std::sync::atomic::Ordering::SeqCst);
+    app.switch_to(ids[0]);
+    assert_ne!(generation(&app), first);
+    run_until(
+        &ctx,
+        &mut app,
+        "the listing again",
+        |_| {},
+        |app| item_ids(app) == ["x"],
+    );
+    assert!(app.connection().unwrap().session().degraded().is_none());
+}

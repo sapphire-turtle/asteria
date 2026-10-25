@@ -5,13 +5,12 @@ mod common;
 
 use std::time::{Duration, Instant};
 
+use asteria_framework_client::errors::error_text;
 use asteria_framework_client::i18n;
 use asteria_framework_client::profiles::{Profiles, Token};
 use asteria_framework_client::rpc::ClientError;
 use asteria_framework_client::session::SessionState;
-use asteria_framework_client::settings::servers::{
-    FormError, ServersChange, ServersPage, error_text,
-};
+use asteria_framework_client::settings::servers::{FormError, ServersChange, ServersPage};
 use corundum_framework::egui;
 use corundum_framework::gui::settings::SettingsSection;
 
@@ -181,11 +180,9 @@ fn connection_test_reports_an_unreachable_server() {
     i18n::register(&ctx);
     let (mut page, _) = page_with(0);
     page.begin_add();
-    // A port nothing listens on.
-    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = free.local_addr().unwrap();
-    drop(free);
-    fill(&mut page, "dead", &format!("http://{addr}"), "tok");
+    // Port 0 never accepts a connection (a port freed by the test could be taken by another
+    // test's stub meanwhile).
+    fill(&mut page, "dead", "http://127.0.0.1:0", "tok");
     page.start_test(&ctx);
     assert!(matches!(
         run_until_settled(&ctx, &mut page),
@@ -195,7 +192,7 @@ fn connection_test_reports_an_unreachable_server() {
 
 #[test]
 fn technical_details_stay_out_of_the_sentence() {
-    use asteria_framework_client::settings::servers::error_detail;
+    use asteria_framework_client::errors::error_detail;
     let ctx = egui::Context::default();
     i18n::register(&ctx);
     for e in [
@@ -225,4 +222,31 @@ fn technical_details_stay_out_of_the_sentence() {
         assert!(!t.is_empty() && !t.contains("asteria-client-"), "{t}");
         assert_eq!(error_detail(&e), None);
     }
+}
+
+#[test]
+fn debug_output_never_shows_the_token() {
+    const TOKEN: &str = "very-secret-token-value";
+    // Adding: the form, then the change it gives.
+    let (mut page, _) = page_with(0);
+    page.begin_add();
+    fill(&mut page, "Home", "http://nas.local:7810", TOKEN);
+    let form = format!("{:?}", page.form().unwrap());
+    assert!(!form.contains(TOKEN), "{form}");
+    page.submit().unwrap();
+    let added = page.take_change().unwrap();
+    assert!(matches!(added, ServersChange::Added { .. }));
+    let added = format!("{added:?}");
+    assert!(!added.contains(TOKEN), "{added}");
+    // Editing: the form, then the change it gives.
+    let (mut page, profiles) = page_with(1);
+    page.begin_edit(profiles.servers[0].id);
+    page.form_mut().unwrap().token = TOKEN.into();
+    let form = format!("{:?}", page.form().unwrap());
+    assert!(!form.contains(TOKEN), "{form}");
+    page.submit().unwrap();
+    let updated = page.take_change().unwrap();
+    assert!(matches!(updated, ServersChange::Updated(_)));
+    let updated = format!("{updated:?}");
+    assert!(!updated.contains(TOKEN), "{updated}");
 }

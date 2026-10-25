@@ -14,12 +14,11 @@
 use std::path::PathBuf;
 
 use asteria_framework_api::ItemId;
+use asteria_framework_client::errors::{error_detail, error_text};
 use asteria_framework_client::profiles::{ProfileId, Profiles};
 use asteria_framework_client::profiles::{ServerProfile, Token};
 use asteria_framework_client::session::SessionState;
-use asteria_framework_client::settings::servers::{
-    ServersChange, ServersPage, error_detail, error_text,
-};
+use asteria_framework_client::settings::servers::{ServersChange, ServersPage};
 use corundum_framework::egui;
 use corundum_framework::gui::settings::{ListItem, SettingsLayout, SettingsSection};
 use corundum_framework::gui::theme::{Swatch, Tone};
@@ -190,7 +189,8 @@ impl PhotosApp {
     }
 
     /// Use the server `id` from now on: saved as the one in use, connected afresh, at the
-    /// library's root. Choosing the server in use again only reconnects if it had failed.
+    /// library's root. Choosing the server in use again only reconnects if it had failed or
+    /// stopped answering ([`Session::degraded`](asteria_framework_client::session::Session::degraded)).
     pub fn switch_to(&mut self, id: ProfileId) {
         self.state.switch_to(id);
     }
@@ -253,10 +253,9 @@ impl State {
 
     fn switch_to(&mut self, id: ProfileId) {
         let same = self.profiles.active().map(|p| p.id) == Some(id);
-        let healthy = self
-            .connection
-            .as_ref()
-            .is_some_and(|c| !matches!(c.session.state(), SessionState::Failed(_)));
+        let healthy = self.connection.as_ref().is_some_and(|c| {
+            !matches!(c.session.state(), SessionState::Failed(_)) && c.session.degraded().is_none()
+        });
         if same && healthy {
             return;
         }
@@ -466,7 +465,13 @@ impl State {
     /// The server in use and its state, with a menu of the servers to switch to. `compact`
     /// shows only the state's icon (the bottom bar has little room).
     fn switcher_ui(&mut self, ui: &mut egui::Ui, compact: bool) {
-        let (icon, swatch, status) = match self.connection.as_ref().map(|c| c.session.state()) {
+        let session = self.connection.as_ref().map(|c| &c.session);
+        let degraded = session.and_then(|s| s.degraded());
+        let detail = match (session.map(|s| s.state()), degraded) {
+            (Some(SessionState::Failed(e)), _) | (_, Some(e)) => error_detail(e),
+            _ => None,
+        };
+        let (icon, swatch, status) = match session.map(|s| s.state()) {
             None => (
                 icons::cloud_off(),
                 Swatch::Neutral,
@@ -477,11 +482,22 @@ impl State {
                 Swatch::Yellow,
                 tr!(ui, "asteria-photos-status-connecting"),
             ),
-            Some(SessionState::Ready { .. }) => (
-                icons::circle_check(),
-                Swatch::Green,
-                tr!(ui, "asteria-photos-status-connected"),
-            ),
+            Some(SessionState::Ready { .. }) => match degraded {
+                // Connected, but the latest request found the server gone or the token refused.
+                Some(e) => {
+                    let reason = error_text(ui.ctx(), e);
+                    (
+                        icons::cloud_off(),
+                        Swatch::Orange,
+                        tr!(ui, "asteria-photos-status-degraded", reason = reason),
+                    )
+                }
+                None => (
+                    icons::circle_check(),
+                    Swatch::Green,
+                    tr!(ui, "asteria-photos-status-connected"),
+                ),
+            },
             Some(SessionState::Failed(e)) => {
                 let reason = error_text(ui.ctx(), e);
                 (
@@ -529,12 +545,17 @@ impl State {
                 }
                 (picked, manage)
             });
-        menu.0.on_hover_text(tr!(
+        let mut hover = tr!(
             ui,
             "asteria-photos-status-hover",
             name = name.as_str(),
             status = status.as_str()
-        ));
+        );
+        if let Some(detail) = detail {
+            hover.push('\n');
+            hover.push_str(&detail);
+        }
+        menu.0.on_hover_text(hover);
         if let Some(inner) = menu.1 {
             let (picked, manage) = inner.inner;
             if let Some(id) = picked {

@@ -129,11 +129,12 @@ fn a_new_epoch_fetches_the_folder_again() {
 
 #[test]
 fn a_scan_is_watched_until_it_ends() {
-    // Scanning for the handshake and the next answer, then done with a new epoch.
+    // Scanning for the handshake and the next answer, then done. The epoch stays the same,
+    // as the real server's does (it moves only when the server rebuilds its cache).
     let (addr, infos) = server(
         |n| match n {
             1 | 2 => info("e1", true, u64::from(n) * 10),
-            _ => info("e2", false, 30),
+            _ => info("e1", false, 30),
         },
         |_, n| json!({"folders": [], "items": [item(&format!("v{n}"))], "next_cursor": null}),
     );
@@ -154,12 +155,53 @@ fn a_scan_is_watched_until_it_ends() {
     assert!(*infos.lock().unwrap() >= 3);
     assert!(started.elapsed() >= SCANNING_POLL * 2 - SCANNING_POLL / 4);
     assert_eq!(library(&app).unwrap().item_count, 30);
-    // The scan's end moved the epoch: the folder is fetched again.
+    // The scan's end alone fetches the folder again, keeping the old listing meanwhile.
     run_until(
         &ctx,
         &mut app,
         "the listing after the scan",
-        |_| {},
+        |app| assert_eq!(item_ids(app).len(), 1),
         |app| item_ids(app) == ["v2"],
     );
+}
+
+#[test]
+fn a_new_item_count_between_scans_fetches_the_folder_again() {
+    // Not scanning, one epoch throughout: the second answer has one item more (the watcher
+    // found a new file), the third the same count again.
+    let (addr, infos) = server(
+        |n| info("e1", false, if n == 1 { 1 } else { 2 }),
+        |_, n| json!({"folders": [], "items": [item(&format!("v{n}"))], "next_cursor": null}),
+    );
+    let (_fx, ctx, mut app) = start(addr);
+    run_until(
+        &ctx,
+        &mut app,
+        "the first listing",
+        |_| {},
+        |app| item_ids(app) == ["v1"],
+    );
+    app.refresh_library();
+    run_until(
+        &ctx,
+        &mut app,
+        "the listing fetched again",
+        |app| assert_eq!(item_ids(app).len(), 1),
+        |app| item_ids(app) == ["v2"],
+    );
+    // The same count again: nothing is fetched.
+    app.refresh_library();
+    run_until(
+        &ctx,
+        &mut app,
+        "the third answer",
+        |_| {},
+        |_| *infos.lock().unwrap() == 3,
+    );
+    let start = Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(300) {
+        frame(&ctx, &mut app);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(item_ids(&app), ["v2"]);
 }

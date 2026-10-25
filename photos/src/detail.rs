@@ -26,10 +26,10 @@
 use std::time::{Duration, Instant};
 
 use asteria_framework_api::{ItemId, MediaItem, MediaKind, MediaUpdateParams, codes};
+use asteria_framework_client::errors::{error_detail, error_text};
 use asteria_framework_client::images::{ImageState, Preset};
 use asteria_framework_client::rpc::ClientError;
 use asteria_framework_client::session::{Reply, Request, RequestId, Response, Session};
-use asteria_framework_client::settings::servers::{error_detail, error_text};
 use corundum_framework::egui;
 use corundum_framework::gui::theme::{self, Swatch, Tone};
 use corundum_framework::gui::{icons, tr};
@@ -772,10 +772,15 @@ pub fn format_modified(rfc3339: &str) -> String {
         && b[7] == b'-'
         && (b[10] == b'T' || b[10] == b' ')
         && b[13] == b':';
-    if shaped && (rfc3339.ends_with('Z') || rfc3339.ends_with("+00:00")) {
-        format!("{} {} UTC", &rfc3339[..10], &rfc3339[11..16])
-    } else {
-        rfc3339.to_string()
+    // `get` rather than indexing: a multi-byte character can make a byte offset fall inside
+    // it, and server data must not panic the UI.
+    match (rfc3339.get(..10), rfc3339.get(11..16)) {
+        (Some(date), Some(time))
+            if shaped && (rfc3339.ends_with('Z') || rfc3339.ends_with("+00:00")) =>
+        {
+            format!("{date} {time} UTC")
+        }
+        _ => rfc3339.to_string(),
     }
 }
 
@@ -804,6 +809,11 @@ mod tests {
             "2026-01-02 03:04 UTC"
         );
         assert_eq!(format_modified("yesterday"), "yesterday");
+        // A byte offset inside a character: shown as it is, never a panic.
+        assert_eq!(
+            format_modified("2026-01-02T03:0\u{e9}Z"),
+            "2026-01-02T03:0\u{e9}Z"
+        );
     }
 
     #[test]

@@ -508,3 +508,63 @@ fn image_results_after_drop_are_discarded() {
     release_b.send(()).unwrap();
     assert_ready(&wait_loaded(&mut b, &ctx, &one, Preset::Thumb));
 }
+
+#[test]
+fn a_refused_image_degrades_the_session_and_a_fetched_one_clears_it() {
+    // Item 1's thumbnail is refused (401, as when the token is revoked); item 2's is served.
+    let (addr, _log) = media_stub(|path, _| {
+        if path.contains("item-1") {
+            StubResponse::new(401, Vec::new())
+        } else {
+            webp_response()
+        }
+    });
+    let ctx = egui::Context::default();
+    let mut session = Session::open(&profile(addr, "t"), photos_client(), ctx.clone());
+    wait_settled(&mut session);
+    assert_eq!(session.degraded(), None);
+    let state = wait_loaded(&mut session, &ctx, &item(1), Preset::Thumb);
+    assert!(
+        matches!(state, ImageState::Failed(ClientError::Unauthorized)),
+        "{state:?}"
+    );
+    session.poll();
+    assert_eq!(session.degraded(), Some(&ClientError::Unauthorized));
+    assert_ready(&wait_loaded(&mut session, &ctx, &item(2), Preset::Thumb));
+    session.poll();
+    assert_eq!(session.degraded(), None);
+}
+
+#[test]
+fn a_dropped_session_does_not_fill_the_cache() {
+    // The only media request waits for `release`, and reports when its answer is written.
+    let (release, rx) = mpsc::channel::<()>();
+    let (written, written_rx) = mpsc::channel::<()>();
+    let held = Mutex::new((rx, written));
+    let (addr, log) = media_stub(move |_, _| {
+        let held = held.lock().unwrap();
+        let _ = held.0.recv_timeout(DEADLINE);
+        let written = held.1.clone();
+        let mut resp = webp_response();
+        resp.after_write = Some(Box::new(move || {
+            let _ = written.send(());
+        }));
+        resp
+    });
+    let cache = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let one = item(1);
+    let mut session = ready_session(addr, &ctx, cache.path());
+    let library_cache = session.media_cache().unwrap();
+    frame(&ctx, || session.images().request(&one, Preset::Thumb));
+    wait_logged(&log, 1);
+    drop(session);
+    release.send(()).unwrap();
+    written_rx.recv_timeout(DEADLINE).unwrap();
+    // Give the pool thread time to decode and (wrongly) store it.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        library_cache.get(one.file_hash.as_deref(), Preset::Thumb.as_str()),
+        None
+    );
+}

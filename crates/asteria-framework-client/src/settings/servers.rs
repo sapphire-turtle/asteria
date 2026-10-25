@@ -7,15 +7,15 @@
 //! state back with [`set_profiles`](ServersPage::set_profiles). Until it does, the list shows
 //! the old state.
 
-use asteria_framework_api::{ClientInfo, HandshakeError};
+use asteria_framework_api::ClientInfo;
 use corundum_framework::egui;
 use corundum_framework::gui::settings::SettingsSection;
 use corundum_framework::gui::tr;
 use grain_id::GrainId;
 use url::Url;
 
+use crate::errors::error_text;
 use crate::profiles::{self, ProfileId, Profiles, ServerProfile, Token, parse_url};
-use crate::rpc::ClientError;
 use crate::session::{Session, SessionState};
 
 /// One thing the user did, for the app to apply to its [`Profiles`] and save.
@@ -348,7 +348,7 @@ impl ServersPage {
                 edited |= ui
                     .add(
                         egui::TextEdit::singleline(&mut form.url)
-                            .hint_text("http://192.168.1.10:8080"),
+                            .hint_text("http://192.168.1.10:7810"),
                     )
                     .changed();
                 ui.end_row();
@@ -441,52 +441,6 @@ impl ServersPage {
                 );
             }
         }
-    }
-}
-
-/// A connection failure in words the user can act on, in the installed language. The
-/// error texts never contain the token. Failures whose details are technical (a malformed
-/// answer, a server-side error, a local failure) get a general sentence; their details are in
-/// [`error_detail`], for a hover or the log.
-pub fn error_text(ctx: &egui::Context, e: &ClientError) -> String {
-    match e {
-        ClientError::Unreachable(detail) => tr!(
-            ctx,
-            "asteria-client-servers-error-unreachable",
-            detail = detail.as_str()
-        ),
-        ClientError::Unauthorized => tr!(ctx, "asteria-client-servers-error-unauthorized"),
-        ClientError::Handshake(HandshakeError::AppMismatch { .. }) => {
-            tr!(ctx, "asteria-client-servers-error-app-mismatch")
-        }
-        ClientError::Handshake(HandshakeError::ApiMismatch { client, server }) => tr!(
-            ctx,
-            "asteria-client-servers-error-api-mismatch",
-            client = client.to_string(),
-            server = server.to_string()
-        ),
-        ClientError::Retry { after } => tr!(
-            ctx,
-            "asteria-client-servers-error-busy",
-            seconds = after.as_secs()
-        ),
-        ClientError::Unprocessable => tr!(ctx, "asteria-client-servers-error-unprocessable"),
-        ClientError::NotFound => tr!(ctx, "asteria-client-servers-error-not-found"),
-        ClientError::LibraryChanged => tr!(ctx, "asteria-client-servers-error-library-changed"),
-        ClientError::Rpc { .. } => tr!(ctx, "asteria-client-servers-error-server"),
-        ClientError::Protocol(_) => tr!(ctx, "asteria-client-servers-error-protocol"),
-        ClientError::Io(_) => tr!(ctx, "asteria-client-servers-error-local"),
-    }
-}
-
-/// The technical details [`error_text`] leaves out (untranslated, as the server or the system
-/// gave them), for a hover or the log; `None` when the sentence says everything.
-pub fn error_detail(e: &ClientError) -> Option<String> {
-    match e {
-        ClientError::Rpc { .. } | ClientError::Protocol(_) | ClientError::Io(_) => {
-            Some(e.to_string())
-        }
-        _ => None,
     }
 }
 

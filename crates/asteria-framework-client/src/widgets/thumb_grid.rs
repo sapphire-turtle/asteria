@@ -24,6 +24,7 @@ use asteria_framework_api::{ItemId, MediaItem, MediaKind};
 use corundum_framework::egui::{self, Color32, Rect, Sense, vec2};
 use corundum_framework::gui::{icons, tr};
 
+use crate::errors::{error_detail, error_text};
 use crate::images::{ImageLoader, ImageState, Preset};
 
 /// The gap between cells, in points, both ways.
@@ -259,12 +260,16 @@ fn draw_cell(
             );
         }
         ImageState::Loading => {}
-        ImageState::Failed(_) => {
+        ImageState::Failed(e) => {
             let r = Rect::from_center_size(rect.center(), vec2(24.0, 24.0));
             icons::paint(ui, r, icons::cloud_off(), visuals.weak_text_color());
             let ctx = ui.ctx().clone();
             response.clone().on_hover_ui(|ui| {
-                ui.label(tr!(ctx, "asteria-client-grid-failed"));
+                let reason = error_text(&ctx, e);
+                ui.label(tr!(ctx, "asteria-client-grid-failed", reason = reason));
+                if let Some(detail) = error_detail(e) {
+                    ui.weak(detail);
+                }
             });
         }
     }
