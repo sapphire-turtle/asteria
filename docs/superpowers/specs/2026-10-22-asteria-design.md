@@ -305,7 +305,7 @@ project-asteria/
 | `thumb` | 長辺 256px の WebP |
 | `preview` | 長辺 1920px の WebP |
 | `offline-image` | 長辺 2048px の WebP |
-| `offline-audio` | Opus 96kbps。クライアントが純 Rust でデコードできなければ Vorbis か AAC にする（検証用の試作で決める） |
+| `offline-audio` | Opus 96kbps。純 Rust のデコーダー（opus-pure か opuscule）が iPhone の Release で実時間の数百倍で復号できることを、検証用の試作で確かめた |
 
 ### 4.6 MCP と整理計画
 

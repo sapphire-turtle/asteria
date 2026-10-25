@@ -1,5 +1,0 @@
-target/
-xcode/*.xcodeproj/
-xcode/Local.xcconfig
-xcode/build/
-xcode/Info.plist
