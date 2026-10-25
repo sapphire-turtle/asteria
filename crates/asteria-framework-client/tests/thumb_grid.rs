@@ -175,3 +175,91 @@ fn arrow_keys_move_the_selection_by_one_and_by_a_row() {
     });
     assert_eq!(r.double_clicked, Some(ItemId("item-0".into())));
 }
+
+/// Runs one frame with `grid`, then reports whether Enter / ArrowRight is still unconsumed.
+fn leftover_after(
+    ctx: &egui::Context,
+    k: egui::Key,
+    extra: impl FnOnce(&mut egui::Ui),
+    grid: impl FnOnce(&mut egui::Ui) -> ThumbGridResponse,
+) -> (ThumbGridResponse, bool) {
+    let mut left = false;
+    let r = frame(ctx, key(k), 800.0, 600.0, |ui| {
+        extra(ui);
+        let r = grid(ui);
+        left = ui.input(|i| i.key_pressed(k));
+        r
+    });
+    (r, left)
+}
+
+#[test]
+fn enter_with_no_selection_is_not_consumed() {
+    let items: Vec<MediaItem> = (0..10).map(item).collect();
+    let ctx = egui::Context::default();
+    let mut source = Counting::default();
+    let (r, left) = leftover_after(
+        &ctx,
+        egui::Key::Enter,
+        |_| {},
+        |ui| ThumbGrid::new(&items).show(ui, &mut source),
+    );
+    assert_eq!(r.double_clicked, None);
+    assert!(
+        left,
+        "Enter was taken although the grid did nothing with it"
+    );
+    // Control: with a selection the grid takes it.
+    let (r, left) = leftover_after(
+        &ctx,
+        egui::Key::Enter,
+        |_| {},
+        |ui| {
+            ThumbGrid::new(&items)
+                .selected(Some(ItemId("item-2".into())))
+                .show(ui, &mut source)
+        },
+    );
+    assert_eq!(r.double_clicked, Some(ItemId("item-2".into())));
+    assert!(!left);
+}
+
+#[test]
+fn keys_are_ignored_while_a_text_field_has_focus() {
+    let items: Vec<MediaItem> = (0..10).map(item).collect();
+    let ctx = egui::Context::default();
+    let mut source = Counting::default();
+    let mut text = String::new();
+    // First frame: the text field takes focus.
+    frame(&ctx, vec![], 800.0, 600.0, |ui| {
+        ui.text_edit_singleline(&mut text).request_focus();
+        ThumbGrid::new(&items).show(ui, &mut source)
+    });
+    let (r, left) = leftover_after(
+        &ctx,
+        egui::Key::ArrowRight,
+        |ui| {
+            ui.text_edit_singleline(&mut text);
+        },
+        |ui| {
+            ThumbGrid::new(&items)
+                .selected(Some(ItemId("item-0".into())))
+                .show(ui, &mut source)
+        },
+    );
+    assert_eq!(r.selected, None);
+    assert!(left);
+    // Without the text field focused, the same key moves the selection.
+    let ctx = egui::Context::default();
+    let (r, _) = leftover_after(
+        &ctx,
+        egui::Key::ArrowRight,
+        |_| {},
+        |ui| {
+            ThumbGrid::new(&items)
+                .selected(Some(ItemId("item-0".into())))
+                .show(ui, &mut source)
+        },
+    );
+    assert_eq!(r.selected, Some(ItemId("item-1".into())));
+}

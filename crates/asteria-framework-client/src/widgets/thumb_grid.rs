@@ -13,10 +13,11 @@
 //! the state of each visible thumbnail, every frame.
 //!
 //! Keyboard: the arrow keys move the selection by one (left, right) or by a row (up, down), and
-//! Enter reports the selection as double-clicked. They work whenever no text field has the
-//! keyboard (`ctx.egui_wants_keyboard_input()` is false), so the grid needs no focus of its own. A
-//! move scrolls the selected cell into view. With nothing selected, an arrow selects the first
-//! item. The Lucide icons need `corundum_framework::gui::icons::install_loaders(ctx)` once;
+//! Enter reports the selection as double-clicked. The grid owns the keyboard while no widget
+//! has focus (`ctx.memory(|m| m.focused())` is `None`): a focused text field or button keeps its
+//! keys, and so does egui's focus navigation. A key is consumed only when the grid acts on it:
+//! Enter with nothing selected is left alone. A move scrolls the selected cell into view. With
+//! nothing selected, an arrow selects the first item. The Lucide icons need `corundum_framework::gui::icons::install_loaders(ctx)` once;
 //! the shell does it.
 
 use asteria_framework_api::{ItemId, MediaItem, MediaKind};
@@ -60,6 +61,7 @@ pub struct ThumbGrid<'a> {
     items: &'a [MediaItem],
     cell: f32,
     selected: Option<ItemId>,
+    id_salt: egui::IdSalt,
 }
 
 /// What the grid remembers between frames, to scroll a moved selection into view.
@@ -75,11 +77,12 @@ impl<'a> ThumbGrid<'a> {
             items,
             cell: DEFAULT_CELL_SIZE,
             selected: None,
+            id_salt: egui::IdSalt::new("asteria-thumb-grid"),
         }
     }
 
     pub fn cell_size(mut self, cell: f32) -> Self {
-        self.cell = cell.max(16.0);
+        self.cell = cell.max(24.0);
         self
     }
 
@@ -89,18 +92,29 @@ impl<'a> ThumbGrid<'a> {
         self
     }
 
+    /// Tells two grids in one `Ui` apart (their scroll position and view state).
+    pub fn id_salt(mut self, salt: impl egui::AsIdSalt) -> Self {
+        self.id_salt = egui::IdSalt::new(salt);
+        self
+    }
+
     /// `max(1, floor((width + SPACING) / (cell + SPACING)))`.
     pub fn columns_for(width: f32, cell: f32) -> usize {
         (((width + SPACING) / (cell + SPACING)).floor() as usize).max(1)
     }
 
     pub fn show(self, ui: &mut egui::Ui, source: &mut impl ThumbSource) -> ThumbGridResponse {
+        // A scope, so the spacing set below does not leak into the caller's `Ui`.
+        ui.scope(|ui| self.show_inner(ui, source)).inner
+    }
+
+    fn show_inner(self, ui: &mut egui::Ui, source: &mut impl ThumbSource) -> ThumbGridResponse {
         let cell = self.cell;
         let avail = ui.available_width() - ui.spacing().scroll.allocated_width();
         let columns = Self::columns_for(avail, cell);
         let rows = self.items.len().div_ceil(columns);
         let row_h = cell + SPACING;
-        let view_id = ui.scope_id().with("asteria-thumb-grid");
+        let view_id = ui.make_persistent_id(self.id_salt);
         let view: View = ui.data(|d| d.get_temp(view_id)).unwrap_or_default();
         let mut resp = ThumbGridResponse {
             columns,
@@ -108,34 +122,38 @@ impl<'a> ThumbGrid<'a> {
         };
         let mut scroll_to = None;
 
-        if !ui.ctx().egui_wants_keyboard_input() && !self.items.is_empty() {
-            let (left, right, up, down, enter) = ui.input_mut(|i| {
-                use egui::Key::*;
-                let mut k = |key| i.consume_key(egui::Modifiers::NONE, key);
-                (
-                    k(ArrowLeft),
-                    k(ArrowRight),
-                    k(ArrowUp),
-                    k(ArrowDown),
-                    k(Enter),
-                )
-            });
-            let current = self
-                .selected
-                .as_ref()
-                .and_then(|id| self.items.iter().position(|i| &i.id == id));
+        let keys_free = ui.ctx().memory(|m| m.focused()).is_none();
+        if keys_free && !self.items.is_empty() {
+            use egui::Key::*;
+            let pressed = |ui: &egui::Ui, k| ui.input(|i| i.key_pressed(k));
+            let arrow = [ArrowLeft, ArrowRight, ArrowUp, ArrowDown]
+                .into_iter()
+                .find(|k| pressed(ui, *k));
+            let enter = pressed(ui, Enter);
+            // The position is looked up only when a key may act on it.
+            let current = (arrow.is_some() || enter)
+                .then(|| {
+                    self.selected
+                        .as_ref()
+                        .and_then(|id| self.items.iter().position(|i| &i.id == id))
+                })
+                .flatten();
             let last = self.items.len() - 1;
-            let moved = match (current, left, right, up, down) {
-                (None, true, ..)
-                | (None, _, true, ..)
-                | (None, _, _, true, _)
-                | (None, .., true) => Some(0),
-                (Some(i), true, ..) => Some(i.saturating_sub(1)),
-                (Some(i), _, true, ..) => Some((i + 1).min(last)),
-                (Some(i), _, _, true, _) => Some(i.saturating_sub(columns)),
-                (Some(i), .., true) => Some((i + columns).min(last)),
-                _ => None,
+            let moved = match (arrow, current) {
+                (Some(_), None) => Some(0),
+                (Some(ArrowLeft), Some(i)) => Some(i.saturating_sub(1)),
+                (Some(ArrowRight), Some(i)) => Some((i + 1).min(last)),
+                (Some(ArrowUp), Some(i)) => Some(i.saturating_sub(columns)),
+                (Some(_), Some(i)) => Some((i + columns).min(last)),
+                (None, _) => None,
             };
+            // Take only the key that did something.
+            let consume = |ui: &egui::Ui, k| {
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
+            };
+            if let (Some(k), Some(_)) = (arrow, moved) {
+                consume(ui, k);
+            }
             if let Some(i) = moved {
                 let id = self.items[i].id.clone();
                 if current != Some(i) {
@@ -154,13 +172,16 @@ impl<'a> ThumbGrid<'a> {
                     }
                 }
             } else if enter && let Some(id) = current.map(|i| self.items[i].id.clone()) {
+                consume(ui, Enter);
                 resp.double_clicked = Some(id);
             }
         }
         let selected = resp.selected.clone().or(self.selected.clone());
 
         ui.spacing_mut().item_spacing = vec2(SPACING, SPACING);
-        let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        let mut area = egui::ScrollArea::vertical()
+            .id_salt(self.id_salt)
+            .auto_shrink([false, false]);
         if let Some(offset) = scroll_to {
             area = area.vertical_scroll_offset(offset.max(0.0));
         }
@@ -197,6 +218,12 @@ impl<'a> ThumbGrid<'a> {
     }
 }
 
+/// Lucide's `lock` (ISC, `assets/icons/LICENSE-Lucide`), stroked in white like corundum's icons
+/// so it tints the same way. Move it to corundum when corundum gets a lock icon.
+fn lock() -> egui::ImageSource<'static> {
+    egui::include_image!("../../assets/icons/lock.svg")
+}
+
 fn draw_cell(
     ui: &mut egui::Ui,
     item: &MediaItem,
@@ -230,9 +257,10 @@ fn draw_cell(
         ImageState::Failed(_) => {
             let r = Rect::from_center_size(rect.center(), vec2(24.0, 24.0));
             icons::paint(ui, r, icons::cloud_off(), visuals.weak_text_color());
-            response
-                .clone()
-                .on_hover_text(tr!(ui, "asteria-client-grid-failed"));
+            let ctx = ui.ctx().clone();
+            response.clone().on_hover_ui(|ui| {
+                ui.label(tr!(ctx, "asteria-client-grid-failed"));
+            });
         }
     }
     let badge = Color32::from_black_alpha(150);
@@ -250,18 +278,18 @@ fn draw_cell(
         );
         chip(r, icons::play());
         if ui.rect_contains_pointer(r) {
-            response
-                .clone()
-                .on_hover_text(tr!(ui, "asteria-client-grid-video"));
+            let ctx = ui.ctx().clone();
+            response.clone().on_hover_ui(|ui| {
+                ui.label(tr!(ctx, "asteria-client-grid-video"));
+            });
         }
     }
     if let Some(reason) = &item.read_only_reason {
-        // Lucide has no lock in the shared set: the closest is the circle with a cross.
         let r = Rect::from_min_size(
             rect.right_top() + vec2(-pad - icon_size - 2.0, pad + 2.0),
             vec2(icon_size, icon_size),
         );
-        chip(r, icons::circle_x());
+        chip(r, lock());
         if ui.rect_contains_pointer(r) {
             response.clone().on_hover_text(tr!(
                 ui,
