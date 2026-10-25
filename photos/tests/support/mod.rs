@@ -6,6 +6,7 @@
 
 #[path = "../../../crates/asteria-framework-client/tests/common/mod.rs"]
 pub mod common;
+pub mod server;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -81,14 +82,23 @@ pub fn fixture(
     servers: &[(&str, std::net::SocketAddr)],
     active: usize,
 ) -> (Fixture, Vec<ProfileId>) {
+    let with_token: Vec<_> = servers.iter().map(|(n, a)| (*n, *a, "t")).collect();
+    fixture_with_tokens(&with_token, active)
+}
+
+/// As [`fixture`], each server with its own token.
+pub fn fixture_with_tokens(
+    servers: &[(&str, std::net::SocketAddr, &str)],
+    active: usize,
+) -> (Fixture, Vec<ProfileId>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config/servers.toml");
     let mut profiles = Profiles::default();
     let ids: Vec<ProfileId> = servers
         .iter()
-        .map(|(name, addr)| {
+        .map(|(name, addr, token)| {
             profiles
-                .add(*name, &format!("http://{addr}"), Token::new("t"))
+                .add(*name, &format!("http://{addr}"), Token::new(*token))
                 .unwrap()
         })
         .collect();
@@ -102,12 +112,18 @@ pub fn fixture(
 }
 
 pub fn frame(ctx: &egui::Context, app: &mut PhotosApp) {
+    frame_with(ctx, app, Vec::new());
+}
+
+/// One frame in which `events` (key presses, say) arrive.
+pub fn frame_with(ctx: &egui::Context, app: &mut PhotosApp, events: Vec<egui::Event>) {
     let mut output = ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 egui::vec2(1000.0, 700.0),
             )),
+            events,
             ..Default::default()
         },
         |ui| app.show(ui),
@@ -158,5 +174,16 @@ pub fn wait_saved(path: &Path, want: ProfileId) {
             "servers.toml never named the switch"
         );
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A press of `key`, with no modifier, as egui receives it.
+pub fn key(key: egui::Key) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
     }
 }

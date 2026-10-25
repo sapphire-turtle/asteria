@@ -5,6 +5,9 @@
 //! Switching servers drops the connection whole and opens a new one at the library's root,
 //! so nothing the old server sends can reach the new screen.
 //!
+//! The selected item's details are in corundum's side pane (a right column when wide), and
+//! an item opened from the grid fills the window ([`crate::viewer`]) until Esc.
+//!
 //! The servers are kept in `servers.toml`. It is read once, before the first frame; every
 //! change is written by a background thread, so the UI thread does no disk I/O.
 
@@ -23,7 +26,9 @@ use corundum_framework::gui::theme::{Swatch, Tone};
 use corundum_framework::gui::{COMPACT_WIDTH, Destination, Shell, ShellApp, Side, icons, tr};
 
 pub use crate::connection::Connection;
+use crate::detail::{DetailView, Edit};
 use crate::saver::Saver;
+use crate::viewer;
 
 /// The screens: the library on the rail, Settings at its foot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +75,8 @@ struct State {
     open_screen: Option<Screen>,
     /// Whether the shell lays out for a phone this frame (no status bar).
     compact: bool,
+    /// Open the side pane on the next frame of the library (the viewer's "Details").
+    open_details: bool,
 }
 
 impl PhotosApp {
@@ -117,7 +124,8 @@ impl PhotosApp {
             icons::settings(),
             "asteria-photos-screen-settings",
         )])
-        .with_status_bar();
+        .with_status_bar()
+        .with_side_pane();
         let mut state = State {
             ctx: ctx.clone(),
             paths,
@@ -129,6 +137,7 @@ impl PhotosApp {
             save_blocked,
             open_screen: None,
             compact: false,
+            open_details: false,
         };
         state.connect(false);
         if state.profiles.servers.is_empty() {
@@ -144,7 +153,11 @@ impl PhotosApp {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         self.state.poll();
         self.state.compact = is_compact(ui);
-        self.shell.show(ui, &mut self.state);
+        if self.shell.current() == Some(Screen::Library) && self.state.viewer_open() {
+            self.state.viewer_ui(ui);
+        } else {
+            self.shell.show(ui, &mut self.state);
+        }
         self.state.apply_servers_changes();
         self.apply_open_screen();
     }
@@ -196,9 +209,30 @@ impl PhotosApp {
         }
     }
 
-    /// The item last opened (double-clicked) in the grid.
+    /// The item shown full screen (opened from the grid by a double-click or Enter).
     pub fn opened_item(&self) -> Option<&ItemId> {
         self.state.connection.as_ref()?.browse.opened()
+    }
+
+    /// Select `id` in the listing shown, as a click on it does.
+    pub fn select(&mut self, id: &ItemId) {
+        if let Some(c) = &mut self.state.connection {
+            c.browse.select(id);
+        }
+    }
+
+    /// Send `edit` of the selected item, as the detail pane does. Returns whether it was
+    /// sent (see [`BrowseState::edit`](crate::browse::BrowseState::edit)).
+    pub fn edit(&mut self, edit: Edit) -> bool {
+        match &mut self.state.connection {
+            Some(c) => c.browse.edit(&mut c.session, edit),
+            None => false,
+        }
+    }
+
+    /// What the detail pane shows for the selected item.
+    pub fn detail(&self) -> Option<DetailView<'_>> {
+        self.state.connection.as_ref()?.browse.detail()
     }
 
     /// The Settings page of the servers, as the user works it.
@@ -324,7 +358,26 @@ impl State {
         self.open_screen = Some(Screen::Settings);
     }
 
-    fn library_ui(&mut self, ui: &mut egui::Ui) {
+    /// Whether an item is shown full screen, on a connection that works.
+    fn viewer_open(&self) -> bool {
+        self.connection.as_ref().is_some_and(|c| {
+            matches!(c.session.state(), SessionState::Ready { .. }) && c.browse.opened().is_some()
+        })
+    }
+
+    fn viewer_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(c) = &mut self.connection else {
+            return;
+        };
+        if viewer::ui(ui, &mut c.browse, &mut c.session) == viewer::Asked::Details {
+            self.open_details = true;
+        }
+    }
+
+    fn library_ui(&mut self, ui: &mut egui::Ui, side: &mut Side) {
+        if std::mem::take(&mut self.open_details) {
+            side.open();
+        }
         let Some(c) = &mut self.connection else {
             egui::CentralPanel::default().show(ui, |ui| {
                 let hint = if self.profiles.servers.is_empty() {
@@ -510,10 +563,28 @@ fn is_compact(ui: &egui::Ui) -> bool {
 }
 
 impl ShellApp<Screen> for State {
-    fn screen_ui(&mut self, ui: &mut egui::Ui, screen: Screen, _side: &mut Side) {
+    fn screen_ui(&mut self, ui: &mut egui::Ui, screen: Screen, side: &mut Side) {
         match screen {
-            Screen::Library => self.library_ui(ui),
+            Screen::Library => self.library_ui(ui, side),
             Screen::Settings => self.settings_ui(ui),
+        }
+    }
+
+    /// The selected item's details, beside the library (the side pane is the shell's, so
+    /// other screens show a word about it).
+    fn side_ui(&mut self, ui: &mut egui::Ui, screen: Screen, _side: &mut Side) {
+        let ready = self
+            .connection
+            .as_mut()
+            .filter(|c| matches!(c.session.state(), SessionState::Ready { .. }));
+        match (screen, ready) {
+            (Screen::Library, Some(c)) => c.browse.detail_ui(ui, &mut c.session),
+            (Screen::Library, None) => {
+                ui.weak(tr!(ui, "asteria-photos-detail-none"));
+            }
+            (Screen::Settings, _) => {
+                ui.weak(tr!(ui, "asteria-photos-detail-other-screen"));
+            }
         }
     }
 

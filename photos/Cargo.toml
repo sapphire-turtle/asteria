@@ -21,6 +21,11 @@ corundum-framework = { workspace = true, features = ["gui", "serde", "eframe"] }
 tracing.workspace = true
 
 [dev-dependencies]
+# A real photos server on a temporary library, run in-process (tests/support/server.rs).
+asteria-framework = { path = "../crates/asteria-framework" }
+asteria-framework-server = { path = "../crates/asteria-framework-server" }
+axum.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
 grain-id.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

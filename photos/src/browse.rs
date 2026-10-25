@@ -5,6 +5,9 @@
 //! [`Session`] and drops both together on a switch, so a listing can never outlive its
 //! server. Replies are matched by the [`RequestId`] the state is waiting for; any other reply
 //! (an older page, a folder left since) is ignored.
+//!
+//! It also holds what the detail pane's edits wait for ([`Edits`]) and the item shown full
+//! screen ([`opened`](BrowseState::opened)), for the same reason.
 
 use std::time::{Duration, Instant};
 
@@ -18,6 +21,8 @@ use asteria_framework_client::widgets::thumb_grid::ThumbGrid;
 use corundum_framework::egui;
 use corundum_framework::gui::{icons, tr};
 
+use crate::detail::{DetailView, Edit, Edits};
+
 /// Items asked for per `folder.list` page.
 pub const PAGE_SIZE: u32 = 200;
 /// How often `library.info` is asked again while the server scans.
@@ -26,6 +31,8 @@ pub const SCANNING_POLL: Duration = Duration::from_secs(2);
 pub const IDLE_POLL: Duration = Duration::from_secs(30);
 /// The next page is asked for once the drawn rows come within this many rows of the end.
 const PREFETCH_ROWS: usize = 3;
+/// The viewer asks for the next page once it comes within this many items of the end.
+const PREFETCH_ITEMS: usize = 10;
 
 /// Which page an in-flight `folder.list` is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,8 +56,11 @@ pub struct BrowseState {
     /// Why the last `folder.list` failed, and which page it was; cleared by the next success.
     error: Option<(ClientError, Page)>,
     selected: Option<ItemId>,
-    /// The item last opened (double-clicked, or Enter on the selection).
+    /// The item shown full screen: opened from the grid (double-click, or Enter on the
+    /// selection), closed with Esc.
     opened: Option<ItemId>,
+    /// The detail pane's edits: on their way, waiting to be sent again, failed.
+    edits: Edits,
     /// The `library.info` waited for.
     info: Option<RequestId>,
     next_info: Instant,
@@ -74,6 +84,7 @@ impl BrowseState {
             error: None,
             selected: None,
             opened: None,
+            edits: Edits::default(),
             info: None,
             next_info: Instant::now() + IDLE_POLL,
         }
@@ -98,9 +109,74 @@ impl BrowseState {
         self.selected.as_ref()
     }
 
-    /// The item last opened from the grid, in this folder.
+    /// The item shown full screen, if the viewer is open.
     pub fn opened(&self) -> Option<&ItemId> {
         self.opened.as_ref()
+    }
+
+    /// Select `id` (an item of the listing; anything else is ignored).
+    pub fn select(&mut self, id: &ItemId) {
+        if self.items.iter().any(|i| i.id == *id) {
+            self.selected = Some(id.clone());
+        }
+    }
+
+    /// The selected item, as listed.
+    pub fn selected_item(&self) -> Option<&MediaItem> {
+        let id = self.selected.as_ref()?;
+        self.items.iter().find(|i| i.id == *id)
+    }
+
+    /// What the detail pane shows for the selected item.
+    pub fn detail(&self) -> Option<DetailView<'_>> {
+        Some(DetailView::new(self.selected_item()?, &self.edits))
+    }
+
+    /// Send `edit` of the selected item. Returns whether it was sent: not when nothing is
+    /// selected, the item is read-only, or that field's last edit is still on its way.
+    pub fn edit(&mut self, session: &mut Session, edit: Edit) -> bool {
+        let Some(id) = self.selected.clone() else {
+            return false;
+        };
+        let Some(item) = self.items.iter().find(|i| i.id == id) else {
+            return false;
+        };
+        self.edits.send(session, item, edit)
+    }
+
+    /// Show `id` full screen (and select it).
+    pub fn open_item(&mut self, id: &ItemId) {
+        if self.items.iter().any(|i| i.id == *id) {
+            self.selected = Some(id.clone());
+            self.opened = Some(id.clone());
+        }
+    }
+
+    /// Close the full-screen view; the selection stays.
+    pub fn close_viewer(&mut self) {
+        self.opened = None;
+    }
+
+    /// The opened item's place in the listing.
+    pub(crate) fn opened_index(&self) -> Option<usize> {
+        let id = self.opened.as_ref()?;
+        self.items.iter().position(|i| i.id == *id)
+    }
+
+    /// Move the full-screen view `delta` items on (negative: back), staying within the
+    /// listing; the selection follows. Near the end, the next page is fetched.
+    pub fn step(&mut self, session: &mut Session, delta: isize) {
+        let Some(index) = self.opened_index() else {
+            return;
+        };
+        let last = self.items.len() - 1;
+        let to = index.saturating_add_signed(delta).min(last);
+        let id = self.items[to].id.clone();
+        self.selected = Some(id.clone());
+        self.opened = Some(id);
+        if to + PREFETCH_ITEMS >= self.items.len() {
+            self.load_more(session);
+        }
     }
 
     /// Why the last page could not be loaded.
@@ -168,6 +244,9 @@ impl BrowseState {
 
     /// Take `reply` if it is one this state waits for.
     pub fn handle(&mut self, reply: &Reply) {
+        if self.edits.handle(reply, &mut self.items) {
+            return;
+        }
         if self.info == Some(reply.id) {
             self.info = None;
             return;
@@ -190,6 +269,11 @@ impl BrowseState {
                         {
                             self.selected = None;
                         }
+                        if let Some(open) = &self.opened
+                            && !self.items.iter().any(|i| &i.id == open)
+                        {
+                            self.opened = None;
+                        }
                     }
                     // Later pages carry no folders.
                     Page::Next => self.items.extend(listing.items.iter().cloned()),
@@ -209,6 +293,8 @@ impl BrowseState {
     /// `library.info` again on schedule (often while the server scans). Asks egui to wake
     /// for the next check.
     pub fn tick(&mut self, session: &mut Session, ctx: &egui::Context) {
+        self.edits
+            .tick(session, ctx, self.selected.as_ref(), &self.items);
         if session.take_refetch_listing() {
             self.reload(session);
         }
@@ -329,6 +415,21 @@ impl BrowseState {
             }
         });
         opened
+    }
+
+    /// The detail pane for the selected item, or a word that nothing is selected.
+    pub(crate) fn detail_ui(&mut self, ui: &mut egui::Ui, session: &mut Session) {
+        let found = self
+            .selected
+            .as_ref()
+            .and_then(|id| self.items.iter().find(|i| i.id == *id));
+        let Some(item) = found else {
+            ui.weak(tr!(ui, "asteria-photos-detail-none"));
+            return;
+        };
+        if crate::detail::ui(ui, item, &mut self.edits, session) {
+            self.opened = Some(item.id.clone());
+        }
     }
 
     /// The path as clickable steps, the root first. Returns the step clicked.

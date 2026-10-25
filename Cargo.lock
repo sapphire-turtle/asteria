@@ -396,13 +396,17 @@ dependencies = [
 name = "asteria-photos"
 version = "0.1.0"
 dependencies = [
+ "asteria-framework",
  "asteria-framework-api",
  "asteria-framework-client",
+ "asteria-framework-server",
  "asteria-photos-api",
+ "axum",
  "corundum-framework",
  "grain-id",
  "serde_json",
  "tempfile",
+ "tokio",
  "tracing",
  "url",
 ]
