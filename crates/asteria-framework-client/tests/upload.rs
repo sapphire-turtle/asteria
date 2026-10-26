@@ -487,7 +487,9 @@ fn discard_aborts_session() {
     let file = queue_path(data.path(), &server.library_id).unwrap();
     wait_plain("queue saved", || {
         UploadQueue::load(&file).is_ok_and(|q| {
-            q.groups[0].state == GroupState::Discarded && q.groups[0].files[0].session.is_none()
+            q.groups
+                .first()
+                .is_some_and(|g| g.state == GroupState::Discarded && g.files[0].session.is_none())
         })
     });
 }
@@ -646,7 +648,11 @@ fn cancel_reaches_disk_while_a_request_hangs() {
     // The engine is still stuck in the PUT; the cancel is on disk regardless.
     let file = queue_path(data.path(), &server.library_id).unwrap();
     wait_plain("cancel saved", || {
-        UploadQueue::load(&file).is_ok_and(|q| q.groups[0].state == GroupState::Discarded)
+        UploadQueue::load(&file).is_ok_and(|q| {
+            q.groups
+                .first()
+                .is_some_and(|g| g.state == GroupState::Discarded)
+        })
     });
 
     // Once the PUT returns, the next session aborts the session and sends nothing more.

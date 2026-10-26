@@ -345,6 +345,9 @@ impl Uploads {
     }
 }
 
+/// Known limitation: the saver and the engine are detached threads. If the process exits
+/// right after the drop (or at any time), a change the saver has not written yet is lost,
+/// and so is the outcome of a request still in flight.
 impl Drop for Uploads {
     fn drop(&mut self) {
         self.inner.dropped.store(true, Ordering::Release);
@@ -425,10 +428,20 @@ fn run_engine(inner: Arc<Inner>, rx: mpsc::Receiver<Msg>, cfg: EngineConfig) {
         inner.publish();
         return;
     }
-    Engine::new(inner.clone(), rx, cfg).run();
-    // Whatever the last step applied (a commit's Done, say) is saved by the saver now.
-    inner.lock().closing = true;
-    inner.changed.notify_all();
+    // Set even if the engine panics, so the saver still saves and releases the claim.
+    let _closing = Closing(inner.clone());
+    Engine::new(inner, rx, cfg).run();
+}
+
+/// Tells the saver, when dropped (also on unwind), that the engine has stopped: it then
+/// saves whatever the last step applied (a commit's Done, say) and releases the claim.
+struct Closing(Arc<Inner>);
+
+impl Drop for Closing {
+    fn drop(&mut self) {
+        self.0.lock().closing = true;
+        self.0.changed.notify_all();
+    }
 }
 
 /// Writes the queue file whenever the queue changed; chunk progress alone at most every
@@ -1323,5 +1336,57 @@ impl Engine {
             }
             true
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inner() -> Arc<Inner> {
+        let shared = Shared {
+            queue: UploadQueue::default(),
+            excluded: 0,
+            warnings: Vec::new(),
+            state: UploadsState::Running,
+            orphans: Vec::new(),
+            version: 0,
+            dirty: false,
+            progress: false,
+            closing: false,
+        };
+        let first = snapshot_of(&shared);
+        Arc::new(Inner {
+            shared: Mutex::new(shared),
+            changed: Condvar::new(),
+            published: Mutex::new((0, first)),
+            ctx: egui::Context::default(),
+            dropped: AtomicBool::new(false),
+        })
+    }
+
+    #[test]
+    fn a_panicking_engine_still_releases_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("uploads").join("lib.json");
+        let inner = inner();
+        let held = claim(&path, || false).unwrap();
+        let saver_inner = inner.clone();
+        let saver_path = path.clone();
+        let saver = std::thread::spawn(move || save_loop(saver_inner, saver_path, held));
+        inner.change(Kind::State, |_| true);
+
+        let engine_inner = inner.clone();
+        let engine = std::thread::spawn(move || {
+            let _closing = Closing(engine_inner);
+            panic!("engine failed");
+        });
+        assert!(engine.join().is_err());
+        saver.join().unwrap();
+        // Saved before letting go, and the next engine can claim the file.
+        assert_eq!(UploadQueue::load(&path).unwrap(), UploadQueue::default());
+        let start = Instant::now();
+        let again = claim(&path, || start.elapsed() > Duration::from_secs(5));
+        assert!(again.is_some());
     }
 }
