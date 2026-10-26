@@ -2,19 +2,28 @@
 //! duplicate check, chunked sending and commit (spec §4.7, §5.3). [`Uploads`] is its side on
 //! the UI thread.
 //!
-//! The queue lives in memory behind a mutex shared by both sides. The UI side only changes it
-//! in memory (a decision, a cancel) and wakes the engine; the engine does every bit of disk
-//! and network I/O, and holds the lock only to read or apply a step, never across I/O.
+//! The queue lives in memory behind a mutex shared by three sides, none of which holds it
+//! across I/O:
+//! - the UI side only changes it in memory (a decision, a cancel) and wakes the others;
+//! - the engine thread plans, hashes and talks to the server;
+//! - the saver thread writes the queue file whenever it changed (progress alone at most every
+//!   [`PROGRESS_SAVE_EVERY`]), so a decision reaches the disk even while the engine waits on
+//!   the network.
+//!
 //! Copies for the UI are published to a slot of their own, by the engine at most every
-//! [`PUBLISH_EVERY`] (and before it waits), and by the UI side after a command, so taking
-//! one never waits on the queue.
+//! [`PUBLISH_EVERY`] (and before it waits), by the saver, and by the UI side after a command,
+//! so taking one never waits on the queue.
+//!
+//! One queue file has one owner in the process ([`claim`]): a session that opens on a library
+//! whose previous session is still finishing a request waits for it to release the file,
+//! which it does once that request's outcome is applied and saved.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use asteria_framework::MediaKind;
@@ -55,7 +64,7 @@ pub fn set_retry_backoff(initial: Duration, max: Duration) {
 const CHECK_BATCH: usize = 500;
 /// Chunk progress alone is saved at most this often.
 const PROGRESS_SAVE_EVERY: Duration = Duration::from_secs(2);
-/// How long one hashing pass runs before the engine saves and looks at its messages.
+/// How long one hashing pass runs before the engine looks at its messages.
 const HASH_SLICE: Duration = Duration::from_millis(250);
 /// While busy, the engine publishes a new snapshot at most this often.
 const PUBLISH_EVERY: Duration = Duration::from_millis(100);
@@ -65,6 +74,9 @@ const HASH_PICK: usize = 64;
 /// What the engine is doing, as far as the UI cares.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UploadsState {
+    /// The queue is not loaded yet: the previous session on this library may still be
+    /// finishing a request.
+    Starting,
     /// Sending, or nothing to send.
     Running,
     /// The server could not be reached or asked to wait; the engine tries again after a pause
@@ -113,10 +125,14 @@ struct Shared {
     dirty: bool,
     /// Only `sent` changed since the last save.
     progress: bool,
+    /// The engine has stopped: the saver writes what is left and releases the file.
+    closing: bool,
 }
 
 struct Inner {
     shared: Mutex<Shared>,
+    /// Signalled on every change, for the saver.
+    changed: Condvar,
     /// The latest snapshot, and the version of `shared` it shows.
     published: Mutex<(u64, UploadSnapshot)>,
     ctx: egui::Context,
@@ -127,7 +143,7 @@ struct Inner {
 /// How a change to [`Shared`] is to be saved.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
-    /// A group or file changed: saved after the step.
+    /// A group or file changed: saved at once.
     State,
     /// Only chunk progress: saved every [`PROGRESS_SAVE_EVERY`].
     Progress,
@@ -148,6 +164,7 @@ impl Inner {
                 Kind::State => s.dirty = true,
                 Kind::Progress => s.progress = true,
             }
+            self.changed.notify_all();
         }
         changed
     }
@@ -224,48 +241,40 @@ pub(crate) struct EngineConfig {
 }
 
 impl Uploads {
-    /// Starts the engine on `queue` (as [`UploadQueue::load`] returned it). With an error,
-    /// no engine runs: the snapshot reports the queue unavailable and the file is never
-    /// written.
-    pub(crate) fn start(queue: io::Result<UploadQueue>, cfg: EngineConfig) -> Uploads {
-        let (queue, state) = match queue {
-            Ok(q) => (q, UploadsState::Running),
-            Err(e) => {
-                tracing::warn!(path = %cfg.path.display(), error = %e, "upload queue unavailable");
-                let reason = format!("{}: {e}", cfg.path.display());
-                (UploadQueue::default(), UploadsState::Unavailable { reason })
-            }
-        };
-        let available = state == UploadsState::Running;
+    /// Starts the engine thread for the queue at `cfg.path`. It claims the file (waiting for
+    /// a previous session on this library to let go of it), loads it, and starts the saver.
+    /// If the file cannot be read, nothing runs: the snapshot reports the queue unavailable
+    /// and the file is never written.
+    pub(crate) fn start(cfg: EngineConfig) -> Uploads {
         let shared = Shared {
-            queue,
+            queue: UploadQueue::default(),
             excluded: 0,
             warnings: Vec::new(),
-            state,
+            state: UploadsState::Starting,
             orphans: Vec::new(),
             version: 0,
             dirty: false,
             progress: false,
+            closing: false,
         };
         let first = snapshot_of(&shared);
         let inner = Arc::new(Inner {
             shared: Mutex::new(shared),
+            changed: Condvar::new(),
             published: Mutex::new((0, first)),
             ctx: cfg.ctx.clone(),
             dropped: AtomicBool::new(false),
         });
         let (tx, rx) = mpsc::channel();
-        if available {
-            let engine_inner = inner.clone();
-            let spawned = std::thread::Builder::new()
-                .name("asteria-uploads".into())
-                .spawn(move || Engine::new(engine_inner, rx, cfg).run());
-            if let Err(e) = spawned {
-                inner.set_state(UploadsState::Stopped {
-                    error: ClientError::Io(format!("cannot start the upload thread: {e}")),
-                });
-                inner.publish();
-            }
+        let engine_inner = inner.clone();
+        let spawned = std::thread::Builder::new()
+            .name("asteria-uploads".into())
+            .spawn(move || run_engine(engine_inner, rx, cfg));
+        if let Err(e) = spawned {
+            inner.set_state(UploadsState::Stopped {
+                error: ClientError::Io(format!("cannot start the upload thread: {e}")),
+            });
+            inner.publish();
         }
         Uploads { inner, tx }
     }
@@ -295,20 +304,16 @@ impl Uploads {
         self.command(|q| q.cancel(group))
     }
 
-    /// Removes the finished (done and discarded) groups from the queue.
+    /// Removes the finished (done and discarded) groups from the queue. A discarded group
+    /// whose server sessions are not aborted yet stays until they are.
     pub fn clear_finished(&self) -> bool {
         let changed = self.inner.change(Kind::State, |s| {
             let before = s.queue.groups.len();
-            // A discarded group's sessions may not be aborted yet.
-            let sessions: Vec<String> = s
-                .queue
-                .groups
-                .iter()
-                .filter(|g| g.state == GroupState::Discarded)
-                .flat_map(|g| g.files.iter().filter_map(|f| f.session.clone()))
-                .collect();
-            s.queue.clear_finished();
-            s.orphans.extend(sessions);
+            s.queue.groups.retain(|g| match g.state {
+                GroupState::Done { .. } => false,
+                GroupState::Discarded => g.files.iter().any(|f| f.session.is_some()),
+                _ => true,
+            });
             s.queue.groups.len() != before
         });
         if changed {
@@ -344,6 +349,125 @@ impl Drop for Uploads {
     fn drop(&mut self) {
         self.inner.dropped.store(true, Ordering::Release);
         // Dropping `tx` right after this wakes the engine, which then exits.
+    }
+}
+
+/// The queue files owned by an engine of this process.
+static OWNED: LazyLock<(Mutex<HashSet<PathBuf>>, Condvar)> =
+    LazyLock::new(|| (Mutex::new(HashSet::new()), Condvar::new()));
+
+/// Ownership of one queue file; released when dropped.
+struct Claim(PathBuf);
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        let (owned, released) = &*OWNED;
+        owned
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+        released.notify_all();
+    }
+}
+
+/// Takes ownership of the queue file `path`, waiting while another engine holds it. `None`
+/// if `give_up` turns true first.
+fn claim(path: &Path, give_up: impl Fn() -> bool) -> Option<Claim> {
+    let (owned, released) = &*OWNED;
+    let mut set = owned.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        if give_up() {
+            return None;
+        }
+        if set.insert(path.to_owned()) {
+            return Some(Claim(path.to_owned()));
+        }
+        set = released
+            .wait_timeout(set, Duration::from_millis(50))
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+}
+
+/// The engine thread: claims and loads the queue, starts the saver, runs the engine, and
+/// on the way out lets the saver write the last state and release the file.
+fn run_engine(inner: Arc<Inner>, rx: mpsc::Receiver<Msg>, cfg: EngineConfig) {
+    let cancelled = cfg.cancelled.clone();
+    let stopped = || cancelled.load(Ordering::Acquire) || inner.dropped.load(Ordering::Acquire);
+    let Some(claim) = claim(&cfg.path, stopped) else {
+        return;
+    };
+    match UploadQueue::load(&cfg.path) {
+        Ok(queue) => {
+            let mut s = inner.lock();
+            s.queue = queue;
+            s.state = UploadsState::Running;
+            s.version += 1;
+        }
+        Err(e) => {
+            tracing::warn!(path = %cfg.path.display(), error = %e, "upload queue unavailable");
+            let reason = format!("{}: {e}", cfg.path.display());
+            inner.set_state(UploadsState::Unavailable { reason });
+            inner.publish();
+            return;
+        }
+    }
+    inner.publish();
+    let saver_inner = inner.clone();
+    let path = cfg.path.clone();
+    let spawned = std::thread::Builder::new()
+        .name("asteria-uploads-save".into())
+        .spawn(move || save_loop(saver_inner, path, claim));
+    if let Err(e) = spawned {
+        inner.set_state(UploadsState::Stopped {
+            error: ClientError::Io(format!("cannot start the upload saver: {e}")),
+        });
+        inner.publish();
+        return;
+    }
+    Engine::new(inner.clone(), rx, cfg).run();
+    // Whatever the last step applied (a commit's Done, say) is saved by the saver now.
+    inner.lock().closing = true;
+    inner.changed.notify_all();
+}
+
+/// Writes the queue file whenever the queue changed; chunk progress alone at most every
+/// [`PROGRESS_SAVE_EVERY`]. Once the engine is closing, writes what is left and returns,
+/// releasing `claim`.
+fn save_loop(inner: Arc<Inner>, path: PathBuf, claim: Claim) {
+    let mut last_save: Option<Instant> = None;
+    loop {
+        {
+            let mut s = inner.lock();
+            loop {
+                let progress_due = s.progress
+                    && (s.closing || last_save.is_none_or(|t| t.elapsed() >= PROGRESS_SAVE_EVERY));
+                if s.dirty || progress_due {
+                    break;
+                }
+                if s.closing {
+                    drop(s);
+                    drop(claim);
+                    return;
+                }
+                let wait = match (s.progress, last_save) {
+                    (true, Some(t)) => PROGRESS_SAVE_EVERY.saturating_sub(t.elapsed()),
+                    _ => Duration::from_secs(3600),
+                };
+                s = inner
+                    .changed
+                    .wait_timeout(s, wait)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+            s.dirty = false;
+            s.progress = false;
+        }
+        let groups = inner.publish();
+        if let Err(e) = save_groups(&groups, &path) {
+            tracing::warn!(path = %path.display(), error = %e, "cannot save the upload queue");
+        }
+        last_save = Some(Instant::now());
     }
 }
 
@@ -482,7 +606,6 @@ struct Engine {
     inner: Arc<Inner>,
     rx: mpsc::Receiver<Msg>,
     cancelled: Arc<AtomicBool>,
-    path: PathBuf,
     /// Built on this thread; `None` (and `halted` set) if that failed.
     rpc: Option<RpcClient>,
     gate: Arc<Mutex<Gate>>,
@@ -494,7 +617,6 @@ struct Engine {
     backoff: Option<Duration>,
     /// No server request before this.
     retry_at: Option<Instant>,
-    last_save: Instant,
     last_publish: Instant,
 }
 
@@ -504,7 +626,6 @@ impl Engine {
             inner,
             rx,
             cancelled: cfg.cancelled,
-            path: cfg.path,
             rpc: None,
             gate: cfg.gate,
             health: cfg.health,
@@ -512,7 +633,6 @@ impl Engine {
             halted: None,
             backoff: None,
             retry_at: None,
-            last_save: Instant::now(),
             last_publish: Instant::now(),
         };
         match RpcClient::with_timeout(&cfg.url, cfg.token, UPLOAD_TIMEOUT) {
@@ -537,14 +657,12 @@ impl Engine {
             }
             let wait = match step {
                 Step::Worked => {
-                    self.save(false);
                     self.publish(false);
                     continue;
                 }
                 Step::Idle => None,
                 Step::Wait(d) => Some(d),
             };
-            self.save(true);
             self.publish(true);
             let msg = match wait {
                 None => self.rx.recv().ok(),
@@ -595,30 +713,6 @@ impl Engine {
             self.inner.publish();
             self.last_publish = Instant::now();
         }
-    }
-
-    /// Saves the queue if a group changed, or if chunk progress did and `flush` is set or
-    /// the last save is old enough. Never after the session is gone: a new session may
-    /// already own the file. What is saved is also published.
-    fn save(&mut self, flush: bool) {
-        {
-            let mut s = self.inner.lock();
-            let due = flush || self.last_save.elapsed() >= PROGRESS_SAVE_EVERY;
-            if !(s.dirty || (s.progress && due)) {
-                return;
-            }
-            s.dirty = false;
-            s.progress = false;
-        }
-        let groups = self.inner.publish();
-        self.last_publish = Instant::now();
-        if self.stopped() {
-            return;
-        }
-        if let Err(e) = save_groups(&groups, &self.path) {
-            tracing::warn!(path = %self.path.display(), error = %e, "cannot save the upload queue");
-        }
-        self.last_save = Instant::now();
     }
 
     fn halt(&mut self, error: ClientError) {
@@ -694,7 +788,7 @@ impl Engine {
         result
     }
 
-    fn put(&self, session: &str, index: u64, body: &[u8]) -> Result<(), ClientError> {
+    fn put(&self, session: &str, index: u64, body: Vec<u8>) -> Result<(), ClientError> {
         let Some(rpc) = &self.rpc else {
             return Err(ClientError::Io("no client".into()));
         };
@@ -751,21 +845,22 @@ impl Engine {
         }
     }
 
-    /// Aborts one server session nothing needs any more. Its failure is ignored (the server
-    /// drops idle sessions after 7 days), but still delays the next request if the server
-    /// could not be reached.
+    /// Aborts one server session nothing needs any more. If the server could not be reached
+    /// (or the engine must stop), the session is kept for a later try; any other failure is
+    /// ignored (the server drops idle sessions after 7 days).
     fn abort_some(&mut self) -> Option<Result<(), ClientError>> {
-        let session = {
+        let (session, orphan) = {
             let mut s = self.inner.lock();
             match s.orphans.pop() {
-                Some(session) => session,
+                Some(session) => (session, true),
                 None => s
                     .queue
                     .groups
                     .iter()
                     .filter(|g| g.state == GroupState::Discarded)
                     .flat_map(|g| &g.files)
-                    .find_map(|f| f.session.clone())?,
+                    .find_map(|f| f.session.clone())
+                    .map(|session| (session, false))?,
             }
         };
         let result = self.call::<_, IgnoredAny>(
@@ -774,6 +869,14 @@ impl Engine {
                 session: session.clone(),
             },
         );
+        if let Err(e) = result
+            && (transient(&e) || halting(&e))
+        {
+            if orphan {
+                self.inner.lock().orphans.push(session);
+            }
+            return Some(Err(e));
+        }
         self.inner.change(Kind::State, |s| {
             let mut changed = false;
             for g in s.queue.groups.iter_mut() {
@@ -789,10 +892,7 @@ impl Engine {
             }
             changed
         });
-        Some(match result {
-            Err(e) if transient(&e) || halting(&e) => Err(e),
-            _ => Ok(()),
-        })
+        Some(Ok(()))
     }
 
     /// Asks the server which payloads of the groups being checked it already holds, up to
@@ -953,7 +1053,8 @@ impl Engine {
                         return Ok(());
                     }
                 };
-                match self.put(&session, k, &body) {
+                let len = body.len() as u64;
+                match self.put(&session, k, body) {
                     Ok(()) => {}
                     Err(e) if not_found(&e) => {
                         self.forget_session(hint, id, i, &session, false);
@@ -964,9 +1065,8 @@ impl Engine {
                 if self.stopped() {
                     return Ok(());
                 }
-                sent += body.len() as u64;
+                sent += len;
                 self.set_sent(hint, id, sent);
-                self.save(false);
                 self.publish(false);
             }
             done_before += f.size;
@@ -985,7 +1085,8 @@ impl Engine {
         self.commit(hint, id, placed, allow_duplicate)
     }
 
-    /// `upload.begin` for file `i`; the session is saved at once, so a restart resumes it.
+    /// `upload.begin` for file `i`; the saver writes the session at once, so a restart
+    /// resumes it.
     /// `None` if the group is no longer being sent.
     fn begin(
         &mut self,
@@ -1036,7 +1137,6 @@ impl Engine {
             }
             true
         });
-        self.save(false);
         Ok(recorded.then_some(session))
     }
 
@@ -1112,11 +1212,14 @@ impl Engine {
                 });
                 Ok(())
             }
-            Err(ClientError::Rpc { code, .. }) if code == codes::UPLOAD_INCOMPLETE => {
+            Err(e @ ClientError::Rpc { code, .. }) if code == codes::UPLOAD_INCOMPLETE => {
+                // Status found nothing missing, yet the server says otherwise: send what is
+                // missing again, after a pause, so a server that keeps saying so is not
+                // asked in a tight loop.
                 self.set_group(hint, id, |g| {
                     g.state = GroupState::Uploading { allow_duplicate };
                 });
-                Ok(())
+                Err(e)
             }
             Err(e) if not_found(&e) => {
                 // A session is gone: start the group's sessions over.
@@ -1158,7 +1261,7 @@ impl Engine {
     fn set_sent(&self, hint: usize, id: GroupId, sent: u64) {
         self.inner.change(Kind::Progress, |s| {
             match group_mut(&mut s.queue, id, hint) {
-                Some(g) if g.sent != sent => {
+                Some(g) if uploading(&g.state).is_some() && g.sent != sent => {
                     g.sent = sent;
                     true
                 }

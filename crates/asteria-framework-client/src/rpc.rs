@@ -182,13 +182,13 @@ impl RpcClient {
     /// quota or the chunk size), 400 (a chunk of the wrong length) and 409 (the session is
     /// being committed) are [`ClientError::Rpc`] with the HTTP status as the code and the
     /// answer's body (or the status) as the message.
-    pub fn put_chunk(&self, session: &str, index: u64, body: &[u8]) -> Result<(), ClientError> {
+    pub fn put_chunk(&self, session: &str, index: u64, body: Vec<u8>) -> Result<(), ClientError> {
         let resp = self
             .http
             .put(self.url(&format!("upload/{session}/{index}"))?)
             .header(AUTHORIZATION, self.auth.clone())
             .header(CONTENT_TYPE, "application/octet-stream")
-            .body(body.to_vec())
+            .body(body)
             .send()
             .map_err(transport)?;
         let status = resp.status();

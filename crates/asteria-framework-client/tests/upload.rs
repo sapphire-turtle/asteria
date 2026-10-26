@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use asteria_framework::{Library, MediaKind};
 use asteria_framework_api::codes;
-use asteria_framework_api::{UPLOAD_STATUS, UploadSessionParams, UploadStatus};
+use asteria_framework_api::{UPLOAD_ABORT, UPLOAD_STATUS, UploadSessionParams, UploadStatus};
 use asteria_framework_client::profiles::{ServerProfile, Token};
 use asteria_framework_client::rpc::{ClientError, RpcClient};
 use asteria_framework_client::session::{Session, SessionDirs, SessionState};
@@ -167,6 +167,21 @@ impl TestServer {
                 session: session.into(),
             },
         )
+    }
+}
+
+impl TestServer {
+    /// `upload.abort` of `session`, asked directly (as if it had expired).
+    fn abort(&self, session: &str) {
+        let url = url::Url::parse(&format!("http://{}", self.addr)).unwrap();
+        let rpc = RpcClient::new(&url, Token::new(&self.token)).unwrap();
+        rpc.call::<_, serde_json::Value>(
+            UPLOAD_ABORT,
+            &UploadSessionParams {
+                session: session.into(),
+            },
+        )
+        .unwrap();
     }
 }
 
@@ -366,7 +381,7 @@ fn resumes_after_session_drop() {
     // The chunk in flight when the session went away still lands.
     server.puts.released.store(true, Ordering::SeqCst);
     wait_plain("second chunk stored", || server.puts.stored().len() == 2);
-    std::thread::sleep(Duration::from_millis(200));
+    // The new session waits for the old engine to save and let go of the queue.
 
     let mut session = open(&server.profile(), data.path());
     wait_for(&mut session, "done after resuming", |s| {
@@ -551,19 +566,17 @@ fn switching_servers_pauses_queue() {
 
     // A's queue is still on disk, unfinished.
     let file = queue_path(data.path(), &a.library_id).unwrap();
-    let q = UploadQueue::load(&file).unwrap();
-    assert_eq!(q.groups.len(), 1);
-    assert!(
-        matches!(q.groups[0].state, GroupState::Uploading { .. }),
-        "{:?}",
-        q.groups[0].state
-    );
-    assert!(q.groups[0].files[0].session.is_some());
+    wait_plain("A's queue saved with its session", || {
+        UploadQueue::load(&file).is_ok_and(|q| {
+            q.groups.len() == 1
+                && matches!(q.groups[0].state, GroupState::Uploading { .. })
+                && q.groups[0].files[0].session.is_some()
+        })
+    });
 
     // Back on A, it carries on.
     a.puts.released.store(true, Ordering::SeqCst);
     wait_plain("held chunk stored", || a.puts.stored().len() == 1);
-    std::thread::sleep(Duration::from_millis(200));
     let mut on_a = open(&a.profile(), data.path());
     wait_for(&mut on_a, "done on A", |s| {
         s.groups.len() == 1 && is_done(&s.groups[0])
@@ -612,4 +625,101 @@ fn ten_thousand_files_do_not_block_poll() {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[test]
+fn cancel_reaches_disk_while_a_request_hangs() {
+    let server = TestServer::start();
+    let data = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let path = write(src.path(), "big.jpg", &padded("blue.jpg", CHUNK + 1000));
+    server.puts.hold_from.store(1, Ordering::SeqCst);
+
+    let mut session = open(&server.profile(), data.path());
+    session.uploads().unwrap().drop_paths(vec![path]);
+    wait_until(&mut session, "second chunk held", || {
+        server.puts.arrived.load(Ordering::SeqCst) == 2
+    });
+    let id = session.uploads().unwrap().snapshot().groups[0].id;
+    assert!(session.uploads().unwrap().cancel(id));
+    drop(session);
+    // The engine is still stuck in the PUT; the cancel is on disk regardless.
+    let file = queue_path(data.path(), &server.library_id).unwrap();
+    wait_plain("cancel saved", || {
+        UploadQueue::load(&file).is_ok_and(|q| q.groups[0].state == GroupState::Discarded)
+    });
+
+    // Once the PUT returns, the next session aborts the session and sends nothing more.
+    server.puts.released.store(true, Ordering::SeqCst);
+    let mut session = open(&server.profile(), data.path());
+    let snap = wait_for(&mut session, "session aborted", |s| {
+        s.groups.len() == 1 && s.groups[0].files[0].session.is_none()
+    });
+    assert_eq!(snap.groups[0].state, GroupState::Discarded);
+    assert_eq!(server.puts.stored(), vec![0, 1]);
+    assert!(!server.inbox("big.jpg").exists());
+}
+
+#[test]
+fn unauthorized_stops_the_engine() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = attempts.clone();
+    let addr = serve(move |req| match req.rpc() {
+        Some((id, m)) if m == "server.info" => StubResponse::rpc_result(id, photos_server_info()),
+        Some((id, m)) if m == "library.info" => {
+            StubResponse::rpc_result(id, library_info("unauthorized-lib"))
+        }
+        _ => {
+            counter.fetch_add(1, Ordering::SeqCst);
+            StubResponse::new(401, Vec::new())
+        }
+    });
+    let data = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let path = write(src.path(), "blue.jpg", &fixture("blue.jpg"));
+    let mut session = open(&profile(addr, "t"), data.path());
+    session.uploads().unwrap().drop_paths(vec![path]);
+    let snap = wait_for(&mut session, "stopped", |s| {
+        matches!(
+            s.state,
+            UploadsState::Stopped {
+                error: ClientError::Unauthorized
+            }
+        )
+    });
+    assert_eq!(snap.groups[0].state, GroupState::Checking);
+    // Stopped means no more tries, unlike a back-off (50 ms here).
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(500) {
+        session.poll();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn expired_session_begins_again() {
+    let server = TestServer::start();
+    let data = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let bytes = padded("blue.jpg", CHUNK + 1000);
+    let path = write(src.path(), "big.jpg", &bytes);
+    server.puts.hold_from.store(0, Ordering::SeqCst);
+
+    let mut session = open(&server.profile(), data.path());
+    session.uploads().unwrap().drop_paths(vec![path]);
+    wait_until(&mut session, "first chunk held", || {
+        server.puts.arrived.load(Ordering::SeqCst) == 1
+    });
+    let snap = wait_for(&mut session, "session known", |s| {
+        s.groups[0].files[0].session.is_some()
+    });
+    let first = snap.groups[0].files[0].session.clone().unwrap();
+    // The session disappears on the server while its chunk is on the way.
+    server.abort(&first);
+    server.puts.released.store(true, Ordering::SeqCst);
+    wait_for(&mut session, "done", |s| is_done(&s.groups[0]));
+    assert_eq!(fs::read(server.inbox("big.jpg")).unwrap(), bytes);
+    // The held chunk found no session; both chunks went to the new one.
+    assert_eq!(server.puts.stored(), vec![0, 1]);
 }

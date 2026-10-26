@@ -19,7 +19,7 @@ use crate::images::ImageLoader;
 use crate::media_cache::MediaCache;
 use crate::profiles::{ProfileId, ServerProfile};
 use crate::rpc::{ClientError, RpcClient};
-use crate::upload::queue::{UploadQueue, queue_path};
+use crate::upload::queue::queue_path;
 use crate::upload::{EngineConfig, Uploads};
 use crate::worker::{Job, Worker};
 
@@ -193,8 +193,9 @@ impl Session {
     /// Like [`open`](Self::open), and as soon as the handshake learns the library id:
     /// - with `dirs.cache`, opens the library's [`MediaCache`] under it, and trims it on a
     ///   short-lived thread of its own (not the request worker, not the UI thread);
-    /// - with `dirs.data`, loads the library's upload queue from there and starts the upload
-    ///   engine on it.
+    /// - with `dirs.data`, starts the upload engine on the library's queue there (it loads
+    ///   the queue on its own thread, once a previous session on the library has let go of
+    ///   it; see [`UploadsState::Starting`](crate::upload::UploadsState::Starting)).
     ///
     /// Both are available, from [`media_cache`](Self::media_cache) and
     /// [`uploads`](Self::uploads), by the time the state is [`SessionState::Ready`].
@@ -271,9 +272,8 @@ impl Session {
                     if let (Ok(library), Some(root)) = (&result, &dirs.data) {
                         match queue_path(root, &library.library_id) {
                             Some(path) => {
-                                let queue = UploadQueue::load(&path);
-                                let _ = uploads
-                                    .set(Uploads::start(queue, EngineConfig { path, ..engine }));
+                                let _ =
+                                    uploads.set(Uploads::start(EngineConfig { path, ..engine }));
                             }
                             None => tracing::warn!("library id is not a safe file name"),
                         }
