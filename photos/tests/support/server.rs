@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use asteria_framework::{Library, MediaKind};
+use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
     AppState, Cache, MediaFilter, Processor, ServerConfig, TokenEntry, Tokens, new_token, router,
     scan, spawn_writer, token_hash,
@@ -61,6 +62,7 @@ impl TestServer {
             1,
             Duration::from_secs(60),
         ));
+        let uploads = Arc::new(UploadStore::open(lib.root()).unwrap());
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -81,6 +83,7 @@ impl TestServer {
                 rescan,
                 Arc::new(Photos),
                 processor,
+                uploads,
             );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();

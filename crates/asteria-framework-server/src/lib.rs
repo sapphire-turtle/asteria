@@ -14,6 +14,7 @@ pub mod scan;
 pub mod state;
 pub mod upload;
 pub mod upload_commit;
+mod upload_http;
 pub mod watch;
 pub mod writer;
 

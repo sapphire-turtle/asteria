@@ -6,11 +6,12 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use asteria_framework::fsutil::cleanup_tmp_files;
 use asteria_framework::paths::META_DIR;
 use asteria_framework::{Library, MediaKind, UserId};
+use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::watch::{DEFAULT_DEBOUNCE, DEFAULT_PERIOD};
 use asteria_framework_server::{
     AppState, Cache, MediaFilter, Processor, ScanLoop, ServerConfig, TokenEntry, Tokens,
@@ -28,6 +29,8 @@ const RENDER_JOBS: usize = 2;
 const RENDER_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long open connections get to finish once shutdown starts.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+/// How often stale upload sessions are looked for.
+const PURGE_PERIOD: Duration = Duration::from_secs(60 * 60);
 const LOCK_FILE: &str = "server.lock";
 
 #[derive(Parser)]
@@ -203,11 +206,13 @@ fn serve(config_path: &Path, listen: Option<SocketAddr>) -> AnyResult<()> {
     let processor = Arc::new(Processor::new(thumbs, RENDER_JOBS, RENDER_TIMEOUT));
     processor.sweep_tmp();
     let tokens = Arc::new(Tokens::from_config(&cfg));
+    // After the tmp cleanup above, so that nothing live under the library is swept.
+    let uploads = Arc::new(UploadStore::open(library.root())?);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = rt.block_on(run(library, cache, processor, tokens, listen));
+    let result = rt.block_on(run(library, cache, processor, tokens, uploads, listen));
     // Connections cut off after the grace period may still have tasks; do not wait for them.
     rt.shutdown_timeout(Duration::from_secs(1));
     result
@@ -239,6 +244,7 @@ async fn run(
     cache: Arc<Cache>,
     processor: Arc<Processor>,
     tokens: Arc<Tokens>,
+    uploads: Arc<UploadStore>,
     listen: SocketAddr,
 ) -> AnyResult<()> {
     let (writer, writer_handle) = spawn_writer(library.clone(), cache.clone());
@@ -257,6 +263,7 @@ async fn run(
         rescan_tx,
         filter.clone(),
         processor,
+        uploads.clone(),
     );
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "listening");
@@ -268,6 +275,7 @@ async fn run(
             .with_graceful_shutdown(async move { token.cancelled().await })
             .await
     });
+    let purge = tokio::spawn(purge_loop(uploads, shutdown.clone()));
     let mut scan = spawn_scan_loop(ScanLoop {
         library,
         cache: cache.clone(),
@@ -325,6 +333,7 @@ async fn run(
             }
         }
     }
+    purge.abort();
     if !scan_done && let Err(e) = scan.await {
         failure.get_or_insert(e.into());
     }
@@ -343,6 +352,23 @@ async fn run(
         None => {
             tracing::info!("stopped");
             Ok(())
+        }
+    }
+}
+
+/// Removes stale upload sessions at startup and then every `PURGE_PERIOD`.
+async fn purge_loop(uploads: Arc<UploadStore>, shutdown: CancellationToken) {
+    let mut tick = tokio::time::interval(PURGE_PERIOD);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            () = shutdown.cancelled() => return,
+        }
+        let store = uploads.clone();
+        match tokio::task::spawn_blocking(move || store.purge_expired(SystemTime::now())).await {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(removed, "removed stale upload sessions"),
+            Err(e) => tracing::error!(error = %e, "upload purge failed"),
         }
     }
 }

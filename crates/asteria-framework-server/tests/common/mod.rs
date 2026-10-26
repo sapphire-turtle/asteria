@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use asteria_framework::{Library, MediaKind, UserId};
+use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
     AppState, Cache, MediaFilter, Processor, ServerConfig, TokenEntry, Tokens, new_token, router,
     scan, spawn_writer, token_hash,
@@ -87,6 +88,7 @@ pub fn env_with(make: impl FnOnce(PathBuf) -> Processor) -> Env {
         rescan,
         Arc::new(Photos),
         processor.clone(),
+        Arc::new(UploadStore::open(&root).unwrap()),
     );
     Env {
         _dir: dir,

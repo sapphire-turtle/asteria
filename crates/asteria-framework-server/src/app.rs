@@ -1,15 +1,17 @@
 //! The axum router and its bearer-token authentication.
 
+use asteria_framework_api::UPLOAD_CHUNK_SIZE;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 
 use crate::media_http::media;
 use crate::rpc::rpc;
 use crate::state::AppState;
+use crate::upload_http::upload_chunk;
 
 /// Largest accepted request body. Bigger bodies get 413 before reaching `/rpc`: the only
 /// non-200 answer from `/rpc` besides the 401 of the auth layer.
@@ -21,6 +23,11 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/rpc", post(rpc))
         .route("/media/{id}/{what}", get(media))
+        // A chunk is far bigger than an RPC body; only this route lifts the limit.
+        .route(
+            "/upload/{session}/{chunk}",
+            put(upload_chunk).layer(DefaultBodyLimit::max(UPLOAD_CHUNK_SIZE as usize)),
+        )
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state)
