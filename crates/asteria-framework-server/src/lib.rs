@@ -11,6 +11,7 @@ pub mod process;
 mod rpc;
 pub mod scan;
 pub mod state;
+pub mod upload;
 pub mod watch;
 pub mod writer;
 
