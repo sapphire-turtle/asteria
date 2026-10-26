@@ -8,21 +8,34 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::*;
+use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const CHUNK: usize = 8 * 1024 * 1024;
 
 async fn put(app: &Router, token: Option<&str>, uri: &str, body: Vec<u8>) -> StatusCode {
+    put_full(app, token, uri, body).await.0
+}
+
+async fn put_full(
+    app: &Router,
+    token: Option<&str>,
+    uri: &str,
+    body: Vec<u8>,
+) -> (StatusCode, Vec<u8>) {
     let mut req = Request::put(uri);
     if let Some(t) = token {
         req = req.header("authorization", format!("Bearer {t}"));
     }
-    app.clone()
+    let resp = app
+        .clone()
         .oneshot(req.body(Body::from(body)).unwrap())
         .await
-        .unwrap()
-        .status()
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, bytes.to_vec())
 }
 
 /// A JPEG padded to `len` bytes (trailing bytes are ignored by decoders).
@@ -118,8 +131,16 @@ async fn chunk_over_limit_is_413() {
 #[tokio::test]
 async fn chunk_without_token_is_401() {
     let e = env();
-    let s = put(&e.app, None, "/upload/x/0", vec![1]).await;
+    let (s, body) = put_full(&e.app, None, "/upload/x/0", vec![1]).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn non_numeric_chunk_is_400() {
+    let e = env();
+    let s = put(&e.app, Some(&e.owner_token), "/upload/x/abc", vec![1]).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

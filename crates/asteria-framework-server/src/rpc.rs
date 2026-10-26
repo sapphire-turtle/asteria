@@ -290,9 +290,11 @@ async fn dispatch(
                 .await
                 .map_err(upload_err)?;
             if matches!(result, UploadCommitResult::Placed { .. }) {
-                // Same as `library.rescan`: a full queue means one is already pending.
+                // Same as `library.rescan`: a full queue means one is already pending. The
+                // files are placed and their sessions gone, so a failure here must not
+                // turn the response into an error (a retry would only get NotFound).
                 if let Err(TrySendError::Closed(())) = state.rescan().try_send(()) {
-                    return Err(internal("rescan task stopped"));
+                    tracing::warn!("rescan task stopped; the placed files wait for the next scan");
                 }
             }
             to_value(result)
