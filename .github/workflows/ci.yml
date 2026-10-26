@@ -7,4 +7,27 @@ jobs:
   ci:
     uses: sapphire-turtle/sapphire-framework/.github/workflows/shared-rust-ci.yml@main
     with:
-      linux-packages: libvips-tools ffmpeg
+      # libvips-tools and ffmpeg: the server's tests. The rest: the window system
+      # libraries eframe (winit, wgpu) builds against.
+      linux-packages: libvips-tools ffmpeg libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev
+
+  # The client library must keep building for iOS: a dependency or feature that
+  # does not support it should fail on the pull request, not when the iOS app is
+  # first built.
+  ios-check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # With no argument, `rustup toolchain install` installs the toolchain that
+      # rust-toolchain.toml names (and does nothing if it is already there).
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+
+      - name: Add the iOS target
+        run: rustup target add aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check the client library for iOS
+        run: cargo check -p asteria-framework-client --target aarch64-apple-ios --locked

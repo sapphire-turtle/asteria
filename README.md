@@ -18,3 +18,19 @@ asteria-photos-server serve --config ~/.config/asteria/photos.toml
 - Tokens travel in clear text (plain HTTP). Expose the server only on a LAN or a VPN such as Tailscale, never directly on the internet.
 - One server per library: `serve` holds a lock on `<library>/.asteria/server.lock` and a second one exits with an error.
 - Thumbnails need `vipsthumbnail` (libvips-tools) and, for videos, `ffmpeg`. Set `RUST_LOG` to change log verbosity (default `info`).
+
+## Running the photos client
+
+```sh
+# On Linux, eframe needs a few system packages (Debian/Ubuntu names):
+sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev
+cargo run -p asteria-photos --release
+```
+
+- The client browses a library served by `asteria-photos-server`; it does not need libvips or ffmpeg (the server makes the thumbnails).
+- On first start there is no server yet and Settings opens on the Servers page with the add form. Enter a name, the address (such as `http://192.168.1.10:7810`) and the access token that `init` (or `token add`) printed, press "Test connection" to check them, then Save. Open Library on the rail to see the photos.
+- You can register several servers. The status bar (bottom right; on a narrow window only its icon) shows which one is in use and whether it is connected; pick another one from its menu to switch, or choose "Manage servers..." (Settings › Servers) to add, edit or delete. The server in use is remembered for the next start, and switching always starts at the library's root.
+- If the server cannot be reached, rejects the token or speaks an incompatible version, the library shows the reason with a "Try again" button; there is no offline cache yet.
+- Servers and tokens are stored in `servers.toml` in the app's config directory (`~/.config/asteria-photos/` on Linux, `~/Library/Application Support/asteria-photos/` on macOS, `%APPDATA%\asteria-photos\` on Windows). On Unix the file is readable only by you (mode 0600); the tokens are not stored in the OS keychain. Downloaded thumbnails are cached under the app's cache directory (`~/.cache/asteria-photos/` on Linux) and can be deleted safely.
+- Select a photo (click) to see its preview and details on the right. In the grid the arrow keys move the selection, and Enter opens the selected photo full screen (as a double-click does): there Left/Right step through the folder and Esc closes the viewer.
+- In the details pane you can set the rating (click a star; click the same star again to clear it), the colour label, the keywords and hierarchical tags, and the description (saved when the field loses focus). Edits are written to the library's sidecar files by the server. A photo whose sidecar the server cannot read is shown read-only, with the reason.

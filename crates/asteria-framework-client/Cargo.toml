@@ -1,0 +1,32 @@
+[package]
+name = "asteria-framework-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+asteria-framework-api = { path = "../asteria-framework-api", version = "2.1.0" }
+bytes.workspace = true
+# egui only: no eframe, so the crate also builds for iOS and Android.
+corundum-framework = { workspace = true, features = ["gui", "serde"] }
+reqwest.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+grain-id.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# A real server on a temporary library, run in-process (as in asteria-framework-server's tests).
+asteria-framework = { path = "../asteria-framework" }
+asteria-framework-server = { path = "../asteria-framework-server" }
+asteria-photos-api = { path = "../asteria-photos-api" }
+asteria-music-api = { path = "../asteria-music-api" }
+axum.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
