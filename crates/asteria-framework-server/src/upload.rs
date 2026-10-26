@@ -212,13 +212,10 @@ impl UploadStore {
             )));
         }
 
-        let session_lock = self.session_lock(session);
-        let _guard = lock(&session_lock);
-        let dir = self.dir.join(session);
-        if !dir.join("session.json").is_file() {
-            // Aborted or purged while we waited.
-            return Err(UploadError::NotFound);
-        }
+        self.locked(session, |dir| Self::write_chunk(dir, index, body))
+    }
+
+    fn write_chunk(dir: &Path, index: u64, body: &[u8]) -> Result<(), UploadError> {
         let mut data = OpenOptions::new().write(true).open(dir.join("data"))?;
         data.seek(SeekFrom::Start(index * UPLOAD_CHUNK_SIZE))?;
         data.write_all(body)?;
@@ -235,7 +232,7 @@ impl UploadStore {
     pub fn status(&self, owner: UserId, session: &str) -> Result<UploadStatus, UploadError> {
         let s = self.owned(owner, session)?;
         let missing = self
-            .read_received(session)?
+            .read_received(session, s.size)?
             .iter()
             .enumerate()
             .filter(|(_, b)| **b == 0)
@@ -255,7 +252,7 @@ impl UploadStore {
 
     pub fn completed(&self, owner: UserId, session: &str) -> Result<CompletedUpload, UploadError> {
         let s = self.owned(owner, session)?;
-        if self.read_received(session)?.contains(&0) {
+        if self.read_received(session, s.size)?.contains(&0) {
             return Err(UploadError::Incomplete);
         }
         let file_hash = s
@@ -284,6 +281,8 @@ impl UploadStore {
     /// Removes sessions with no chunk for 7 days, plus anything that is not a
     /// readable session. Returns how many were removed.
     pub fn purge_expired(&self, now: SystemTime) -> usize {
+        // `begin` creates a directory before its session.json exists; wait it out.
+        let _begin = lock(&self.begin_lock);
         let Ok(entries) = fs::read_dir(&self.dir) else {
             return 0;
         };
@@ -340,10 +339,29 @@ impl UploadStore {
         serde_json::from_str(&text).map_err(|e| UploadError::Io(e.to_string()))
     }
 
-    fn read_received(&self, session: &str) -> Result<Vec<u8>, UploadError> {
+    fn read_received(&self, session: &str, size: u64) -> Result<Vec<u8>, UploadError> {
+        let received = self.locked(session, |dir| Ok(fs::read(dir.join("received"))?))?;
+        if received.len() as u64 != chunk_count(size) {
+            return Err(UploadError::Io("received map has the wrong length".into()));
+        }
+        Ok(received)
+    }
+
+    /// Runs `f` on the session directory under the session's lock. A session that is
+    /// gone by then (aborted or purged meanwhile) is `NotFound`, and leaves no lock behind.
+    fn locked<T>(
+        &self,
+        session: &str,
+        f: impl FnOnce(&Path) -> Result<T, UploadError>,
+    ) -> Result<T, UploadError> {
         let session_lock = self.session_lock(session);
         let _guard = lock(&session_lock);
-        Ok(fs::read(self.dir.join(session).join("received"))?)
+        let dir = self.dir.join(session);
+        if !dir.join("session.json").is_file() {
+            lock(&self.locks).remove(session);
+            return Err(UploadError::NotFound);
+        }
+        f(&dir)
     }
 
     /// The session, if it exists and belongs to `owner`; otherwise `NotFound`.

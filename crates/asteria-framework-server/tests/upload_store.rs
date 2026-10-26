@@ -261,3 +261,103 @@ fn purge_removes_only_stale_sessions() {
     assert!(!uploads.join("junk").exists());
     assert!(!uploads.join(&broken).exists());
 }
+
+#[test]
+fn exact_multiple_and_single_chunk_sizes() {
+    let (_dir, store) = store();
+    let me = user();
+    for chunks in [1u64, 2] {
+        let data = pattern(chunks * CHUNK);
+        let s = store.begin(me, data.len() as u64, hash()).unwrap().session;
+        // The last chunk is a full chunk, so one byte short or long is wrong.
+        let last = chunks - 1;
+        assert!(matches!(
+            store.put_chunk(me, &s, last, &data[..CHUNK as usize - 1]),
+            Err(UploadError::Invalid(_))
+        ));
+        let mut long = slice(&data, last).to_vec();
+        long.push(0);
+        assert!(matches!(
+            store.put_chunk(me, &s, last, &long),
+            Err(UploadError::Invalid(_))
+        ));
+        for i in 0..chunks {
+            store.put_chunk(me, &s, i, slice(&data, i)).unwrap();
+        }
+        let done = store.completed(me, &s).unwrap();
+        assert_eq!(fs::read(done.data_path).unwrap(), data);
+    }
+}
+
+#[test]
+fn out_of_range_index_with_a_well_formed_body() {
+    let (_dir, store) = store();
+    let me = user();
+    let s = store.begin(me, CHUNK, hash()).unwrap().session;
+    let full = vec![1u8; CHUNK as usize];
+    assert!(matches!(
+        store.put_chunk(me, &s, 1, &full),
+        Err(UploadError::Invalid(_))
+    ));
+    assert!(matches!(
+        store.put_chunk(me, &s, u64::MAX, &full),
+        Err(UploadError::Invalid(_))
+    ));
+}
+
+#[test]
+fn vanished_session_is_not_found() {
+    let (dir, store) = store();
+    let me = user();
+    let s = store.begin(me, 10, hash()).unwrap().session;
+    // Gone after the ownership check would have passed.
+    fs::remove_dir_all(dir.path().join(".asteria/uploads").join(&s)).unwrap();
+    assert!(matches!(store.status(me, &s), Err(UploadError::NotFound)));
+    assert!(matches!(
+        store.completed(me, &s),
+        Err(UploadError::NotFound)
+    ));
+    assert!(matches!(
+        store.put_chunk(me, &s, 0, &[0; 10]),
+        Err(UploadError::NotFound)
+    ));
+}
+
+#[test]
+fn short_received_map_is_an_error() {
+    let (dir, store) = store();
+    let me = user();
+    let s = store.begin(me, 2 * CHUNK, hash()).unwrap().session;
+    let received = dir
+        .path()
+        .join(".asteria/uploads")
+        .join(&s)
+        .join("received");
+    fs::write(received, [1u8]).unwrap();
+    assert!(matches!(store.completed(me, &s), Err(UploadError::Io(_))));
+    assert!(matches!(store.status(me, &s), Err(UploadError::Io(_))));
+}
+
+#[test]
+fn purge_waits_for_a_begin_in_progress() {
+    // A directory mid-creation has no session.json yet; purge must not see it.
+    // Hammer begin and purge together: no session may vanish.
+    let (_dir, store) = store();
+    let store = std::sync::Arc::new(store);
+    let me = user();
+    let purger = {
+        let store = store.clone();
+        std::thread::spawn(move || {
+            for _ in 0..200 {
+                store.purge_expired(SystemTime::now());
+            }
+        })
+    };
+    let sessions: Vec<String> = (0..50)
+        .map(|_| store.begin(me, 10, hash()).unwrap().session)
+        .collect();
+    purger.join().unwrap();
+    for s in sessions {
+        assert!(store.status(me, &s).is_ok());
+    }
+}
