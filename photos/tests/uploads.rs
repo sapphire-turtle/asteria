@@ -202,3 +202,55 @@ fn i18n_keys_exist_in_both_languages() {
         Vec::<String>::new()
     );
 }
+
+/// A click at `pos`: the pointer moves there, then presses and releases in the next frames.
+fn click(ctx: &egui::Context, app: &mut PhotosApp, pos: egui::Pos2) {
+    let button = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    frame_with(ctx, app, vec![egui::Event::PointerMoved(pos)]);
+    frame_with(ctx, app, vec![button(true)]);
+    frame_with(ctx, app, vec![button(false)]);
+    frame(ctx, app);
+}
+
+#[test]
+fn clicking_the_status_bar_count_opens_uploads() {
+    let server = TestServer::start(&["existing.jpg"], |_| {});
+    let (fx, ctx, mut app) = start(&server);
+    let src = tempfile::tempdir().unwrap();
+    std::fs::copy(red(), src.path().join("again.jpg")).unwrap();
+    app.drop_files(vec![src.path().join("again.jpg")]);
+    run_until(
+        &ctx,
+        &mut app,
+        "the duplicate",
+        |_| {},
+        |app| snapshot(app).is_some_and(|s| s.summary.awaiting == 1),
+    );
+    drop(app);
+
+    // The next run finds the waiting group in the queue and opens on the library.
+    let ctx = egui::Context::default();
+    let mut app = PhotosApp::new(fx.paths.clone(), &ctx);
+    run_until(
+        &ctx,
+        &mut app,
+        "the queue",
+        |_| {},
+        |app| snapshot(app).is_some_and(|s| s.summary.awaiting == 1),
+    );
+    assert_eq!(app.current_screen(), Some(Screen::Library));
+    // The count sits at the left of the status bar, after the server switcher; sweep the
+    // bar from the right, where there is nothing, until something opens Uploads.
+    let y = 700.0 - 12.0;
+    let mut x = 600.0;
+    while x > 0.0 && app.current_screen() != Some(Screen::Uploads) {
+        click(&ctx, &mut app, egui::pos2(x, y));
+        x -= 8.0;
+    }
+    assert_eq!(app.current_screen(), Some(Screen::Uploads));
+}

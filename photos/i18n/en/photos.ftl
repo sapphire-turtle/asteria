@@ -111,3 +111,5 @@ asteria-photos-drop-refused = Not connected to a server, so the files were not s
 asteria-photos-status-uploads = ↑ { $done } / { $total }
 asteria-photos-status-uploads-awaiting = ↑ { $done } / { $total } · { $count } to decide
 asteria-photos-status-uploads-hover = Open the uploads
+asteria-photos-drop-starting = Still connecting; try again in a moment.
+asteria-photos-drop-no-data = Uploads are not available: this app has no place to keep the queue.

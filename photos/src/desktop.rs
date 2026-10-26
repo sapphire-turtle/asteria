@@ -45,6 +45,7 @@ pub(crate) fn drop_overlay(ctx: &egui::Context) {
     let screen = ctx.content_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
+        // `unique` hashes its source: the same id every frame.
         egui::Id::unique("asteria-photos-drop-overlay"),
     ));
     painter.rect_filled(

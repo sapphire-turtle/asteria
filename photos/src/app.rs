@@ -274,7 +274,13 @@ impl PhotosApp {
                 self.apply_open_screen();
             }
             None => {
-                let text = tr!(self.state.ctx, "asteria-photos-drop-refused");
+                let c = self.state.connection.as_ref();
+                let key = match c.map(|c| c.session.state()) {
+                    None | Some(SessionState::Failed(_)) => "asteria-photos-drop-refused",
+                    Some(_) if self.state.paths.data.is_none() => "asteria-photos-drop-no-data",
+                    Some(_) => "asteria-photos-drop-starting",
+                };
+                let text = tr!(self.state.ctx, key);
                 self.state.notice = Some((text, Instant::now()));
                 self.state.ctx.request_repaint();
             }
@@ -520,14 +526,7 @@ impl State {
 
     /// The uploads' count (while any group is unfinished) and a refused drop, on the status bar.
     fn uploads_status_ui(&mut self, ui: &mut egui::Ui) {
-        if let Some((text, since)) = &self.notice {
-            if let Some(left) = NOTICE_FOR.checked_sub(since.elapsed()) {
-                ui.colored_label(ui.visuals().warn_fg_color, text.as_str());
-                ui.ctx().request_repaint_after(left);
-            } else {
-                self.notice = None;
-            }
-        }
+        self.notice_ui(ui);
         let Some(uploads) = self.connection.as_ref().and_then(|c| c.session.uploads()) else {
             return;
         };
@@ -559,6 +558,18 @@ impl State {
             .clicked()
         {
             self.open_screen = Some(Screen::Uploads);
+        }
+    }
+
+    /// A refused drop's notice, until it expires.
+    fn notice_ui(&mut self, ui: &mut egui::Ui) {
+        if let Some((text, since)) = &self.notice {
+            if let Some(left) = NOTICE_FOR.checked_sub(since.elapsed()) {
+                ui.colored_label(ui.visuals().warn_fg_color, text.as_str());
+                ui.ctx().request_repaint_after(left);
+            } else {
+                self.notice = None;
+            }
         }
     }
 
@@ -688,6 +699,10 @@ fn is_compact(ui: &egui::Ui) -> bool {
 
 impl ShellApp<Screen> for State {
     fn screen_ui(&mut self, ui: &mut egui::Ui, screen: Screen, side: &mut Side) {
+        // Narrow, there is no status bar to carry a refused drop's notice.
+        if self.compact {
+            self.notice_ui(ui);
+        }
         match screen {
             Screen::Library => self.library_ui(ui, side),
             Screen::Uploads => {

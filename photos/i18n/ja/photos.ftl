@@ -108,3 +108,5 @@ asteria-photos-drop-refused = サーバーにつながっていないので送�
 asteria-photos-status-uploads = ↑ { $done } / { $total }
 asteria-photos-status-uploads-awaiting = ↑ { $done } / { $total }・判断待ち { $count }
 asteria-photos-status-uploads-hover = アップロードを開く
+asteria-photos-drop-starting = 接続中です。少し待ってからもう一度送ってください
+asteria-photos-drop-no-data = アップロードは使えません：キューを置く場所がありません

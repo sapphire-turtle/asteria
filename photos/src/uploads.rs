@@ -261,7 +261,10 @@ fn row(
                 if offered.keep {
                     // A waiting row opens to show the files the library already has.
                     let open = view.opened == Some(group.id);
-                    if ui.selectable_label(open, name.as_str()).clicked() {
+                    if ui
+                        .add(egui::Button::selectable(open, name.as_str()).truncate())
+                        .clicked()
+                    {
                         view.opened = (!open).then_some(group.id);
                     }
                 } else {
