@@ -8,5 +8,6 @@ pub mod profiles;
 pub mod rpc;
 pub mod session;
 pub mod settings;
+pub mod upload;
 pub mod widgets;
 mod worker;
