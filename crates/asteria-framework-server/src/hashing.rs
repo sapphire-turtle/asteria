@@ -8,7 +8,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use asteria_framework::hash::{HashScope, content_hash, file_hash};
+use asteria_framework::hash::{ContentHash, HashScope, content_hash, file_hash};
 use asteria_framework::journal::{Actor, Journal, JournalEntry, OpId, OpKind};
 use asteria_framework::paths::{is_sidecar, media_path_for_sidecar, sidecar_path_for};
 use asteria_framework::{Error as FwError, Library, Sidecar};
@@ -139,7 +139,7 @@ pub struct RelinkReport {
     pub conflicts: Vec<String>,
 }
 
-/// Moves each orphaned sidecar (its media file is gone) next to the one cached item with
+/// Moves each orphaned sidecar (its media file is gone) next to the one candidate cached item with
 /// the same content hash and scope, provided that item has no sidecar on disk and its file
 /// still matches the stored hash's size/mtime. Orphans are grouped first: several orphans
 /// claiming one target are all `ambiguous` and nothing is moved. A move is journaled and
@@ -193,23 +193,6 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
         return Ok(report);
     }
 
-    // (hash, scope) -> items whose stored hash is still current for their record.
-    let mut index: HashMap<(String, String), Vec<(String, StoredHash)>> = HashMap::new();
-    for path in cache.all_paths()? {
-        let Some(rec) = cache.get_by_path(&path)? else {
-            continue;
-        };
-        if let Some(h) = rec.hash
-            && h.size == rec.size
-            && h.mtime_ns == rec.mtime_ns
-        {
-            index
-                .entry((h.hash.clone(), h.scope.clone()))
-                .or_default()
-                .push((path, h));
-        }
-    }
-
     // Phase 1: classify without moving anything.
     let mut single: Vec<(String, String, StoredHash)> = Vec::new(); // (orphan, target, hash)
     for old in orphans {
@@ -229,13 +212,18 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
             report.unmatched.push(old);
             continue;
         };
-        match index
-            .get(&(hash.to_string(), scope.to_string()))
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-        {
-            [] => report.unmatched.push(old),
-            [(target, h)] => single.push((old, target.clone(), h.clone())),
+        match candidates(
+            library,
+            cache,
+            &old,
+            (&hash.to_string(), &scope.to_string()),
+            sc.file_hash.as_ref(),
+        )? {
+            c if c.is_empty() => report.unmatched.push(old),
+            mut c if c.len() == 1 => {
+                let (target, h) = c.remove(0);
+                single.push((old, target, h));
+            }
             _ => report.ambiguous.push(old),
         }
     }
@@ -313,6 +301,46 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
     }
     cache.flush()?;
     Ok(report)
+}
+
+/// Items an orphan sidecar with this hash may be moved to (spec §4.2 item 5): current
+/// (hash, scope) matches that have no sidecar yet. With two or more left and a `FileHash` in
+/// the sidecar, only those whose whole-file hash equals it, unless none does.
+/// An item whose sidecar is a hard link of the orphan (an interrupted relink) stays a
+/// candidate, so that `relink_orphans` can finish the move.
+fn candidates(
+    library: &Library,
+    cache: &Cache,
+    orphan: &str,
+    (hash, scope): (&str, &str),
+    file_hash: Option<&ContentHash>,
+) -> Result<Vec<(String, StoredHash)>, ServerError> {
+    let mut found = Vec::new();
+    for path in cache.paths_with_hash(hash, scope)? {
+        let Some(rec) = cache.get_by_path(&path)? else {
+            continue;
+        };
+        if rec.sidecar.has_sidecar
+            && !same_file(
+                &library.root().join(orphan),
+                &sidecar_path_for(&library.root().join(&path)),
+            )
+        {
+            continue;
+        }
+        if let Some(h) = rec.hash {
+            found.push((path, h));
+        }
+    }
+    if found.len() > 1
+        && let Some(fh) = file_hash
+    {
+        let fh = fh.to_string();
+        if found.iter().any(|(_, h)| h.file_hash == fh) {
+            found.retain(|(_, h)| h.file_hash == fh);
+        }
+    }
+    Ok(found)
 }
 
 fn refresh_snapshot(library: &Library, cache: &Cache, media: &str) -> Result<(), ServerError> {

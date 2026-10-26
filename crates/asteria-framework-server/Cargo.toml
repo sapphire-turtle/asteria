@@ -35,3 +35,4 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber.workspace = true
 http-body-util.workspace = true
+lofty.workspace = true

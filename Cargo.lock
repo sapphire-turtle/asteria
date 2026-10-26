@@ -368,6 +368,7 @@ dependencies = [
  "getrandom 0.4.3",
  "grain-id",
  "http-body-util",
+ "lofty",
  "notify",
  "redb",
  "serde",

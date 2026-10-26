@@ -309,3 +309,114 @@ fn interrupted_relink_is_completed() {
         .count();
     assert_eq!(n, 1);
 }
+
+struct Music;
+impl MediaFilter for Music {
+    fn accepts(&self, kind: MediaKind) -> bool {
+        matches!(kind, MediaKind::Audio)
+    }
+}
+
+fn scan_music(e: &Env) {
+    scan(&e.lib, &e.cache, &Music).unwrap();
+}
+
+fn flac(to: &Path) {
+    fs::copy(fixture("sine440.flac"), to).unwrap();
+}
+
+/// A copy of the FLAC fixture with a different title tag: same payload, different bytes.
+fn flac_titled(to: &Path, title: &str) {
+    use lofty::config::WriteOptions;
+    use lofty::file::TaggedFileExt;
+    use lofty::prelude::*;
+    use lofty::probe::Probe;
+    use lofty::tag::{Tag, TagType};
+    flac(to);
+    let mut file = Probe::open(to).unwrap().read().unwrap();
+    let mut tag = Tag::new(TagType::VorbisComments);
+    tag.set_title(title.to_string());
+    file.insert_tag(tag);
+    file.save_to_path(to, WriteOptions::default()).unwrap();
+}
+
+fn flac_env() -> Env {
+    let e = env();
+    for d in ["a", "b", "c"] {
+        fs::create_dir(e.root.join(d)).unwrap();
+    }
+    e
+}
+
+#[test]
+fn duplicate_with_sidecar_is_not_a_candidate() {
+    let e = flac_env();
+    flac(&e.root.join("a/x.flac"));
+    flac(&e.root.join("b/x.flac"));
+    rate(&e, "a/x.flac", 2);
+    rate(&e, "b/x.flac", 5);
+    fs::rename(e.root.join("a/x.flac"), e.root.join("c/x.flac")).unwrap();
+    scan_music(&e);
+    hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
+
+    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    assert_eq!(
+        r.relinked,
+        vec![("a/x.flac.xmp".to_string(), "c/x.flac".to_string())]
+    );
+    assert!(r.ambiguous.is_empty() && r.unmatched.is_empty() && r.conflicts.is_empty());
+    let sc = e.lib.read_sidecar(Path::new("b/x.flac")).unwrap().unwrap();
+    assert_eq!(sc.rating.unwrap().value, 5);
+}
+
+#[test]
+fn file_hash_breaks_the_tie() {
+    let e = flac_env();
+    flac_titled(&e.root.join("a/x.flac"), "first");
+    flac_titled(&e.root.join("b/x.flac"), "second");
+    rate(&e, "b/x.flac", 4);
+    fs::rename(e.root.join("b/x.flac"), e.root.join("c/x.flac")).unwrap();
+    scan_music(&e);
+    hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
+
+    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    assert_eq!(
+        r.relinked,
+        vec![("b/x.flac.xmp".to_string(), "c/x.flac".to_string())]
+    );
+    assert!(r.ambiguous.is_empty());
+}
+
+#[test]
+fn identical_copies_stay_ambiguous() {
+    let e = flac_env();
+    flac(&e.root.join("a/x.flac"));
+    rate(&e, "a/x.flac", 3);
+    fs::rename(e.root.join("a/x.flac"), e.root.join("b/x.flac")).unwrap();
+    flac(&e.root.join("c/x.flac"));
+    scan_music(&e);
+    hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    assert!(r.relinked.is_empty());
+    assert_eq!(r.ambiguous, vec!["a/x.flac.xmp".to_string()]);
+    assert!(e.root.join("a/x.flac.xmp").exists());
+}
+
+#[test]
+fn no_file_hash_falls_back_to_ambiguous() {
+    let e = flac_env();
+    flac_titled(&e.root.join("a/x.flac"), "first");
+    rate(&e, "a/x.flac", 3);
+    let sidecar = e.root.join("a/x.flac.xmp");
+    let mut sc = asteria_framework::Sidecar::read(&sidecar).unwrap().unwrap();
+    assert!(sc.file_hash.is_some());
+    sc.file_hash = None; // a sidecar written before FileHash existed
+    sc.write(&sidecar).unwrap();
+    fs::rename(e.root.join("a/x.flac"), e.root.join("b/x.flac")).unwrap();
+    flac_titled(&e.root.join("c/x.flac"), "other");
+    scan_music(&e);
+    hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    assert!(r.relinked.is_empty());
+    assert_eq!(r.ambiguous, vec!["a/x.flac.xmp".to_string()]);
+}
