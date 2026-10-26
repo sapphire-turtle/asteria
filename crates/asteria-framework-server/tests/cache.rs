@@ -313,3 +313,110 @@ fn set_sidecar_touches_only_sidecar_fields() {
     assert_eq!(got.size, 10);
     assert!(!c.set_sidecar("nope.jpg", snap, None).unwrap());
 }
+
+fn sh(hash: &str, size: u64, mtime_ns: i128) -> asteria_framework_server::StoredHash {
+    asteria_framework_server::StoredHash {
+        hash: hash.into(),
+        scope: "file/1".into(),
+        file_hash: hash.into(),
+        size,
+        mtime_ns,
+    }
+}
+
+#[test]
+fn hash_index_follows_set_hash_and_remove() {
+    let d = tempfile::tempdir().unwrap();
+    let l = lib();
+    let c = Cache::open(d.path(), &l).unwrap();
+    c.put(&rec(&l, "a.jpg")).unwrap();
+    assert!(c.paths_with_hash("blake3:aa", "file/1").unwrap().is_empty());
+    assert!(c.set_hash("a.jpg", Some(sh("blake3:aa", 10, 1))).unwrap());
+    assert_eq!(c.paths_with_hash("blake3:aa", "file/1").unwrap(), ["a.jpg"]);
+    assert!(
+        c.paths_with_hash("blake3:aa", "other/1")
+            .unwrap()
+            .is_empty()
+    );
+    // A new hash drops the old key.
+    assert!(c.set_hash("a.jpg", Some(sh("blake3:bb", 10, 1))).unwrap());
+    assert!(c.paths_with_hash("blake3:aa", "file/1").unwrap().is_empty());
+    assert_eq!(c.paths_with_hash("blake3:bb", "file/1").unwrap(), ["a.jpg"]);
+    // Clearing the hash drops the key.
+    assert!(c.set_hash("a.jpg", None).unwrap());
+    assert!(c.paths_with_hash("blake3:bb", "file/1").unwrap().is_empty());
+    assert!(c.set_hash("a.jpg", Some(sh("blake3:bb", 10, 1))).unwrap());
+    c.remove("a.jpg").unwrap();
+    assert!(c.paths_with_hash("blake3:bb", "file/1").unwrap().is_empty());
+    // put replacing a record with a hash drops the old key too.
+    c.put(&rec(&l, "b.jpg")).unwrap();
+    c.set_hash("b.jpg", Some(sh("blake3:cc", 10, 1))).unwrap();
+    c.put(&rec(&l, "b.jpg")).unwrap();
+    assert!(c.paths_with_hash("blake3:cc", "file/1").unwrap().is_empty());
+}
+
+#[test]
+fn stale_hash_is_not_returned() {
+    let d = tempfile::tempdir().unwrap();
+    let l = lib();
+    let c = Cache::open(d.path(), &l).unwrap();
+    let mut r = rec(&l, "a.jpg");
+    r.hash = Some(sh("blake3:aa", 10, 1));
+    c.put(&r).unwrap();
+    assert_eq!(c.paths_with_hash("blake3:aa", "file/1").unwrap(), ["a.jpg"]);
+    r.size = 11;
+    c.put(&r).unwrap();
+    assert!(c.paths_with_hash("blake3:aa", "file/1").unwrap().is_empty());
+    r.size = 10;
+    r.mtime_ns = 2;
+    c.put(&r).unwrap();
+    assert!(c.paths_with_hash("blake3:aa", "file/1").unwrap().is_empty());
+}
+
+#[test]
+fn same_payload_two_paths() {
+    let d = tempfile::tempdir().unwrap();
+    let l = lib();
+    let c = Cache::open(d.path(), &l).unwrap();
+    let mut recs = Vec::new();
+    for p in ["z.jpg", "a/b.jpg", "m.jpg"] {
+        let mut r = rec(&l, p);
+        r.hash = Some(sh("blake3:aa", 10, 1));
+        recs.push(r);
+    }
+    recs[2].hash = Some(sh("blake3:ab", 10, 1));
+    c.put_many(&recs).unwrap();
+    assert_eq!(
+        c.paths_with_hash("blake3:aa", "file/1").unwrap(),
+        ["a/b.jpg", "z.jpg"]
+    );
+    c.remove_many(&["z.jpg".to_string()]).unwrap();
+    assert_eq!(
+        c.paths_with_hash("blake3:aa", "file/1").unwrap(),
+        ["a/b.jpg"]
+    );
+}
+
+#[test]
+fn schema_2_cache_is_rebuilt() {
+    let d = tempfile::tempdir().unwrap();
+    let l = lib();
+    let epoch = {
+        let c = Cache::open(d.path(), &l).unwrap();
+        c.put(&rec(&l, "a.jpg")).unwrap();
+        c.epoch()
+    };
+    {
+        let db = redb::Database::open(d.path().join("cache.redb")).unwrap();
+        let w = db.begin_write().unwrap();
+        {
+            let def: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("meta");
+            let mut t = w.open_table(def).unwrap();
+            t.insert("schema", 2u32.to_le_bytes().as_slice()).unwrap();
+        }
+        w.commit().unwrap();
+    }
+    let c = Cache::open(d.path(), &l).unwrap();
+    assert_eq!(c.count().unwrap(), 0);
+    assert_ne!(c.epoch(), epoch);
+}

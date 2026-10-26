@@ -18,12 +18,16 @@ use uuid::Uuid;
 
 use crate::error::ServerError;
 
-pub const CACHE_SCHEMA: u32 = 2;
+pub const CACHE_SCHEMA: u32 = 3;
 
 const FILE_NAME: &str = "cache.redb";
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const ITEMS: TableDefinition<&str, &[u8]> = TableDefinition::new("items");
 const IDS: TableDefinition<&str, &str> = TableDefinition::new("ids");
+/// Hash index: key `"{scope}\n{hash}\n{path}"`, looked up by prefix. Kept in step with
+/// `ITEMS` in the same transaction; a key may outlive the validity of its hash (the
+/// record's size or mtime changed), so readers re-check the record.
+const HASHES: TableDefinition<&str, ()> = TableDefinition::new("hashes");
 const UNPROCESSABLE: TableDefinition<&str, &str> = TableDefinition::new("unprocessable");
 
 /// A content hash and the whole-file hash, remembered with the (size, mtime) they were
@@ -154,6 +158,7 @@ impl Cache {
         {
             w.open_table(ITEMS).map_err(classify)?;
             w.open_table(IDS).map_err(classify)?;
+            w.open_table(HASHES).map_err(classify)?;
             w.open_table(UNPROCESSABLE).map_err(classify)?;
             let mut meta = w.open_table(META).map_err(classify)?;
             let existing_schema = meta
@@ -228,6 +233,7 @@ impl Cache {
         {
             let mut items = w.open_table(ITEMS).map_err(ce)?;
             let mut ids = w.open_table(IDS).map_err(ce)?;
+            let mut hashes = w.open_table(HASHES).map_err(ce)?;
             for rec in recs {
                 debug_assert_eq!(rec.id, item_id_for(&self.library, &rec.path));
                 let bytes = serde_json::to_vec(rec).map_err(ce)?;
@@ -237,6 +243,12 @@ impl Cache {
                     .map(|v| v.value().to_vec());
                 if let Some(old) = old {
                     self.drop_old_id(&mut ids, &rec.path, &old)?;
+                    drop_old_hash(&mut hashes, &rec.path, &old)?;
+                }
+                if let Some(h) = &rec.hash {
+                    hashes
+                        .insert(hash_key(&h.scope, &h.hash, &rec.path).as_str(), ())
+                        .map_err(ce)?;
                 }
                 ids.insert(rec.id.0.as_str(), rec.path.as_str())
                     .map_err(ce)?;
@@ -296,6 +308,7 @@ impl Cache {
         let mut n = 0;
         {
             let mut items = w.open_table(ITEMS).map_err(ce)?;
+            let mut hashes = w.open_table(HASHES).map_err(ce)?;
             for (path, v) in updates {
                 let cur = items.get(path.as_str()).map_err(ce)?.and_then(|g| {
                     serde_json::from_slice::<ItemRecord>(g.value())
@@ -305,7 +318,20 @@ impl Cache {
                         .ok()
                 });
                 let Some(mut rec) = cur else { continue };
+                let old_hash = rec.hash.clone();
                 if f(&mut rec, v) {
+                    if rec.hash != old_hash {
+                        if let Some(h) = &old_hash {
+                            hashes
+                                .remove(hash_key(&h.scope, &h.hash, path).as_str())
+                                .map_err(ce)?;
+                        }
+                        if let Some(h) = &rec.hash {
+                            hashes
+                                .insert(hash_key(&h.scope, &h.hash, path).as_str(), ())
+                                .map_err(ce)?;
+                        }
+                    }
                     let bytes = serde_json::to_vec(&rec).map_err(ce)?;
                     items.insert(path.as_str(), bytes.as_slice()).map_err(ce)?;
                     n += 1;
@@ -326,6 +352,7 @@ impl Cache {
         {
             let mut items = w.open_table(ITEMS).map_err(ce)?;
             let mut ids = w.open_table(IDS).map_err(ce)?;
+            let mut hashes = w.open_table(HASHES).map_err(ce)?;
             for rel in rels {
                 let old = items
                     .remove(rel.as_str())
@@ -333,6 +360,7 @@ impl Cache {
                     .map(|v| v.value().to_vec());
                 if let Some(old) = old {
                     self.drop_old_id(&mut ids, rel, &old)?;
+                    drop_old_hash(&mut hashes, rel, &old)?;
                 }
             }
         }
@@ -380,6 +408,39 @@ impl Cache {
             Some(v) => Ok(Some(serde_json::from_slice(v.value()).map_err(ce)?)),
             None => Ok(None),
         }
+    }
+
+    /// Paths whose record holds a `StoredHash` for (`hash`, `scope`) that is still current,
+    /// i.e. the record's size and mtime equal those the hash was computed for. In path order.
+    pub fn paths_with_hash(&self, hash: &str, scope: &str) -> Result<Vec<String>, ServerError> {
+        let r = self.db.begin_read().map_err(ce)?;
+        let hashes = r.open_table(HASHES).map_err(ce)?;
+        let items = r.open_table(ITEMS).map_err(ce)?;
+        let prefix = hash_key(scope, hash, "");
+        // '\n' + 1 = '\x0b' bounds every key that starts with `prefix`.
+        let upper = format!("{scope}\n{hash}\x0b");
+        let mut out = Vec::new();
+        for e in hashes
+            .range::<&str>(prefix.as_str()..upper.as_str())
+            .map_err(ce)?
+        {
+            let (k, _) = e.map_err(ce)?;
+            let path = &k.value()[prefix.len()..];
+            let Some(v) = items.get(path).map_err(ce)? else {
+                continue;
+            };
+            let Ok(rec) = serde_json::from_slice::<ItemRecord>(v.value()) else {
+                continue;
+            };
+            if rec
+                .hash
+                .as_ref()
+                .is_some_and(|h| h.size == rec.size && h.mtime_ns == rec.mtime_ns)
+            {
+                out.push(path.to_string());
+            }
+        }
+        Ok(out)
     }
 
     pub fn all_paths(&self) -> Result<Vec<String>, ServerError> {
@@ -521,6 +582,25 @@ impl Cache {
             .map(|v| v.value().to_string());
         Ok(v)
     }
+}
+
+fn hash_key(scope: &str, hash: &str, path: &str) -> String {
+    format!("{scope}\n{hash}\n{path}")
+}
+
+/// Remove the hash-index key of a replaced/removed record. Bytes that cannot be decoded
+/// leave their key behind; `paths_with_hash` skips keys whose record is missing or stale.
+fn drop_old_hash(
+    hashes: &mut redb::Table<&str, ()>,
+    path: &str,
+    old: &[u8],
+) -> Result<(), ServerError> {
+    if let Ok(ItemRecord { hash: Some(h), .. }) = serde_json::from_slice(old) {
+        hashes
+            .remove(hash_key(&h.scope, &h.hash, path).as_str())
+            .map_err(ce)?;
+    }
+    Ok(())
 }
 
 fn validate_folder(folder: &str) -> Result<(), ServerError> {
