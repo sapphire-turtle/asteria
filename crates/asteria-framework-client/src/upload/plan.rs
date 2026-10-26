@@ -1,11 +1,12 @@
 //! Turns dropped files and folders into upload groups (spec §5.3).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use asteria_framework::MediaKind;
 use asteria_framework::kind::classify;
+use asteria_framework::upload_path::validate_inbox_path;
 use walkdir::WalkDir;
 
 /// One file to upload: where it is, and where it goes under the server's `Inbox/`.
@@ -64,6 +65,13 @@ fn name_of(path: &Path) -> Option<&str> {
     path.file_name()?.to_str()
 }
 
+/// Whether another sidecar than `except` has the file name `name` (compared without case).
+fn sidecars_have(sidecars: &[PlannedFile], name: &str, except: &Path) -> bool {
+    sidecars.iter().any(|s| {
+        s.local != except && name_of(&s.local).is_some_and(|n| n.eq_ignore_ascii_case(name))
+    })
+}
+
 fn stem_of(name: &str) -> &str {
     name.split('.').next().unwrap_or(name)
 }
@@ -74,7 +82,20 @@ pub fn plan_drop(dropped: &[PathBuf], accept: impl Fn(MediaKind) -> bool) -> Dro
     let mut plan = DropPlan::default();
     let mut groups: BTreeMap<GroupKey, Members> = BTreeMap::new();
 
+    let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut add = |plan: &mut DropPlan, local: &Path, inbox_path: String| {
+        // The same file reached twice (dropped twice, or inside a dropped folder) is planned once.
+        let identity = std::fs::canonicalize(local).unwrap_or_else(|_| local.to_owned());
+        if !seen.insert(identity) {
+            return;
+        }
+        if let Err(reason) = validate_inbox_path(&inbox_path) {
+            plan.warnings.push(PlanWarning::Unreadable {
+                path: local.to_owned(),
+                reason,
+            });
+            return;
+        }
         let (dir, name) = match inbox_path.rsplit_once('/') {
             Some((d, n)) => (d.to_owned(), n),
             None => (String::new(), inbox_path.as_str()),
@@ -161,6 +182,10 @@ pub fn plan_drop(dropped: &[PathBuf], accept: impl Fn(MediaKind) -> bool) -> Dro
                     plan.excluded += 1;
                     continue;
                 }
+                if entry.file_type().is_symlink() {
+                    plan.excluded += 1;
+                    continue;
+                }
                 if !entry.file_type().is_file() {
                     continue;
                 }
@@ -186,7 +211,7 @@ pub fn plan_drop(dropped: &[PathBuf], accept: impl Fn(MediaKind) -> bool) -> Dro
     for (key, members) in groups {
         let Members { media, sidecars } = members;
         let mut files = media.clone();
-        for sidecar in sidecars {
+        for sidecar in sidecars.clone() {
             let name = name_of(&sidecar.local).unwrap_or_default();
             let base = name
                 .get(..name.len().saturating_sub(".xmp".len()))
@@ -202,10 +227,17 @@ pub fn plan_drop(dropped: &[PathBuf], accept: impl Fn(MediaKind) -> bool) -> Dro
                     Some((dir, _)) => format!("{dir}/{media_name}.xmp"),
                     None => format!("{media_name}.xmp"),
                 };
-                files.push(PlannedFile {
-                    local: sidecar.local,
-                    inbox_path,
-                });
+                // `<media>.xmp` wins over a stem sidecar for the same media file.
+                let taken = files.iter().any(|f| f.inbox_path == inbox_path)
+                    || sidecars_have(&sidecars, &format!("{media_name}.xmp"), &sidecar.local);
+                if taken {
+                    plan.excluded += 1;
+                } else {
+                    files.push(PlannedFile {
+                        local: sidecar.local,
+                        inbox_path,
+                    });
+                }
             } else if base == key.2 && media.len() > 1 {
                 plan.warnings.push(PlanWarning::AmbiguousSidecar {
                     path: sidecar.local,

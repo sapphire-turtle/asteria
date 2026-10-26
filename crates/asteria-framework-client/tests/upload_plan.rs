@@ -132,4 +132,82 @@ fn symlinks_are_not_followed() {
     std::os::unix::fs::symlink(dir.path().join("elsewhere"), dir.path().join("D/dirlink")).unwrap();
     let plan = plan_drop(&[dir.path().join("D")], media);
     assert_eq!(paths(&plan), vec![vec!["D/a.jpg"]]);
+    assert_eq!(plan.excluded, 2);
+}
+
+#[test]
+fn uppercase_xmp_extension_is_a_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    touch(dir.path(), "S/a.JPG");
+    touch(dir.path(), "S/a.JPG.XMP");
+    touch(dir.path(), "S/b.JPG");
+    touch(dir.path(), "S/b.XMP");
+    let plan = plan_drop(&[dir.path().join("S")], media);
+    assert_eq!(
+        paths(&plan),
+        vec![
+            vec!["S/a.JPG", "S/a.JPG.XMP"],
+            vec!["S/b.JPG", "S/b.JPG.xmp"]
+        ]
+    );
+    assert_eq!(plan.excluded, 0);
+}
+
+#[test]
+fn media_sidecar_wins_over_stem_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    touch(dir.path(), "S/b.JPG");
+    touch(dir.path(), "S/b.xmp");
+    touch(dir.path(), "S/b.JPG.xmp");
+    let plan = plan_drop(&[dir.path().join("S")], media);
+    assert_eq!(paths(&plan), vec![vec!["S/b.JPG", "S/b.JPG.xmp"]]);
+    assert_eq!(
+        plan.groups[0].files[1].local,
+        dir.path().join("S/b.JPG.xmp")
+    );
+    assert_eq!(plan.excluded, 1);
+}
+
+#[test]
+fn a_file_reached_twice_is_planned_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = touch(dir.path(), "D/a.jpg");
+    let plan = plan_drop(&[a.clone(), a.clone()], media);
+    assert_eq!(paths(&plan), vec![vec!["a.jpg"]]);
+    let plan = plan_drop(&[dir.path().join("D"), a], media);
+    assert_eq!(paths(&plan), vec![vec!["D/a.jpg"]]);
+}
+
+#[test]
+fn accept_filters_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    touch(dir.path(), "D/a.jpg");
+    touch(dir.path(), "D/b.mp3");
+    let plan = plan_drop(&[dir.path().join("D")], |k| k == MediaKind::Image);
+    assert_eq!(paths(&plan), vec![vec!["D/a.jpg"]]);
+    assert_eq!(plan.excluded, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn names_the_server_would_reject_are_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    touch(dir.path(), "D/12:30.jpg");
+    touch(dir.path(), "D/CON.jpg");
+    touch(dir.path(), "D/ok.jpg");
+    let plan = plan_drop(&[dir.path().join("D")], media);
+    assert_eq!(paths(&plan), vec![vec!["D/ok.jpg"]]);
+    let mut bad: Vec<_> = plan
+        .warnings
+        .iter()
+        .map(|w| match w {
+            PlanWarning::Unreadable { path, .. } => path.clone(),
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    bad.sort();
+    assert_eq!(
+        bad,
+        vec![dir.path().join("D/12:30.jpg"), dir.path().join("D/CON.jpg")]
+    );
 }
