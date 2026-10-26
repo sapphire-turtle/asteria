@@ -75,3 +75,39 @@ asteria-photos-viewer-previous = Previous (←)
 asteria-photos-viewer-next = Next (→)
 asteria-photos-viewer-details = Details
 asteria-photos-viewer-position = { $index } / { $total }
+
+# The Uploads screen.
+asteria-photos-screen-uploads = Uploads
+asteria-photos-uploads-unavailable = Connect to a server to upload files.
+asteria-photos-uploads-empty = Drop photos or folders on the window to send them to the server's Inbox.
+asteria-photos-uploads-starting = Opening the upload queue...
+asteria-photos-uploads-waiting = The server is not answering, so uploads are paused and will try again: { $reason }
+asteria-photos-uploads-stopped = Uploads have stopped: { $reason }
+asteria-photos-uploads-queue-unreadable = The upload queue could not be read, so nothing is sent: { $reason }
+asteria-photos-uploads-clear-finished = Clear finished
+asteria-photos-uploads-in-library = { $count } already in the library
+asteria-photos-uploads-keep-all = Save all
+asteria-photos-uploads-discard-all = Discard all
+asteria-photos-uploads-keep = Save
+asteria-photos-uploads-discard = Discard
+asteria-photos-uploads-retry = Try again
+asteria-photos-uploads-cancel = Cancel
+asteria-photos-uploads-existing = Already in the library:
+asteria-photos-uploads-excluded = { $count } files in the last drop were left out (hidden or not photos and videos).
+asteria-photos-uploads-warn-sidecar = Not sent, it matches several files: { $path }
+asteria-photos-uploads-warn-unreadable = Could not read { $path }: { $reason }
+asteria-photos-uploads-state-hashing = Reading
+asteria-photos-uploads-state-checking = Checking the library
+asteria-photos-uploads-state-awaiting = Already in the library
+asteria-photos-uploads-state-uploading = Uploading
+asteria-photos-uploads-state-committing = Saving
+asteria-photos-uploads-state-done = Done
+asteria-photos-uploads-state-discarded = Discarded
+asteria-photos-uploads-state-failed = Failed: { $reason }
+
+# Dropping files on the window, and the status bar's count.
+asteria-photos-drop-overlay = Send to Inbox
+asteria-photos-drop-refused = Not connected to a server, so the files were not sent.
+asteria-photos-status-uploads = ↑ { $done } / { $total }
+asteria-photos-status-uploads-awaiting = ↑ { $done } / { $total } · { $count } to decide
+asteria-photos-status-uploads-hover = Open the uploads

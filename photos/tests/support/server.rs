@@ -10,8 +10,8 @@ use std::time::Duration;
 use asteria_framework::{Library, MediaKind};
 use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
-    AppState, Cache, MediaFilter, Processor, ServerConfig, TokenEntry, Tokens, new_token, router,
-    scan, spawn_writer, token_hash,
+    AppState, Cache, MediaFilter, Processor, ServerConfig, TokenEntry, Tokens, hash_pending,
+    new_token, router, scan, spawn_writer, token_hash,
 };
 
 struct Photos;
@@ -48,6 +48,8 @@ impl TestServer {
         }
         prepare(&root);
         scan(&lib, &cache, &Photos).unwrap();
+        // The duplicate check compares content hashes.
+        hash_pending(&lib, &cache, &AtomicBool::new(false)).unwrap();
         let token = new_token();
         let cfg = ServerConfig {
             library: root.clone(),

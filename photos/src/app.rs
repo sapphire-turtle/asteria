@@ -12,12 +12,13 @@
 //! change is written by a background thread, so the UI thread does no disk I/O.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use asteria_framework_api::ItemId;
 use asteria_framework_client::errors::{error_detail, error_text};
 use asteria_framework_client::profiles::{ProfileId, Profiles};
 use asteria_framework_client::profiles::{ServerProfile, Token};
-use asteria_framework_client::session::SessionState;
+use asteria_framework_client::session::{SessionDirs, SessionState};
 use asteria_framework_client::settings::servers::{ServersChange, ServersPage};
 use corundum_framework::egui;
 use corundum_framework::gui::settings::{ListItem, SettingsLayout, SettingsSection};
@@ -33,6 +34,7 @@ use crate::viewer;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Library,
+    Uploads,
     Settings,
 }
 
@@ -50,6 +52,9 @@ pub struct AppPaths {
     /// The root of the thumbnail cache (one directory per library under it); `None` keeps
     /// no cache on disk.
     pub cache: Option<PathBuf>,
+    /// The root of the app's data; the upload queues are kept under it. `None` turns uploads
+    /// off.
+    pub data: Option<PathBuf>,
 }
 
 /// The app. Hold one; call [`show`](Self::show) every frame with the window's root `Ui`.
@@ -76,6 +81,8 @@ struct State {
     compact: bool,
     /// Open the side pane on the next frame of the library (the viewer's "Details").
     open_details: bool,
+    /// Something to tell the user on the status bar, and since when.
+    notice: Option<(String, Instant)>,
 }
 
 impl PhotosApp {
@@ -113,11 +120,18 @@ impl PhotosApp {
         if let Some(why) = &save_blocked {
             servers_page.show_error(why.clone());
         }
-        let shell = Shell::new(vec![Destination::new(
-            Screen::Library,
-            icons::images(),
-            "asteria-photos-screen-library",
-        )])
+        let shell = Shell::new(vec![
+            Destination::new(
+                Screen::Library,
+                icons::images(),
+                "asteria-photos-screen-library",
+            ),
+            Destination::new(
+                Screen::Uploads,
+                icons::upload(),
+                "asteria-photos-screen-uploads",
+            ),
+        ])
         .with_footer(vec![Destination::new(
             Screen::Settings,
             icons::settings(),
@@ -137,6 +151,7 @@ impl PhotosApp {
             open_screen: None,
             compact: false,
             open_details: false,
+            notice: None,
         };
         state.connect(false);
         if state.profiles.servers.is_empty() {
@@ -151,6 +166,14 @@ impl PhotosApp {
     /// Draw one frame into the window's root `ui`, after taking in what arrived.
     pub fn show(&mut self, ui: &mut egui::Ui) {
         self.state.poll();
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        {
+            let dropped = crate::desktop::take_drops(ui.ctx());
+            if !dropped.is_empty() {
+                self.drop_files(dropped);
+            }
+            crate::desktop::drop_overlay(ui.ctx());
+        }
         self.state.compact = is_compact(ui);
         if self.shell.current() == Some(Screen::Library) && self.state.viewer_open() {
             self.state.viewer_ui(ui);
@@ -235,6 +258,35 @@ impl PhotosApp {
         self.state.connection.as_ref()?.browse.detail()
     }
 
+    /// Queue `paths` (files and folders) for upload to the server's Inbox and open the Uploads
+    /// screen. Not connected, nothing is queued and the status bar says so.
+    pub fn drop_files(&mut self, paths: Vec<PathBuf>) {
+        let uploads = self
+            .state
+            .connection
+            .as_ref()
+            .and_then(|c| c.session.uploads());
+        match uploads {
+            Some(uploads) => {
+                uploads.drop_paths(paths);
+                self.state.notice = None;
+                self.state.open_screen = Some(Screen::Uploads);
+                self.apply_open_screen();
+            }
+            None => {
+                let text = tr!(self.state.ctx, "asteria-photos-drop-refused");
+                self.state.notice = Some((text, Instant::now()));
+                self.state.ctx.request_repaint();
+            }
+        }
+    }
+
+    /// What the status bar says about a refused drop, while it does.
+    pub fn notice(&self) -> Option<&str> {
+        let (text, since) = self.state.notice.as_ref()?;
+        (since.elapsed() < NOTICE_FOR).then_some(text.as_str())
+    }
+
     /// The Settings page of the servers, as the user works it.
     pub fn servers_page_mut(&mut self) -> &mut ServersPage {
         &mut self.state.servers_page
@@ -247,7 +299,11 @@ impl State {
         // The old session goes first: its pending results die with it.
         self.connection = None;
         self.connection = self.profiles.active().map(|profile| {
-            Connection::open(profile, &self.ctx, self.paths.cache.clone(), reopened)
+            let dirs = SessionDirs {
+                cache: self.paths.cache.clone(),
+                data: self.paths.data.clone(),
+            };
+            Connection::open(profile, &self.ctx, dirs, reopened)
         });
     }
 
@@ -462,6 +518,50 @@ impl State {
         });
     }
 
+    /// The uploads' count (while any group is unfinished) and a refused drop, on the status bar.
+    fn uploads_status_ui(&mut self, ui: &mut egui::Ui) {
+        if let Some((text, since)) = &self.notice {
+            if let Some(left) = NOTICE_FOR.checked_sub(since.elapsed()) {
+                ui.colored_label(ui.visuals().warn_fg_color, text.as_str());
+                ui.ctx().request_repaint_after(left);
+            } else {
+                self.notice = None;
+            }
+        }
+        let Some(uploads) = self.connection.as_ref().and_then(|c| c.session.uploads()) else {
+            return;
+        };
+        let snap = uploads.snapshot();
+        let Some((done, total, awaiting)) =
+            crate::uploads::status_counts(&snap.groups, &snap.summary)
+        else {
+            return;
+        };
+        let text = if awaiting > 0 {
+            tr!(
+                ui,
+                "asteria-photos-status-uploads-awaiting",
+                done = done,
+                total = total,
+                count = awaiting
+            )
+        } else {
+            tr!(
+                ui,
+                "asteria-photos-status-uploads",
+                done = done,
+                total = total
+            )
+        };
+        let button = ui.add(egui::Button::new(text).frame(false));
+        if button
+            .on_hover_text(tr!(ui, "asteria-photos-status-uploads-hover"))
+            .clicked()
+        {
+            self.open_screen = Some(Screen::Uploads);
+        }
+    }
+
     /// The server in use and its state, with a menu of the servers to switch to. `compact`
     /// shows only the state's icon (the bottom bar has little room).
     fn switcher_ui(&mut self, ui: &mut egui::Ui, compact: bool) {
@@ -568,6 +668,9 @@ impl State {
     }
 }
 
+/// How long the status bar keeps a notice.
+const NOTICE_FOR: Duration = Duration::from_secs(8);
+
 /// What a connection depends on: the server, its address and its token (not its name).
 fn endpoint(p: Option<&ServerProfile>) -> Option<(ProfileId, String, Token)> {
     p.map(|p| (p.id, p.url.as_str().to_string(), p.token.clone()))
@@ -587,6 +690,13 @@ impl ShellApp<Screen> for State {
     fn screen_ui(&mut self, ui: &mut egui::Ui, screen: Screen, side: &mut Side) {
         match screen {
             Screen::Library => self.library_ui(ui, side),
+            Screen::Uploads => {
+                let c = self.connection.as_mut();
+                match c {
+                    Some(c) => crate::uploads::ui(ui, c.session.uploads(), &mut c.uploads),
+                    None => crate::uploads::ui(ui, None, &mut Default::default()),
+                }
+            }
             Screen::Settings => self.settings_ui(ui),
         }
     }
@@ -603,7 +713,7 @@ impl ShellApp<Screen> for State {
             (Screen::Library, None) => {
                 ui.weak(tr!(ui, "asteria-photos-detail-none"));
             }
-            (Screen::Settings, _) => {
+            (Screen::Uploads | Screen::Settings, _) => {
                 ui.weak(tr!(ui, "asteria-photos-detail-other-screen"));
             }
         }
@@ -620,6 +730,7 @@ impl ShellApp<Screen> for State {
 
     fn status_ui(&mut self, ui: &mut egui::Ui) {
         self.switcher_ui(ui, false);
+        self.uploads_status_ui(ui);
     }
 }
 
