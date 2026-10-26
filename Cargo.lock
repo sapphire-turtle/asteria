@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-framework-api"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-api"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "asteria-framework-api",
 ]
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-api"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "asteria-framework-api",
  "serde_json",

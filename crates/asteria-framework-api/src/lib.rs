@@ -4,9 +4,11 @@ use std::fmt;
 
 mod media;
 mod rpc;
+mod upload;
 
 pub use media::*;
 pub use rpc::*;
+pub use upload::*;
 
 use serde::{Deserialize, Serialize};
 
