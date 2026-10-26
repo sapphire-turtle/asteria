@@ -2,16 +2,16 @@
 
 use std::fmt;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use asteria_framework_api::HashRef;
 use grain_id::GrainId;
 use serde::{Deserialize, Serialize};
 
 use super::plan::DropPlan;
+use crate::fsutil::{bad_path, write_atomic};
 use crate::media_cache::safe_component;
 
 const VERSION: u32 = 1;
@@ -115,33 +115,29 @@ pub fn queue_path(data_root: &Path, library_id: &str) -> Option<PathBuf> {
 }
 
 impl UploadQueue {
-    /// A missing file is an empty queue. One that cannot be read is moved to
-    /// `<name>.bad-<unix time>` and the queue starts empty.
-    pub fn load(path: &Path) -> UploadQueue {
+    /// A missing file is an empty queue. A file that is malformed, or written by another version,
+    /// is moved to `<name>.bad-<unix time>` and the queue starts empty. Any other read error is
+    /// returned: starting empty there would let the next save overwrite the real queue.
+    pub fn load(path: &Path) -> io::Result<UploadQueue> {
         let bytes = match fs::read(path) {
             Ok(b) => b,
-            Err(e) => {
-                if e.kind() != io::ErrorKind::NotFound {
-                    tracing::warn!(path = %path.display(), error = %e, "upload queue unreadable");
-                }
-                return UploadQueue::default();
-            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(UploadQueue::default()),
+            Err(e) => return Err(e),
         };
-        match serde_json::from_slice::<FileIn>(&bytes) {
-            Ok(f) if f.version == VERSION => UploadQueue { groups: f.groups },
-            _ => {
-                let aside = bad_path(path);
-                tracing::warn!(
-                    path = %path.display(),
-                    moved_to = %aside.display(),
-                    "upload queue is unreadable; set it aside and starting empty"
-                );
-                if let Err(e) = fs::rename(path, &aside) {
-                    tracing::warn!(error = %e, "could not set the upload queue aside");
-                }
-                UploadQueue::default()
-            }
-        }
+        let reason = match serde_json::from_slice::<FileIn>(&bytes) {
+            Ok(f) if f.version == VERSION => return Ok(UploadQueue { groups: f.groups }),
+            Ok(f) => format!("written by queue version {} (this is {VERSION})", f.version),
+            Err(e) => format!("not a valid upload queue: {e}"),
+        };
+        let aside = bad_path(path);
+        tracing::warn!(
+            path = %path.display(),
+            moved_to = %aside.display(),
+            %reason,
+            "upload queue cannot be used; set it aside and starting empty"
+        );
+        fs::rename(path, &aside)?;
+        Ok(UploadQueue::default())
     }
 
     /// Temp file in the same directory, then rename.
@@ -151,7 +147,7 @@ impl UploadQueue {
             groups: &self.groups,
         })
         .map_err(io::Error::other)?;
-        write_atomic(path, &bytes)
+        write_atomic(path, &bytes, false)
     }
 
     /// Adds each planned group, ready to be hashed.
@@ -214,10 +210,10 @@ impl UploadQueue {
         }
     }
 
-    /// Discards a group from any state but `Discarded`. Aborting its sessions is the engine's job.
+    /// Discards a group that is not yet `Done` or `Discarded`. Aborting its sessions is the engine's job.
     pub fn cancel(&mut self, group: GroupId) -> bool {
         match self.groups.iter_mut().find(|g| g.id == group) {
-            Some(g) if g.state != GroupState::Discarded => {
+            Some(g) if !matches!(g.state, GroupState::Discarded | GroupState::Done { .. }) => {
                 g.state = GroupState::Discarded;
                 true
             }
@@ -258,44 +254,4 @@ fn decide_one(g: &mut QueuedGroup, keep: bool) -> bool {
         GroupState::Discarded
     };
     true
-}
-
-fn bad_path(path: &Path) -> PathBuf {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".bad-{secs}"));
-    let mut candidate = path.with_file_name(&name);
-    let mut n = 1;
-    while candidate.exists() {
-        let mut alt = name.clone();
-        alt.push(format!("-{n}"));
-        candidate = path.with_file_name(alt);
-        n += 1;
-    }
-    candidate
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
-    let mut tmp_name = std::ffi::OsString::from(".");
-    tmp_name.push(name);
-    tmp_name.push(".asteria-tmp");
-    let tmp = path.with_file_name(tmp_name);
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let result = (|| {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
 }

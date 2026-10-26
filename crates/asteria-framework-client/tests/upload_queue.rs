@@ -48,8 +48,10 @@ fn roundtrip() {
     q.save(&path).unwrap();
     let text = fs::read_to_string(&path).unwrap();
     assert!(text.contains(r#""version":1"#));
+    assert!(text.contains(r#""state":"hashing""#), "{text}");
+    assert!(text.contains(r#""state":"done","placed""#), "{text}");
     assert!(text.contains("旅行/a.jpg"));
-    assert_eq!(UploadQueue::load(&path), q);
+    assert_eq!(UploadQueue::load(&path).unwrap(), q);
 }
 
 #[test]
@@ -57,7 +59,7 @@ fn unreadable_file_is_set_aside() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("lib.json");
     fs::write(&path, b"{ not json").unwrap();
-    let q = UploadQueue::load(&path);
+    let q = UploadQueue::load(&path).unwrap();
     assert!(q.groups.is_empty());
     assert!(!path.exists());
     let aside: Vec<_> = fs::read_dir(dir.path())
@@ -70,6 +72,7 @@ fn unreadable_file_is_set_aside() {
     );
     assert!(
         UploadQueue::load(&dir.path().join("missing.json"))
+            .unwrap()
             .groups
             .is_empty()
     );
@@ -167,4 +170,39 @@ fn unsafe_library_id_has_no_queue_path() {
         queue_path(root, "abc-1"),
         Some(root.join("uploads").join("abc-1.json"))
     );
+}
+
+#[test]
+fn unknown_version_is_set_aside() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lib.json");
+    fs::write(&path, br#"{"version":2,"groups":[]}"#).unwrap();
+    assert!(UploadQueue::load(&path).unwrap().groups.is_empty());
+    assert!(!path.exists());
+    let aside = fs::read_dir(dir.path()).unwrap().count();
+    assert_eq!(aside, 1);
+}
+
+#[test]
+fn other_read_errors_are_returned() {
+    let dir = tempfile::tempdir().unwrap();
+    // A directory where the file should be: not NotFound.
+    let path = dir.path().join("lib.json");
+    fs::create_dir(&path).unwrap();
+    assert!(UploadQueue::load(&path).is_err());
+    assert!(path.exists());
+}
+
+#[test]
+fn cancel_does_nothing_on_done() {
+    let mut q = UploadQueue::default();
+    q.push(plan(&["a"]));
+    let done = GroupState::Done {
+        placed: vec!["p".into()],
+        warnings: vec![],
+    };
+    q.groups[0].state = done.clone();
+    let id = q.groups[0].id;
+    assert!(!q.cancel(id));
+    assert_eq!(q.groups[0].state, done);
 }
