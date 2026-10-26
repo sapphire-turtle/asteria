@@ -187,3 +187,11 @@ fn append_after_missing_final_newline_keeps_complete_entry() {
     assert_eq!(j.read_all().unwrap(), es);
     assert!(!jfile(&d, &format!("{}.torn", this_month())).exists());
 }
+
+#[test]
+fn op_kind_upload_wire() {
+    assert_eq!(
+        serde_json::to_value(OpKind::Upload).unwrap(),
+        json!("upload")
+    );
+}

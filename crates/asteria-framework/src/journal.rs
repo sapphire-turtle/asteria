@@ -67,6 +67,7 @@ pub enum OpKind {
     WriteEmbeddedTags,
     RelinkSidecar,
     WriteSidecar,
+    Upload,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

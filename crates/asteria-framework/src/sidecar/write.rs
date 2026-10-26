@@ -14,13 +14,14 @@ use super::read::extract;
 use super::xml::{self, Attribute, Element, Name, Node};
 
 /// Properties asteria owns, as `(namespace URI, local name)`.
-const MANAGED: [(&str, &str); 9] = [
+const MANAGED: [(&str, &str); 10] = [
     (ns::XMP, "Rating"),
     (ns::XMP, "Label"),
     (ns::ASTERIA, "RatingModified"),
     (ns::ASTERIA, "UserRatings"),
     (ns::ASTERIA, "ContentHash"),
     (ns::ASTERIA, "HashScope"),
+    (ns::ASTERIA, "FileHash"),
     (ns::DC, "subject"),
     (ns::DC, "description"),
     (ns::LR, "hierarchicalSubject"),
@@ -103,6 +104,7 @@ fn dirty_props(sc: &Sidecar, orig: Option<&Sidecar>) -> Vec<Prop> {
         sc.content_hash != o.content_hash,
         &[(ns::ASTERIA, "ContentHash"), (ns::ASTERIA, "HashScope")],
     );
+    add(sc.file_hash != o.file_hash, &[(ns::ASTERIA, "FileHash")]);
     d
 }
 
@@ -129,6 +131,7 @@ fn verify_output(sc: &Sidecar, bytes: &[u8]) -> std::result::Result<(), String> 
     );
     check("label", sc.label.as_deref().and_then(clean) == back.label);
     check("contentHash", sc.content_hash == back.content_hash);
+    check("fileHash", sc.file_hash == back.file_hash);
     // Other-language items may legitimately stand in for an absent description.
     if let Some(d) = sc.description.as_deref().and_then(clean) {
         check("description", Some(d) == back.description);
@@ -386,6 +389,14 @@ fn fill(
         let p = pfx!(asteria, ns::ASTERIA, "asteria");
         attrs.push(attr(ns::ASTERIA, p.clone(), "ContentHash", h.to_string()));
         attrs.push(attr(ns::ASTERIA, p, "HashScope", s.to_string()));
+    }
+    if let Some(h) = sc
+        .file_hash
+        .as_ref()
+        .filter(|_| has(dirty, ns::ASTERIA, "FileHash"))
+    {
+        let p = pfx!(asteria, ns::ASTERIA, "asteria");
+        attrs.push(attr(ns::ASTERIA, p, "FileHash", h.to_string()));
     }
 
     let subjects: Vec<&String> = sc

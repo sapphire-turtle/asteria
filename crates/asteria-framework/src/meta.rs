@@ -7,7 +7,7 @@ use grain_id::GrainId;
 use serde_json::json;
 
 use crate::error::{Error, Result};
-use crate::hash::content_hash;
+use crate::hash::{content_hash, file_hash};
 use crate::ids::UserId;
 use crate::journal::{Actor, Journal, JournalEntry, OpId, OpKind};
 use crate::library::Library;
@@ -71,6 +71,9 @@ impl Library {
     /// Callers that already know the hash can set `sc.content_hash` inside `f` to avoid hashing
     /// large files on the write path.
     ///
+    /// `sc.file_hash` is `None` inside `f` and is always the current file's hash when written:
+    /// the media file is hashed unless `f` sets it. A change to the file hash alone is not written.
+    ///
     /// Returns `Ok(true)` when a sidecar was written, `Ok(false)` when nothing needed writing.
     pub fn update_sidecar(
         &self,
@@ -88,6 +91,8 @@ impl Library {
         let existed = existing.is_some();
         let mut sidecar = existing.unwrap_or_default();
         let original = sidecar.clone();
+        // Cleared so that a stale stored hash is never written back; `f` may set a known one.
+        sidecar.file_hash = None;
         f(&mut sidecar);
 
         let fields = changed_fields(&original, &sidecar);
@@ -97,6 +102,9 @@ impl Library {
         if sidecar.content_hash.is_none() {
             let outcome = content_hash(&media)?;
             sidecar.content_hash = Some((outcome.hash, outcome.scope));
+        }
+        if sidecar.file_hash.is_none() {
+            sidecar.file_hash = Some(file_hash(&media)?);
         }
         sidecar.write(&sidecar_path)?;
 

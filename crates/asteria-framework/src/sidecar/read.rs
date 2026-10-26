@@ -197,6 +197,10 @@ pub(super) fn extract(root: &Element) -> R<Sidecar> {
         // Half a hash is useless but recomputable, so treat it as absent.
         _ => None,
     };
+    sc.file_hash = match simple(&descs, ns::ASTERIA, "FileHash") {
+        Some(h) => Some(h.parse::<ContentHash>().map_err(|e| e.to_string())?),
+        None => None,
+    };
 
     for d in &descs {
         for prop in d.child_elements() {

@@ -212,6 +212,15 @@ fn usable_hash(rec: &ItemRecord, now: Option<Stamp>) -> Option<(ContentHash, Has
     Some((h.hash.parse().ok()?, h.scope.parse().ok()?))
 }
 
+/// The cached whole-file hash, under the same freshness rule as [`usable_hash`].
+fn usable_file_hash(rec: &ItemRecord, now: Option<Stamp>) -> Option<ContentHash> {
+    let h: &StoredHash = rec.hash.as_ref()?;
+    if now != Some((h.size, h.mtime_ns)) {
+        return None;
+    }
+    h.file_hash.parse().ok()
+}
+
 fn do_update(
     library: &Library,
     cache: &Cache,
@@ -228,7 +237,9 @@ fn do_update(
         return Err(WriteError::ReadOnly(e.clone()));
     }
     let rel = Path::new(&rec.path);
-    let hash = usable_hash(&rec, stat(&library.root().join(rel)));
+    let stamp = stat(&library.root().join(rel));
+    let hash = usable_hash(&rec, stamp);
+    let file_hash = usable_file_hash(&rec, stamp);
     let owner = library.owner();
 
     // One closure: one sidecar write, one journal entry, no rehash when `hash` is set.
@@ -236,6 +247,7 @@ fn do_update(
         if sc.content_hash.is_none() {
             sc.content_hash = hash;
         }
+        sc.file_hash = file_hash;
         if let Some(v) = params.subjects {
             sc.subjects = v.into_iter().collect::<BTreeSet<_>>();
         }

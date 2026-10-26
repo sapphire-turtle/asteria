@@ -3,7 +3,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use asteria_framework::hash::{HashScope, content_hash};
+use asteria_framework::hash::{HashScope, content_hash, file_hash};
 use asteria_framework::journal::{Actor, Journal, OpKind};
 use asteria_framework::{Error, Library, UserId};
 use chrono::{TimeZone, Timelike, Utc};
@@ -284,4 +284,43 @@ fn apply_rating_owner_non_owner_older_and_tie() {
         sc.apply_rating(owner, owner, 6, t),
         Err(Error::InvalidRating(6))
     ));
+}
+
+#[test]
+fn update_sidecar_writes_current_file_hash() {
+    let (dir, lib) = setup("red.jpg");
+    let owner = lib.owner();
+    lib.set_rating(Path::new("red.jpg"), owner, 4, t(1), Actor::User(owner))
+        .unwrap();
+    let sc = lib.read_sidecar(Path::new("red.jpg")).unwrap().unwrap();
+    assert_eq!(
+        sc.file_hash.unwrap(),
+        file_hash(&dir.path().join("red.jpg")).unwrap()
+    );
+}
+
+#[test]
+fn file_hash_alone_does_not_rewrite() {
+    let (dir, lib) = setup("red.jpg");
+    let owner = lib.owner();
+    lib.set_rating(Path::new("red.jpg"), owner, 4, t(1), Actor::User(owner))
+        .unwrap();
+    let xmp = dir.path().join("red.jpg.xmp");
+    let before = fs::read(&xmp).unwrap();
+    let other = "blake3:".to_string() + &"cd".repeat(32);
+    let stale = String::from_utf8(before.clone()).unwrap();
+    let old = lib
+        .read_sidecar(Path::new("red.jpg"))
+        .unwrap()
+        .unwrap()
+        .file_hash
+        .unwrap()
+        .to_string();
+    fs::write(&xmp, stale.replace(&old, &other)).unwrap();
+    let before = fs::read(&xmp).unwrap();
+    let wrote = lib
+        .update_sidecar(Path::new("red.jpg"), Actor::User(owner), |_| {})
+        .unwrap();
+    assert!(!wrote);
+    assert_eq!(fs::read(&xmp).unwrap(), before);
 }
