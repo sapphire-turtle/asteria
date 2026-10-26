@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use asteria_framework_client::profiles::ServerProfile;
 use asteria_framework_client::rpc::ClientError;
-use asteria_framework_client::session::{Session, SessionState};
+use asteria_framework_client::session::{Session, SessionDirs, SessionState};
 use corundum_framework::egui;
 
 use crate::browse::BrowseState;
@@ -30,11 +30,12 @@ impl Connection {
         cache: Option<PathBuf>,
         reopened: bool,
     ) -> Connection {
-        let mut session = Session::open_with_cache(
+        let mut session = Session::open_with_dirs(
             profile,
             asteria_photos_api::client_info(),
             ctx.clone(),
-            cache,
+            // Uploads come with the photos screens (Task 11).
+            SessionDirs { cache, data: None },
         );
         let mut browse = BrowseState::new();
         // Queued behind the handshake; it fails with the handshake if that fails.

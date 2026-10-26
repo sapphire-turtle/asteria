@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use asteria_framework_api::MediaItem;
 use asteria_framework_client::images::{ImageState, Preset};
 use asteria_framework_client::rpc::ClientError;
-use asteria_framework_client::session::{Session, SessionState};
+use asteria_framework_client::session::{Session, SessionDirs, SessionState};
 use corundum_framework::egui;
 use serde_json::json;
 
@@ -103,11 +103,14 @@ fn paths(log: &Log) -> Vec<String> {
 }
 
 fn ready_session(addr: SocketAddr, ctx: &egui::Context, cache_root: &Path) -> Session {
-    let mut session = Session::open_with_cache(
+    let mut session = Session::open_with_dirs(
         &profile(addr, "t"),
         photos_client(),
         ctx.clone(),
-        Some(cache_root.to_path_buf()),
+        SessionDirs {
+            cache: Some(cache_root.to_path_buf()),
+            data: None,
+        },
     );
     wait_settled(&mut session);
     assert!(
@@ -435,11 +438,14 @@ fn requests_before_the_handshake_wait_for_it() {
     let (addr, log) = media_stub_holding_handshake(Some(handshake_rx), |_, _| webp_response());
     let cache = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
-    let mut session = Session::open_with_cache(
+    let mut session = Session::open_with_dirs(
         &profile(addr, "t"),
         photos_client(),
         ctx.clone(),
-        Some(cache.path().to_path_buf()),
+        SessionDirs {
+            cache: Some(cache.path().to_path_buf()),
+            data: None,
+        },
     );
     let one = item(1);
     for _ in 0..3 {

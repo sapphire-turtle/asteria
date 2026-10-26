@@ -109,6 +109,16 @@ struct FileIn {
     groups: Vec<QueuedGroup>,
 }
 
+/// [`UploadQueue::save`] for a queue that is only borrowed.
+pub(crate) fn save_groups(groups: &[QueuedGroup], path: &Path) -> io::Result<()> {
+    let bytes = serde_json::to_vec(&FileOut {
+        version: VERSION,
+        groups,
+    })
+    .map_err(io::Error::other)?;
+    write_atomic(path, &bytes, false)
+}
+
 /// `<data_root>/uploads/<library_id>.json`, or `None` if the id is not a safe file name.
 pub fn queue_path(data_root: &Path, library_id: &str) -> Option<PathBuf> {
     safe_component(library_id).then(|| data_root.join("uploads").join(format!("{library_id}.json")))
@@ -142,12 +152,7 @@ impl UploadQueue {
 
     /// Temp file in the same directory, then rename.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let bytes = serde_json::to_vec(&FileOut {
-            version: VERSION,
-            groups: &self.groups,
-        })
-        .map_err(io::Error::other)?;
-        write_atomic(path, &bytes, false)
+        save_groups(&self.groups, path)
     }
 
     /// Adds each planned group, ready to be hashed.

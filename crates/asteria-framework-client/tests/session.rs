@@ -15,7 +15,7 @@ use asteria_framework_api::{ClientInfo, FolderListParams, HandshakeError};
 use asteria_framework_client::profiles::ServerProfile;
 use asteria_framework_client::rpc::ClientError;
 use asteria_framework_client::session::{
-    Reply, Request, RequestId, Response, Session, SessionState,
+    Reply, Request, RequestId, Response, Session, SessionDirs, SessionState,
 };
 use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
@@ -149,11 +149,14 @@ fn handshake_opens_the_library_cache() {
     let root = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
     let profile = server.profile(&server.token);
-    let mut session = Session::open_with_cache(
+    let mut session = Session::open_with_dirs(
         &profile,
         photos_client(),
         ctx.clone(),
-        Some(root.path().to_path_buf()),
+        SessionDirs {
+            cache: Some(root.path().to_path_buf()),
+            data: None,
+        },
     );
     wait_settled(&mut session);
     let cache = session

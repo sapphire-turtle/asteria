@@ -19,6 +19,8 @@ use crate::images::ImageLoader;
 use crate::media_cache::MediaCache;
 use crate::profiles::{ProfileId, ServerProfile};
 use crate::rpc::{ClientError, RpcClient};
+use crate::upload::queue::{UploadQueue, queue_path};
+use crate::upload::{EngineConfig, Uploads};
 use crate::worker::{Job, Worker};
 
 /// Source of session generations; each [`Session`] takes a fresh one, starting at 1.
@@ -120,6 +122,16 @@ pub(crate) fn note_health<T>(health: &Mutex<Option<ClientError>>, result: &Resul
     }
 }
 
+/// Where a session keeps what it stores on this device. Each is optional; without one, the
+/// session simply does without what goes there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionDirs {
+    /// Root of the thumbnail caches ([`MediaCache`], one per library).
+    pub cache: Option<PathBuf>,
+    /// Root of the app's data; the upload queues live in its `uploads/` directory.
+    pub data: Option<PathBuf>,
+}
+
 /// The `{}` sent as the params of methods that take none.
 #[derive(Serialize)]
 struct NoParams {}
@@ -154,6 +166,8 @@ pub struct Session {
     /// Filled by the handshake job once the library id is known (and only if a cache root was
     /// given and the id is a safe directory name).
     cache: Arc<OnceLock<Arc<MediaCache>>>,
+    /// Filled by the handshake job once the library id is known, if a data root was given.
+    uploads: Arc<OnceLock<Uploads>>,
     images: ImageLoader,
 }
 
@@ -173,24 +187,28 @@ impl Session {
     /// [`SessionState::Connecting`]; watch [`state`](Self::state) after each
     /// [`poll`](Self::poll).
     pub fn open(profile: &ServerProfile, client: ClientInfo, ctx: egui::Context) -> Session {
-        Self::open_with_cache(profile, client, ctx, None)
+        Self::open_with_dirs(profile, client, ctx, SessionDirs::default())
     }
 
-    /// Like [`open`](Self::open), and with `cache_root` given, opens the library's
-    /// [`MediaCache`] under it as soon as the handshake learns the library id, and trims it on
-    /// a short-lived thread of its own (not the request worker, not the UI thread). The cache
-    /// is available from [`media_cache`](Self::media_cache) by the time the state is
-    /// [`SessionState::Ready`].
-    pub fn open_with_cache(
+    /// Like [`open`](Self::open), and as soon as the handshake learns the library id:
+    /// - with `dirs.cache`, opens the library's [`MediaCache`] under it, and trims it on a
+    ///   short-lived thread of its own (not the request worker, not the UI thread);
+    /// - with `dirs.data`, loads the library's upload queue from there and starts the upload
+    ///   engine on it.
+    ///
+    /// Both are available, from [`media_cache`](Self::media_cache) and
+    /// [`uploads`](Self::uploads), by the time the state is [`SessionState::Ready`].
+    pub fn open_with_dirs(
         profile: &ServerProfile,
         client: ClientInfo,
         ctx: egui::Context,
-        cache_root: Option<PathBuf>,
+        dirs: SessionDirs,
     ) -> Session {
         let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         let (events_tx, events) = mpsc::channel();
         let gate = Arc::new(Mutex::new(Gate::Pending));
         let cache = Arc::new(OnceLock::new());
+        let uploads = Arc::new(OnceLock::new());
         let health: Health = Arc::new(Mutex::new(None));
         let images = ImageLoader::new(
             ctx.clone(),
@@ -214,6 +232,7 @@ impl Session {
             health,
             degraded: None,
             cache,
+            uploads,
             images,
         };
         let (url, token) = (profile.url.clone(), profile.token.clone());
@@ -226,9 +245,20 @@ impl Session {
                 session.worker = Some(worker);
                 let gate = session.gate.clone();
                 let cache = session.cache.clone();
+                let uploads = session.uploads.clone();
+                let engine = EngineConfig {
+                    url: profile.url.clone(),
+                    token: profile.token.clone(),
+                    app: client.app.clone(),
+                    ctx: session.ctx.clone(),
+                    gate: session.gate.clone(),
+                    health: session.health.clone(),
+                    cancelled: cancelled.clone(),
+                    path: PathBuf::new(),
+                };
                 session.submit(move |rpc| {
                     let result = rpc.and_then(|rpc| handshake(rpc, &client));
-                    if let (Ok(library), Some(root)) = (&result, &cache_root) {
+                    if let (Ok(library), Some(root)) = (&result, &dirs.cache) {
                         match MediaCache::open(root, &library.library_id) {
                             Some(opened) => {
                                 let opened = Arc::new(opened);
@@ -236,6 +266,16 @@ impl Session {
                                 trim_in_background(opened, cancelled);
                             }
                             None => tracing::warn!("library id is not a safe cache directory name"),
+                        }
+                    }
+                    if let (Ok(library), Some(root)) = (&result, &dirs.data) {
+                        match queue_path(root, &library.library_id) {
+                            Some(path) => {
+                                let queue = UploadQueue::load(&path);
+                                let _ = uploads
+                                    .set(Uploads::start(queue, EngineConfig { path, ..engine }));
+                            }
+                            None => tracing::warn!("library id is not a safe file name"),
                         }
                     }
                     *lock_gate(&gate) = match &result {
@@ -267,10 +307,18 @@ impl Session {
     }
 
     /// This library's thumbnail cache, once the handshake has succeeded and a cache root was
-    /// given to [`open_with_cache`](Self::open_with_cache). Hand the `Arc` to jobs that run on
+    /// given to [`open_with_dirs`](Self::open_with_dirs). Hand the `Arc` to jobs that run on
     /// worker threads: its methods do disk I/O, so not the UI thread.
     pub fn media_cache(&self) -> Option<Arc<MediaCache>> {
         self.cache.get().cloned()
+    }
+
+    /// This library's uploads, once the handshake has succeeded and a data root was given to
+    /// [`open_with_dirs`](Self::open_with_dirs). The engine behind it stops when the session
+    /// is dropped; a session for another server has its own queue, so switching servers
+    /// pauses this one until a session for this library opens again.
+    pub fn uploads(&self) -> Option<&Uploads> {
+        self.uploads.get()
     }
 
     /// Thumbnails and previews of this session's server, as egui textures.
