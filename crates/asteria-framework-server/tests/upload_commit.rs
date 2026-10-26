@@ -397,3 +397,48 @@ async fn writer_commits_through_the_queue() {
     assert_eq!(files, vec![(s, "Inbox/IMG_0001.HEIC".to_string())]);
     assert!(e.root.join("Inbox/IMG_0001.HEIC").is_file());
 }
+
+#[test]
+fn rejects_windows_hostile_paths() {
+    let e = env();
+    let s = e.upload(b"jpeg bytes");
+    for p in [
+        "CON",
+        "con.jpg",
+        "a/Nul.tar.gz",
+        "AUX/x.jpg",
+        "prn.jpg",
+        "COM1.jpg",
+        "lpt9/x.jpg",
+        "x.jpg.",
+        "x.jpg ",
+        "a./x.jpg",
+        "a /x.jpg",
+        "x<1>.jpg",
+        "x\".jpg",
+        "x|y.jpg",
+        "x?.jpg",
+        "x*.jpg",
+        "x\u{1}.jpg",
+        "a\n/x.jpg",
+        "x\u{7f}.jpg",
+    ] {
+        let r = e.commit(&[(&s, p)], false);
+        assert!(matches!(r, Err(UploadError::Invalid(_))), "{p:?}: {r:?}");
+    }
+    assert!(e.inbox_is_empty());
+    // Names that merely contain a reserved word are fine.
+    let (files, _) = placed(e.commit(&[(&s, "CONCERT/COM10 x.jpg")], false).unwrap());
+    assert_eq!(files[0].1, "Inbox/CONCERT/COM10 x.jpg");
+}
+
+#[test]
+fn a_stray_sidecar_is_not_adopted() {
+    let e = env();
+    fs::create_dir(e.root.join("Inbox")).unwrap();
+    fs::write(e.root.join("Inbox/IMG_0001.HEIC.xmp"), b"someone else's").unwrap();
+    let s = e.upload(b"heic bytes");
+    let (files, _) = placed(e.commit(&[(&s, "IMG_0001.HEIC")], false).unwrap());
+    assert_eq!(files[0].1, "Inbox/IMG_0001 (2).HEIC");
+    assert!(!e.root.join("Inbox/IMG_0001.HEIC").exists());
+}

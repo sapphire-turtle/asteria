@@ -58,6 +58,13 @@ fn commit_with(
 ) -> Result<UploadCommitResult, UploadError> {
     let folder = validate_group(&params)?;
 
+    // No chunk write or abort may touch a session while we hash and move its file.
+    let _seals = params
+        .files
+        .iter()
+        .map(|f| store.seal(user, &f.session))
+        .collect::<Result<Vec<_>, _>>()?;
+
     // Every session must be complete and match the hash claimed at `begin`.
     let mut items = Vec::with_capacity(params.files.len());
     for f in &params.files {
@@ -103,6 +110,7 @@ fn commit_with(
 
     // A sidecar that does not parse is dropped; the media still goes in.
     let mut warnings = Vec::new();
+    let mut dropped = Vec::new();
     let mut kept = Vec::with_capacity(items.len());
     for item in items {
         if item.content.is_none() {
@@ -110,11 +118,11 @@ fn commit_with(
                 Ok(Some(_)) => {}
                 Ok(None) => return Err(UploadError::NotFound),
                 Err(FwError::MalformedSidecar { reason, .. }) => {
-                    store.remove(&item.session);
                     warnings.push(UploadWarning::SidecarDropped {
-                        session: item.session,
+                        session: item.session.clone(),
                         reason,
                     });
+                    dropped.push(item.session);
                     continue;
                 }
                 Err(e) => return Err(fw(e)),
@@ -139,7 +147,10 @@ fn commit_with(
         .take_while(|d| !d.exists())
         .last()
         .map(Path::to_path_buf);
-    fs::create_dir_all(&dir)?;
+    if let Err(e) = fs::create_dir_all(&dir) {
+        roll_back(&[], &dir, created_from.as_deref());
+        return Err(e.into());
+    }
     let mut placed: Vec<(&Item, PathBuf, String)> = Vec::with_capacity(kept.len());
     for item in &kept {
         let name = numbered(&item.name, n);
@@ -170,8 +181,8 @@ fn commit_with(
             tracing::error!(path = %rel, error = %e, "could not journal an upload");
         }
     }
-    for (item, _, _) in &placed {
-        store.remove(&item.session);
+    for session in placed.iter().map(|(i, _, _)| &i.session).chain(&dropped) {
+        store.remove(session);
     }
 
     Ok(UploadCommitResult::Placed {
@@ -222,15 +233,28 @@ fn validate_group(params: &UploadCommitParams) -> Result<&str, UploadError> {
     Ok(folder)
 }
 
-/// `/`-separated, relative, every element non-empty and not starting with `.`; no `\`,
-/// `:` or NUL anywhere.
+/// Characters no path may contain: separators other than `/`, and what Windows forbids.
+const FORBIDDEN: [char; 8] = ['\\', ':', '<', '>', '"', '|', '?', '*'];
+
+/// Windows device names, reserved with any extension.
+const RESERVED: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// `/`-separated and relative. Every element is non-empty, does not start with `.`, does
+/// not end in `.` or a space, and is not a Windows device name; no [`FORBIDDEN`] or control
+/// character anywhere.
 fn validate_path(path: &str) -> Result<(), UploadError> {
     let invalid = |why: &str| Err(UploadError::Invalid(format!("path {path:?}: {why}")));
     if path.is_empty() {
         return invalid("empty");
     }
-    if path.contains(['\\', ':', '\0']) {
-        return invalid("contains '\\', ':' or NUL");
+    if path
+        .chars()
+        .any(|c| FORBIDDEN.contains(&c) || c.is_control())
+    {
+        return invalid("contains a character not allowed in file names");
     }
     for element in path.split('/') {
         if element.is_empty() {
@@ -238,6 +262,13 @@ fn validate_path(path: &str) -> Result<(), UploadError> {
         }
         if element.starts_with('.') {
             return invalid("element starts with '.'");
+        }
+        if element.ends_with(['.', ' ']) {
+            return invalid("element ends with '.' or a space");
+        }
+        let stem = element.split('.').next().unwrap_or(element);
+        if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
+            return invalid("element is a reserved device name");
         }
     }
     Ok(())
@@ -266,13 +297,21 @@ fn numbered(name: &str, n: u32) -> String {
     }
 }
 
-/// The first `n` under which no file of the group is taken in `dir`.
+/// The first `n` under which no file of the group is taken in `dir`, nor the sidecar name
+/// of any media file (a stray sidecar there would be adopted by the new media).
 fn free_number(dir: &Path, items: &[Item]) -> Result<u32, UploadError> {
+    let names: Vec<String> = items
+        .iter()
+        .flat_map(|i| {
+            let sidecar = i.content.is_some().then(|| format!("{}.xmp", i.name));
+            std::iter::once(i.name.clone()).chain(sidecar)
+        })
+        .collect();
     (1..=MAX_NUMBER)
         .find(|&n| {
-            items
+            names
                 .iter()
-                .all(|i| dir.join(numbered(&i.name, n)).symlink_metadata().is_err())
+                .all(|name| dir.join(numbered(name, n)).symlink_metadata().is_err())
         })
         .ok_or_else(|| UploadError::Invalid("too many files with these names".into()))
 }
@@ -418,5 +457,64 @@ mod tests {
         assert!(matches!(r, Err(UploadError::Io(_))), "{r:?}");
         assert!(store.completed(me, &heic).is_ok());
         assert!(!root.join("Inbox").exists());
+    }
+
+    #[test]
+    fn sessions_are_sealed_during_the_commit_and_kept_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        fs::create_dir(&root).unwrap();
+        let lib = Library::init(&root, "owner").unwrap();
+        let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
+        let store = UploadStore::open(&root).unwrap();
+        let me = lib.owner();
+        let upload = |bytes: &[u8]| {
+            let tmp = dir.path().join("hash-me");
+            fs::write(&tmp, bytes).unwrap();
+            let s = store
+                .begin(me, bytes.len() as u64, file_hash(&tmp).unwrap())
+                .unwrap()
+                .session;
+            store.put_chunk(me, &s, 0, bytes).unwrap();
+            s
+        };
+        let jpg = upload(b"jpeg bytes");
+        let xmp = upload(b"<not xmp");
+        let params = UploadCommitParams {
+            files: vec![
+                UploadFile {
+                    session: jpg.clone(),
+                    path: "x.jpg".into(),
+                },
+                UploadFile {
+                    session: xmp.clone(),
+                    path: "x.jpg.xmp".into(),
+                },
+            ],
+            allow_duplicate: false,
+        };
+        let mut hook = |target: &Path| {
+            for (s, body) in [(&jpg, &b"jpeg bytes"[..]), (&xmp, &b"<not xmp"[..])] {
+                let chunk = store.put_chunk(me, s, 0, body);
+                assert!(matches!(chunk, Err(UploadError::Busy(_))), "{chunk:?}");
+                assert!(matches!(store.abort(me, s), Err(UploadError::Busy(_))));
+            }
+            // Then fail the move.
+            fs::write(target, b"squatter").unwrap();
+        };
+        let r = commit_with(&lib, &cache, &store, me, params, &mut hook);
+        assert!(matches!(r, Err(UploadError::Io(_))), "{r:?}");
+        // Unsealed again, and the dropped sidecar's session survives the failed commit.
+        for s in [&jpg, &xmp] {
+            assert!(store.completed(me, s).is_ok(), "{s}");
+            store
+                .put_chunk(
+                    me,
+                    s,
+                    0,
+                    &fs::read(store.completed(me, s).unwrap().data_path).unwrap(),
+                )
+                .unwrap();
+        }
     }
 }

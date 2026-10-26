@@ -4,7 +4,7 @@
 //! (pre-sized to the file's length; chunks are written in place) and `received`
 //! (one byte per chunk, 1 once that chunk is in `data`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -34,6 +34,9 @@ pub enum UploadError {
     Incomplete,
     #[error("file hash does not match")]
     HashMismatch,
+    /// The session is being committed; it cannot change meanwhile (HTTP 409, RPC `BUSY`).
+    #[error("upload session is busy: {0}")]
+    Busy(String),
     #[error("upload storage error: {0}")]
     Io(String),
 }
@@ -85,6 +88,24 @@ pub struct UploadStore {
     /// Serializes writes to one session; also held across `begin`'s quota check.
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     begin_lock: Mutex<()>,
+    /// Sessions a commit is reading; see [`UploadStore::seal`].
+    sealed: Mutex<HashSet<String>>,
+}
+
+/// Keeps a session sealed until dropped; see [`UploadStore::seal`].
+pub struct SealGuard<'a> {
+    store: &'a UploadStore,
+    session: String,
+}
+
+impl Drop for SealGuard<'_> {
+    fn drop(&mut self) {
+        lock(&self.store.sealed).remove(&self.session);
+    }
+}
+
+fn being_committed() -> UploadError {
+    UploadError::Busy("the upload is being committed".into())
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -114,6 +135,7 @@ impl UploadStore {
             limits,
             locks: Mutex::new(HashMap::new()),
             begin_lock: Mutex::new(()),
+            sealed: Mutex::new(HashSet::new()),
         })
     }
 
@@ -212,7 +234,12 @@ impl UploadStore {
             )));
         }
 
-        self.locked(session, |dir| Self::write_chunk(dir, index, body))
+        self.locked(session, |dir| {
+            if self.is_sealed(session) {
+                return Err(being_committed());
+            }
+            Self::write_chunk(dir, index, body)
+        })
     }
 
     fn write_chunk(dir: &Path, index: u64, body: &[u8]) -> Result<(), UploadError> {
@@ -246,8 +273,39 @@ impl UploadStore {
 
     pub fn abort(&self, owner: UserId, session: &str) -> Result<(), UploadError> {
         self.owned(owner, session)?;
-        self.remove(session);
+        self.locked(session, |dir| {
+            if self.is_sealed(session) {
+                return Err(being_committed());
+            }
+            let _ = fs::remove_dir_all(dir);
+            Ok(())
+        })?;
+        lock(&self.locks).remove(session);
         Ok(())
+    }
+
+    /// Freezes `owner`'s session for a commit: until the guard is dropped, `put_chunk` and
+    /// `abort` fail with `Busy` and `purge_expired` leaves it alone. The seal is set under
+    /// the session's lock, so no chunk write is in flight once this returns. [`remove`]
+    /// still works on a sealed session.
+    ///
+    /// [`remove`]: UploadStore::remove
+    pub fn seal(&self, owner: UserId, session: &str) -> Result<SealGuard<'_>, UploadError> {
+        self.owned(owner, session)?;
+        self.locked(session, |_| {
+            if !lock(&self.sealed).insert(session.to_owned()) {
+                return Err(being_committed());
+            }
+            Ok(())
+        })?;
+        Ok(SealGuard {
+            store: self,
+            session: session.to_owned(),
+        })
+    }
+
+    fn is_sealed(&self, session: &str) -> bool {
+        lock(&self.sealed).contains(session)
     }
 
     pub fn completed(&self, owner: UserId, session: &str) -> Result<CompletedUpload, UploadError> {
@@ -300,6 +358,12 @@ impl UploadStore {
                     .unwrap_or(true)
             };
             if !stale {
+                continue;
+            }
+            // Under the session's lock, so a commit cannot seal it between check and removal.
+            let session_lock = is_session_id(&name).then(|| self.session_lock(&name));
+            let _guard = session_lock.as_deref().map(lock);
+            if self.is_sealed(&name) {
                 continue;
             }
             let ok = if path.is_dir() {

@@ -361,3 +361,29 @@ fn purge_waits_for_a_begin_in_progress() {
         assert!(store.status(me, &s).is_ok());
     }
 }
+
+#[test]
+fn a_sealed_session_cannot_change() {
+    let (_dir, store) = store();
+    let me = user();
+    let data = pattern(10);
+    let s = store.begin(me, 10, hash()).unwrap().session;
+    store.put_chunk(me, &s, 0, &data).unwrap();
+
+    assert!(matches!(store.seal(user(), &s), Err(UploadError::NotFound)));
+    let guard = store.seal(me, &s).unwrap();
+    assert!(matches!(store.seal(me, &s), Err(UploadError::Busy(_))));
+    assert!(matches!(
+        store.put_chunk(me, &s, 0, &data),
+        Err(UploadError::Busy(_))
+    ));
+    assert!(matches!(store.abort(me, &s), Err(UploadError::Busy(_))));
+    let later = SystemTime::now() + WEEK + Duration::from_secs(60);
+    assert_eq!(store.purge_expired(later), 0);
+    assert!(store.completed(me, &s).is_ok());
+
+    drop(guard);
+    store.put_chunk(me, &s, 0, &data).unwrap();
+    store.abort(me, &s).unwrap();
+    assert!(matches!(store.status(me, &s), Err(UploadError::NotFound)));
+}

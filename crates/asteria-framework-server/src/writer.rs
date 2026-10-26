@@ -101,14 +101,7 @@ pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHa
                     params,
                     reply,
                 } => {
-                    let r = tokio::task::spawn_blocking(move || {
-                        commit(&lib, &cache, &store, user, params)
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::error!(error = %e, "upload commit panicked");
-                        Err(UploadError::Io("write job failed".into()))
-                    });
+                    let r = run_blocking(move || commit(&lib, &cache, &store, user, params)).await;
                     let _ = reply.send(r);
                 }
                 Job::Close => rx.close(),
@@ -118,14 +111,31 @@ pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHa
     (Writer { tx }, handle)
 }
 
-async fn run_blocking<T: Send + 'static>(
-    f: impl FnOnce() -> Result<T, WriteError> + Send + 'static,
-) -> Result<T, WriteError> {
+/// The error a job reports when its blocking task panicked.
+trait JobError: Send + 'static {
+    fn job_failed() -> Self;
+}
+
+impl JobError for WriteError {
+    fn job_failed() -> Self {
+        WriteError::Internal("write job failed".into())
+    }
+}
+
+impl JobError for UploadError {
+    fn job_failed() -> Self {
+        UploadError::Io("write job failed".into())
+    }
+}
+
+async fn run_blocking<T: Send + 'static, E: JobError>(
+    f: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> Result<T, E> {
     match tokio::task::spawn_blocking(f).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, "write job panicked");
-            Err(WriteError::Internal("write job failed".into()))
+            Err(E::job_failed())
         }
     }
 }
