@@ -1,5 +1,5 @@
-//! The single per-library write queue. Every write to original files (sidecar edits and
-//! orphan relinks) goes through one task that runs jobs one at a time on the blocking
+//! The single per-library write queue. Every write to original files (sidecar edits,
+//! orphan relinks and upload commits) goes through one task that runs jobs one at a time on the blocking
 //! pool, then refreshes the cache.
 //!
 //! Shutdown: [`spawn_writer`] returns the [`Writer`] and the task's `JoinHandle`. Once
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use asteria_framework::hash::{ContentHash, HashScope};
 use asteria_framework::journal::Actor;
 use asteria_framework::{Error as FwError, Library, UserId};
-use asteria_framework_api::{ItemId, MediaUpdateParams};
+use asteria_framework_api::{ItemId, MediaUpdateParams, UploadCommitParams, UploadCommitResult};
 use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -24,6 +24,8 @@ use crate::cache::{Cache, ItemRecord, SidecarSnapshot, StoredHash};
 use crate::error::ServerError;
 use crate::hashing::{RelinkReport, relink_orphans};
 use crate::scan::mtime_ns;
+use crate::upload::{UploadError, UploadStore};
+use crate::upload_commit::commit;
 
 const QUEUE: usize = 256;
 
@@ -51,6 +53,12 @@ enum Job {
     },
     Relink {
         reply: oneshot::Sender<Result<RelinkReport, WriteError>>,
+    },
+    Commit {
+        store: Arc<UploadStore>,
+        user: UserId,
+        params: UploadCommitParams,
+        reply: oneshot::Sender<Result<UploadCommitResult, UploadError>>,
     },
     /// Refuse new jobs; finish the queued ones and end.
     Close,
@@ -85,6 +93,22 @@ pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHa
                         })
                     })
                     .await;
+                    let _ = reply.send(r);
+                }
+                Job::Commit {
+                    store,
+                    user,
+                    params,
+                    reply,
+                } => {
+                    let r = tokio::task::spawn_blocking(move || {
+                        commit(&lib, &cache, &store, user, params)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::error!(error = %e, "upload commit panicked");
+                        Err(UploadError::Io("write job failed".into()))
+                    });
                     let _ = reply.send(r);
                 }
                 Job::Close => rx.close(),
@@ -142,6 +166,28 @@ impl Writer {
             .await
             .map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?
+    }
+
+    /// Places a group of finished upload sessions under `Inbox/` (see
+    /// [`crate::upload_commit::commit`]). Does not rescan; the caller asks for that.
+    pub async fn commit_upload(
+        &self,
+        store: Arc<UploadStore>,
+        user: UserId,
+        params: UploadCommitParams,
+    ) -> Result<UploadCommitResult, UploadError> {
+        let upload_stopped = || UploadError::Io("writer stopped".into());
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Job::Commit {
+                store,
+                user,
+                params,
+                reply,
+            })
+            .await
+            .map_err(|_| upload_stopped())?;
+        rx.await.map_err(|_| upload_stopped())?
     }
 }
 

@@ -5,6 +5,7 @@ pub mod auth;
 pub mod cache;
 pub mod config;
 pub mod error;
+mod fsutil;
 pub mod hashing;
 mod media_http;
 pub mod process;
@@ -12,6 +13,7 @@ mod rpc;
 pub mod scan;
 pub mod state;
 pub mod upload;
+pub mod upload_commit;
 pub mod watch;
 pub mod writer;
 
