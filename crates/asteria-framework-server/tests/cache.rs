@@ -420,3 +420,61 @@ fn schema_2_cache_is_rebuilt() {
     assert_eq!(c.count().unwrap(), 0);
     assert_ne!(c.epoch(), epoch);
 }
+
+#[test]
+fn leftover_key_of_undecodable_record_is_not_returned() {
+    let d = tempfile::tempdir().unwrap();
+    let l = lib();
+    {
+        let c = Cache::open(d.path(), &l).unwrap();
+        let mut r = rec(&l, "a.jpg");
+        r.hash = Some(sh("blake3:aa", 10, 1));
+        c.put(&r).unwrap();
+    }
+    {
+        let db = redb::Database::open(d.path().join("cache.redb")).unwrap();
+        let w = db.begin_write().unwrap();
+        {
+            let def: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("items");
+            let mut t = w.open_table(def).unwrap();
+            t.insert("a.jpg", b"garbage".as_slice()).unwrap();
+        }
+        w.commit().unwrap();
+    }
+    let c = Cache::open(d.path(), &l).unwrap();
+    let mut r = rec(&l, "a.jpg");
+    r.hash = Some(sh("blake3:bb", 10, 1));
+    c.put(&r).unwrap();
+    assert!(c.paths_with_hash("blake3:aa", "file/1").unwrap().is_empty());
+    assert_eq!(c.paths_with_hash("blake3:bb", "file/1").unwrap(), ["a.jpg"]);
+}
+
+#[test]
+fn set_hash_many_and_put_many_replace_changed_hash() {
+    let d = tempfile::tempdir().unwrap();
+    let l = lib();
+    let c = Cache::open(d.path(), &l).unwrap();
+    let recs: Vec<_> = ["a.jpg", "b.jpg"]
+        .iter()
+        .map(|p| {
+            let mut r = rec(&l, p);
+            r.hash = Some(sh("blake3:aa", 10, 1));
+            r
+        })
+        .collect();
+    c.put_many(&recs).unwrap();
+    let n = c
+        .set_hash_many(&[
+            ("a.jpg".to_string(), Some(sh("blake3:bb", 10, 1))),
+            ("b.jpg".to_string(), None),
+        ])
+        .unwrap();
+    assert_eq!(n, 2);
+    assert!(c.paths_with_hash("blake3:aa", "file/1").unwrap().is_empty());
+    assert_eq!(c.paths_with_hash("blake3:bb", "file/1").unwrap(), ["a.jpg"]);
+    let mut r = rec(&l, "a.jpg");
+    r.hash = Some(sh("blake3:cc", 10, 1));
+    c.put_many(&[r]).unwrap();
+    assert!(c.paths_with_hash("blake3:bb", "file/1").unwrap().is_empty());
+    assert_eq!(c.paths_with_hash("blake3:cc", "file/1").unwrap(), ["a.jpg"]);
+}

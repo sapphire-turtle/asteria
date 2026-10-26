@@ -417,7 +417,7 @@ impl Cache {
         let hashes = r.open_table(HASHES).map_err(ce)?;
         let items = r.open_table(ITEMS).map_err(ce)?;
         let prefix = hash_key(scope, hash, "");
-        // '\n' + 1 = '\x0b' bounds every key that starts with `prefix`.
+        // Must match `hash_key`: '\n' + 1 = '\x0b' bounds every key that starts with `prefix`.
         let upper = format!("{scope}\n{hash}\x0b");
         let mut out = Vec::new();
         for e in hashes
@@ -432,11 +432,12 @@ impl Cache {
             let Ok(rec) = serde_json::from_slice::<ItemRecord>(v.value()) else {
                 continue;
             };
-            if rec
-                .hash
-                .as_ref()
-                .is_some_and(|h| h.size == rec.size && h.mtime_ns == rec.mtime_ns)
-            {
+            if rec.hash.as_ref().is_some_and(|h| {
+                h.hash == hash
+                    && h.scope == scope
+                    && h.size == rec.size
+                    && h.mtime_ns == rec.mtime_ns
+            }) {
                 out.push(path.to_string());
             }
         }
@@ -584,6 +585,7 @@ impl Cache {
     }
 }
 
+/// Format is relied on by the prefix range in `paths_with_hash`.
 fn hash_key(scope: &str, hash: &str, path: &str) -> String {
     format!("{scope}\n{hash}\n{path}")
 }
