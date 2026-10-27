@@ -1,3 +1,5 @@
+<img src="docs/icons/asteria-photos.svg" alt="asteria photos" width="64" height="64"> <img src="docs/icons/asteria-music.svg" alt="asteria music" width="64" height="64">
+
 # project-asteria
 
 ## Running the photos server
