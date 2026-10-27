@@ -398,6 +398,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "asteria-music-server"
+version = "0.1.0"
+dependencies = [
+ "asteria-framework",
+ "asteria-framework-server",
+ "asteria-music-api",
+ "lofty",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "asteria-photos"
 version = "0.1.0"
 dependencies = [
