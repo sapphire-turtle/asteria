@@ -404,6 +404,7 @@ dependencies = [
  "asteria-framework",
  "asteria-framework-server",
  "asteria-music-api",
+ "blake3",
  "lofty",
  "serde_json",
  "tempfile",

@@ -10,6 +10,7 @@ publish = false
 asteria-framework = { path = "../crates/asteria-framework" }
 asteria-framework-server = { path = "../crates/asteria-framework-server" }
 asteria-music-api = { path = "../crates/asteria-music-api" }
+blake3.workspace = true
 lofty.workspace = true
 serde_json.workspace = true
 unicode-normalization.workspace = true

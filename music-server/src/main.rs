@@ -1,5 +1,6 @@
 //! The Asteria Music server: `init`, `token add` and `serve`.
 
+mod cover;
 mod ext;
 mod index;
 mod playlist;
