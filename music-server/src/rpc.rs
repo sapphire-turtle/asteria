@@ -24,10 +24,11 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::cover::{self, FolderImages};
 use crate::ext::{MusicExtension, decode_tags, is_playlist};
 use crate::index::{IndexedAlbum, IndexedArtist};
-use crate::playlist::{self, Resolved};
-use crate::{cover, tags};
+use crate::playlist::{self, Resolved, Roots};
+use crate::tags;
 
 // The same paging as `folder.list` (private constants of framework-server's rpc.rs).
 const DEFAULT_LIMIT: u32 = 200;
@@ -99,13 +100,13 @@ fn count(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-fn album_summary(library: &LibraryId, album: &IndexedAlbum, extras: &[String]) -> AlbumSummary {
+fn album_summary(library: &LibraryId, album: &IndexedAlbum, covers: &FolderImages) -> AlbumSummary {
     // An embedded picture first; else the first track, when its folders hold a cover image.
     let cover = album.embedded_cover_item.as_deref().or_else(|| {
         album
             .tracks
             .first()
-            .filter(|first| cover::folder_image(first, extras.iter().map(String::as_str)).is_some())
+            .filter(|first| covers.best(first).is_some())
             .map(String::as_str)
     });
     AlbumSummary {
@@ -152,7 +153,7 @@ pub fn album_list(ext: &MusicExtension, ctx: &ExtContext, v: Value) -> Result<Va
     to_value(AlbumListing {
         albums: albums
             .iter()
-            .map(|a| album_summary(&library, a, &extras))
+            .map(|a| album_summary(&library, a, &extras.covers))
             .collect(),
         next_cursor,
     })
@@ -167,7 +168,7 @@ pub fn album_get(ext: &MusicExtension, ctx: &ExtContext, v: Value) -> Result<Val
         tracks.extend(track(ctx, rel)?);
     }
     to_value(Album {
-        summary: album_summary(&ctx.library.config().id, album, &extras),
+        summary: album_summary(&ctx.library.config().id, album, &extras.covers),
         folder: album.key_folder.clone(),
         tracks,
     })
@@ -191,7 +192,7 @@ pub fn artist_get(ext: &MusicExtension, ctx: &ExtContext, v: Value) -> Result<Va
     let summaries = |ids: &[_]| -> Vec<AlbumSummary> {
         ids.iter()
             .filter_map(|id| index.album(id))
-            .map(|a| album_summary(&library, a, &extras))
+            .map(|a| album_summary(&library, a, &extras.covers))
             .collect()
     };
     to_value(Artist {
@@ -226,7 +227,7 @@ fn playlists(library: &LibraryId, extras: &[String]) -> Vec<PlaylistSummary> {
 pub fn playlist_list(ext: &MusicExtension, ctx: &ExtContext, v: Value) -> Result<Value, RpcError> {
     let p: ListParams = params(v)?;
     let (_, _, extras) = ext.snapshot(ctx).map_err(internal)?;
-    let all = playlists(&ctx.library.config().id, &extras);
+    let all = playlists(&ctx.library.config().id, &extras.paths);
     let (page, next_cursor) = page(&all, &p, |pl| &pl.id.0)?;
     to_value(PlaylistListing {
         playlists: page.to_vec(),
@@ -237,7 +238,7 @@ pub fn playlist_list(ext: &MusicExtension, ctx: &ExtContext, v: Value) -> Result
 pub fn playlist_get(ext: &MusicExtension, ctx: &ExtContext, v: Value) -> Result<Value, RpcError> {
     let p: PlaylistGetParams = params(v)?;
     let (_, _, extras) = ext.snapshot(ctx).map_err(internal)?;
-    let summary = playlists(&ctx.library.config().id, &extras)
+    let summary = playlists(&ctx.library.config().id, &extras.paths)
         .into_iter()
         .find(|pl| pl.id == p.id)
         .ok_or_else(not_found)?;
@@ -268,9 +269,11 @@ pub fn playlist_get(ext: &MusicExtension, ctx: &ExtContext, v: Value) -> Result<
         }
     };
 
+    // Absolute entries may name the root as configured or as resolved through symlinks.
+    let roots = Roots::new(root, root.canonicalize().ok().as_deref());
     let mut entries = Vec::with_capacity(parsed.entries.len());
     for entry in parsed.entries {
-        let resolved = playlist::resolve(&summary.path, &entry, root, is_audio, by_hash);
+        let resolved = playlist::resolve(&summary.path, &entry, &roots, is_audio, by_hash);
         if let Some(e) = failure.take() {
             return Err(internal(e));
         }
@@ -704,6 +707,21 @@ mod tests {
             .unwrap();
         let abs = e.root.join(&rec.path);
         assert_eq!(e.ext.thumb_source(&e.ctx(), &rec, &abs), ThumbSource::None);
+    }
+
+    #[test]
+    fn a_thumbnail_does_not_build_the_index() {
+        let e = env();
+        e.library();
+        fs::copy(fixture("red.jpg"), e.root.join("B/B Album/Cover.JPG")).unwrap();
+        e.scan();
+        let rec = e.cache.get_by_path("B/B Album/01.flac").unwrap().unwrap();
+        let abs = e.root.join(&rec.path);
+        assert!(matches!(
+            e.ext.thumb_source(&e.ctx(), &rec, &abs),
+            ThumbSource::Image { ext: "jpg", .. }
+        ));
+        assert!(!e.ext.built());
     }
 
     #[test]

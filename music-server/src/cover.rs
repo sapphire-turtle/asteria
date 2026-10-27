@@ -1,11 +1,14 @@
 //! Album art: a track's embedded picture, else an image file in its folder.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use asteria_framework_server::ThumbSource;
+use lofty::config::ParseOptions;
 use lofty::picture::{Picture, PictureType};
 use lofty::prelude::*;
+use lofty::probe::Probe;
 
 use crate::index::album_folder;
 
@@ -35,7 +38,12 @@ fn ext_for_mime(mime: &str) -> &'static str {
 
 /// Embedded picture: front cover first, else the first picture. `None` if none or unreadable.
 pub fn embedded(abs: &Path) -> Option<(Vec<u8>, &'static str)> {
-    let file = lofty::read_from_path(abs).ok()?;
+    // Only the tags are needed, not the audio properties.
+    let file = Probe::open(abs)
+        .ok()?
+        .options(ParseOptions::new().read_properties(false))
+        .read()
+        .ok()?;
     let pictures: Vec<&Picture> = file.tags().iter().flat_map(|t| t.pictures()).collect();
     let pic = pictures
         .iter()
@@ -48,40 +56,73 @@ pub fn embedded(abs: &Path) -> Option<(Vec<u8>, &'static str)> {
     Some((pic.data().to_vec(), ext))
 }
 
-/// The folder images for the track at `rel`, best first, from the extras' paths: track folder
-/// first, then the album folder (`index::album_folder`); within a folder, NAMES order then
-/// EXTS order.
-fn folder_candidates<'a>(rel: &str, extras: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let track_dir = rel.rsplit_once('/').map_or("", |(d, _)| d);
-    let album_dir = album_folder(rel);
-    let extras: Vec<&str> = extras.into_iter().collect();
-    let mut dirs = vec![track_dir];
-    if album_dir != track_dir {
-        dirs.push(album_dir);
-    }
-    let mut out = Vec::new();
-    for dir in dirs {
-        for name in NAMES {
-            for ext in EXTS {
-                let wanted = format!("{name}.{ext}");
-                out.extend(
-                    extras
-                        .iter()
-                        .filter(|e| {
-                            let (d, f) = e.rsplit_once('/').unwrap_or(("", e));
-                            d == dir && f.to_ascii_lowercase() == wanted
-                        })
-                        .map(|e| (*e).to_string()),
-                );
+/// The cover images among the extras, grouped by folder once so that a lookup only looks at
+/// the folders it needs.
+#[derive(Debug, Default)]
+pub struct FolderImages(HashMap<String, Vec<(String, String)>>);
+
+impl FolderImages {
+    /// Keeps the extras whose file name is a cover name, in the given order.
+    pub fn new<'a>(extras: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut by_dir: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for rel in extras {
+            let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+            if is_cover_name(name) {
+                by_dir
+                    .entry(dir.to_owned())
+                    .or_default()
+                    .push((name.to_ascii_lowercase(), rel.to_owned()));
             }
         }
+        Self(by_dir)
     }
-    out
+
+    /// [`FolderImages::new`] of only the folders the track at `rel` looks in.
+    pub fn for_track<'a>(rel: &str, extras: impl IntoIterator<Item = &'a str>) -> Self {
+        let (track_dir, album_dir) = track_dirs(rel);
+        Self::new(extras.into_iter().filter(|e| {
+            let dir = e.rsplit_once('/').map_or("", |(d, _)| d);
+            dir == track_dir || dir == album_dir
+        }))
+    }
+
+    /// The folder images for the track at `rel`, best first: track folder first, then the
+    /// album folder (`index::album_folder`); within a folder, NAMES order then EXTS order.
+    fn candidates(&self, rel: &str) -> Vec<&str> {
+        let (track_dir, album_dir) = track_dirs(rel);
+        let mut dirs = vec![track_dir];
+        if album_dir != track_dir {
+            dirs.push(album_dir);
+        }
+        let mut out = Vec::new();
+        for files in dirs.into_iter().filter_map(|d| self.0.get(d)) {
+            for name in NAMES {
+                for ext in EXTS {
+                    let wanted = format!("{name}.{ext}");
+                    out.extend(
+                        files
+                            .iter()
+                            .filter(|(lower, _)| *lower == wanted)
+                            .map(|(_, rel)| rel.as_str()),
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// The best folder image for the track at `rel`.
+    pub fn best(&self, rel: &str) -> Option<&str> {
+        self.candidates(rel).into_iter().next()
+    }
 }
 
-/// The best folder image for the track at `rel`, from the extras' paths.
-pub fn folder_image<'a>(rel: &str, extras: impl IntoIterator<Item = &'a str>) -> Option<String> {
-    folder_candidates(rel, extras).into_iter().next()
+/// The folder of the track at `rel` and its album folder (the same for a single-disc album).
+fn track_dirs(rel: &str) -> (&str, &str) {
+    (
+        rel.rsplit_once('/').map_or("", |(d, _)| d),
+        album_folder(rel),
+    )
 }
 
 fn key(bytes: &[u8]) -> String {
@@ -126,7 +167,7 @@ fn read_folder_image(root: &Path, img: &str) -> Option<(Vec<u8>, &'static str)> 
     Some((bytes, ext))
 }
 
-pub fn thumb_source(root: &Path, rel: &str, abs: &Path, extras: &[String]) -> ThumbSource {
+pub fn thumb_source(root: &Path, rel: &str, abs: &Path, images: &FolderImages) -> ThumbSource {
     let from_bytes = |bytes: Vec<u8>, ext| ThumbSource::Image {
         key: key(&bytes),
         bytes,
@@ -135,8 +176,9 @@ pub fn thumb_source(root: &Path, rel: &str, abs: &Path, extras: &[String]) -> Th
     if let Some((bytes, ext)) = embedded(abs) {
         return from_bytes(bytes, ext);
     }
-    folder_candidates(rel, extras.iter().map(String::as_str))
-        .iter()
+    images
+        .candidates(rel)
+        .into_iter()
         .find_map(|img| read_folder_image(root, img))
         .map_or(ThumbSource::None, |(bytes, ext)| from_bytes(bytes, ext))
 }
@@ -235,21 +277,50 @@ mod tests {
 
     #[test]
     fn track_folder_beats_album_folder() {
-        let got = folder_image(
-            "A/Album/CD1/01.flac",
-            ["A/Album/folder.jpg", "A/Album/CD1/cover.jpg"],
+        assert_eq!(
+            FolderImages::new(["A/Album/folder.jpg", "A/Album/CD1/cover.jpg"])
+                .best("A/Album/CD1/01.flac"),
+            Some("A/Album/CD1/cover.jpg")
         );
-        assert_eq!(got.as_deref(), Some("A/Album/CD1/cover.jpg"));
-        let got = folder_image("A/Album/CD1/01.flac", ["A/Album/folder.jpg"]);
-        assert_eq!(got.as_deref(), Some("A/Album/folder.jpg"));
+        assert_eq!(
+            FolderImages::new(["A/Album/folder.jpg"]).best("A/Album/CD1/01.flac"),
+            Some("A/Album/folder.jpg")
+        );
     }
 
     #[test]
     fn names_order_within_a_folder() {
-        let got = folder_image("A/01.flac", ["A/folder.jpg", "A/cover.png"]);
-        assert_eq!(got.as_deref(), Some("A/cover.png"));
-        let got = folder_image("A/01.flac", ["A/cover.png", "A/Cover.JPG"]);
-        assert_eq!(got.as_deref(), Some("A/Cover.JPG"));
+        assert_eq!(
+            FolderImages::new(["A/folder.jpg", "A/cover.png"]).best("A/01.flac"),
+            Some("A/cover.png")
+        );
+        assert_eq!(
+            FolderImages::new(["A/cover.png", "A/Cover.JPG"]).best("A/01.flac"),
+            Some("A/Cover.JPG")
+        );
+    }
+
+    #[test]
+    fn only_cover_names_in_the_track_folders_count() {
+        let extras = [
+            "A/list.m3u8",
+            "A/back.jpg",
+            "B/cover.jpg",
+            "A/Album/CD1/x/cover.jpg",
+        ];
+        assert_eq!(FolderImages::new(extras).best("A/01.flac"), None);
+        let extras = ["A/Album/cover.jpg", "A/Album/CD1/folder.png", "B/cover.jpg"];
+        let all = FolderImages::new(extras);
+        let some = FolderImages::for_track("A/Album/CD1/01.flac", extras);
+        assert_eq!(some.0.len(), 2, "only the track and album folders");
+        assert_eq!(
+            some.candidates("A/Album/CD1/01.flac"),
+            all.candidates("A/Album/CD1/01.flac")
+        );
+        assert_eq!(
+            all.candidates("A/Album/CD1/01.flac"),
+            ["A/Album/CD1/folder.png", "A/Album/cover.jpg"]
+        );
     }
 
     #[test]
@@ -265,7 +336,7 @@ mod tests {
             dir.path(),
             "a.flac",
             &dir.path().join("a.flac"),
-            &["cover.jpg".to_string()],
+            &FolderImages::new(["cover.jpg"]),
         );
         assert_eq!(
             src,
@@ -286,7 +357,7 @@ mod tests {
             dir.path(),
             "a.flac",
             &dir.path().join("a.flac"),
-            &["cover.jpg".to_string()],
+            &FolderImages::new(["cover.jpg"]),
         );
         assert_eq!(
             src,
@@ -304,8 +375,8 @@ mod tests {
         let pics = [(PictureType::CoverFront, MimeType::Png, &b"same"[..])];
         let a = track_with(dir.path(), "a.flac", &pics);
         let b = track_with(dir.path(), "b.flac", &pics);
-        let ka = thumb_source(dir.path(), "a.flac", &a, &[]);
-        let kb = thumb_source(dir.path(), "b.flac", &b, &[]);
+        let ka = thumb_source(dir.path(), "a.flac", &a, &FolderImages::default());
+        let kb = thumb_source(dir.path(), "b.flac", &b, &FolderImages::default());
         assert_eq!(ka, kb);
         assert!(matches!(ka, ThumbSource::Image { ref key, .. } if key.starts_with("blake3:")));
     }
@@ -315,11 +386,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = plain_track(dir.path(), "a.flac");
         assert_eq!(
-            thumb_source(dir.path(), "a.flac", &a, &[]),
+            thumb_source(dir.path(), "a.flac", &a, &FolderImages::default()),
             ThumbSource::None
         );
         // An extra that is listed but missing on disk is also nothing.
-        let extras = ["cover.jpg".to_string()];
+        let extras = FolderImages::new(["cover.jpg"]);
         assert_eq!(
             thumb_source(dir.path(), "a.flac", &a, &extras),
             ThumbSource::None
@@ -333,7 +404,7 @@ mod tests {
         big.set_len(33 * 1024 * 1024).unwrap();
         std::fs::write(dir.path().join("folder.png"), b"small").unwrap();
         let a = plain_track(dir.path(), "a.flac");
-        let extras = ["cover.jpg".to_string(), "folder.png".to_string()];
+        let extras = FolderImages::new(["cover.jpg", "folder.png"]);
         assert_eq!(
             thumb_source(dir.path(), "a.flac", &a, &extras),
             ThumbSource::Image {
@@ -356,13 +427,13 @@ mod tests {
         )
         .unwrap();
         let a = plain_track(root.path(), "a.flac");
-        let extras = ["cover.jpg".to_string()];
+        let extras = FolderImages::new(["cover.jpg"]);
         assert_eq!(
             thumb_source(root.path(), "a.flac", &a, &extras),
             ThumbSource::None
         );
         std::fs::write(root.path().join("folder.png"), b"ok").unwrap();
-        let extras = ["cover.jpg".to_string(), "folder.png".to_string()];
+        let extras = FolderImages::new(["cover.jpg", "folder.png"]);
         assert_eq!(
             thumb_source(root.path(), "a.flac", &a, &extras),
             ThumbSource::Image {
@@ -381,7 +452,7 @@ mod tests {
         std::fs::write(root.path().join(".hidden/pic.jpg"), b"x").unwrap();
         std::os::unix::fs::symlink(".hidden/pic.jpg", root.path().join("cover.jpg")).unwrap();
         let a = plain_track(root.path(), "a.flac");
-        let extras = ["cover.jpg".to_string()];
+        let extras = FolderImages::new(["cover.jpg"]);
         assert_eq!(
             thumb_source(root.path(), "a.flac", &a, &extras),
             ThumbSource::None

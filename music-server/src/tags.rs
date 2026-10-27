@@ -1,19 +1,39 @@
 //! Reading the embedded tags of a track with lofty.
 
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
 use asteria_music_api::TrackTags;
+use lofty::error::ErrorKind;
 use lofty::prelude::*;
 use lofty::tag::{ItemKey, Tag};
 
+/// The `tag_error` of a track whose tag reader panicked.
+const READER_PANICKED: &str = "tag reader failed";
+
 /// Reads the tags of `abs`. A file that cannot be read gives default tags with `tag_error`
-/// set to the kind of the failure (never a path), so the scan can carry on.
+/// set to a short label of the failure (never a path), so the scan can carry on. A panic in
+/// the tag reader (a hostile or corrupt file) is caught and reported the same way.
 pub fn read(abs: &Path) -> TrackTags {
+    guarded(|| read_unguarded(abs))
+}
+
+fn guarded(read: impl FnOnce() -> TrackTags) -> TrackTags {
+    std::panic::catch_unwind(AssertUnwindSafe(read)).unwrap_or_else(|_| {
+        tracing::warn!("the tag reader panicked; listing the track without tags");
+        TrackTags {
+            tag_error: Some(READER_PANICKED.into()),
+            ..TrackTags::default()
+        }
+    })
+}
+
+fn read_unguarded(abs: &Path) -> TrackTags {
     let file = match lofty::read_from_path(abs) {
         Ok(file) => file,
         Err(e) => {
             return TrackTags {
-                tag_error: Some(format!("unreadable tags: {:?}", e.kind())),
+                tag_error: Some(format!("unreadable tags: {}", error_label(e.kind()))),
                 ..TrackTags::default()
             };
         }
@@ -26,6 +46,28 @@ pub fn read(abs: &Path) -> TrackTags {
         .unwrap_or_default();
     out.duration_ms = u64::try_from(duration).ok();
     out
+}
+
+/// A short fixed label for a lofty error. Some kinds carry data (raw tag bytes, for one),
+/// which is not worth storing or sending.
+fn error_label(kind: &ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::UnknownFormat => "unknown format",
+        ErrorKind::TooMuchData | ErrorKind::Alloc(_) => "too much data",
+        ErrorKind::SizeMismatch => "size mismatch",
+        ErrorKind::FileDecoding(_) => "corrupt file",
+        ErrorKind::NotAPicture | ErrorKind::UnsupportedPicture => "bad picture",
+        ErrorKind::UnsupportedTag | ErrorKind::FakeTag => "unsupported tag",
+        ErrorKind::TextDecode(_) | ErrorKind::StringFromUtf8(_) | ErrorKind::StrFromUtf8(_) => {
+            "bad text"
+        }
+        ErrorKind::BadTimestamp(_) => "bad timestamp",
+        ErrorKind::Id3v2(_) => "bad ID3v2 tag",
+        ErrorKind::BadAtom(_) | ErrorKind::AtomMismatch => "bad MP4 atom",
+        ErrorKind::OggPage(_) => "bad Ogg page",
+        ErrorKind::Io(_) => "read error",
+        _ => "other",
+    }
 }
 
 fn from_tag(tag: &Tag) -> TrackTags {
@@ -204,12 +246,30 @@ mod tests {
         std::fs::write(&p, bytes).unwrap();
         let t = read(&p);
         let err = t.tag_error.expect("garbage must set tag_error");
-        assert!(err.starts_with("unreadable tags: "), "{err}");
+        assert_eq!(err, "unreadable tags: corrupt file");
         let dir_name = dir.path().file_name().unwrap().to_str().unwrap();
         assert!(!err.contains(dir_name), "{err}");
         assert!(!err.contains("garbage"), "{err}");
         assert!(!err.contains('/'), "{err}");
         assert_eq!(t.title, None);
+    }
+
+    #[test]
+    fn error_labels_carry_no_payload() {
+        let bytes = vec![0xff, 0xfe, b'x', b'y', b'z'];
+        let utf8 = String::from_utf8(bytes).unwrap_err();
+        assert_eq!(error_label(&ErrorKind::StringFromUtf8(utf8)), "bad text");
+        let io = std::io::Error::other("/secret/path");
+        assert_eq!(error_label(&ErrorKind::Io(io)), "read error");
+    }
+
+    #[test]
+    fn a_panicking_reader_gives_a_fixed_tag_error() {
+        let t = guarded(|| panic!("lofty fell over"));
+        assert_eq!(t.tag_error.as_deref(), Some("tag reader failed"));
+        assert_eq!(t.title, None);
+        let ok = guarded(TrackTags::default);
+        assert_eq!(ok.tag_error, None);
     }
 
     #[test]

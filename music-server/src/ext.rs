@@ -10,11 +10,19 @@ use asteria_music_api::{
     TrackTags,
 };
 
+use crate::cover::FolderImages;
 use crate::index::Index;
 use crate::{cover, rpc, tags};
 
-/// The index built at one cache generation, and the extra files' paths of that moment.
-pub type Snapshot = (u64, Arc<Index>, Arc<Vec<String>>);
+/// The index built at one cache generation, and the extra files of that moment.
+pub type Snapshot = (u64, Arc<Index>, Arc<Extras>);
+
+/// The extra files: every path, and the cover images grouped by folder.
+#[derive(Debug, Default)]
+pub struct Extras {
+    pub paths: Vec<String>,
+    pub covers: FolderImages,
+}
 
 /// Music shows audio; the tags are read during the scan, and the album and artist index is
 /// built from them when a method needs it.
@@ -48,15 +56,29 @@ impl MusicExtension {
             .into_iter()
             .map(|(rel, bytes)| (rel, decode_tags(&bytes)));
         let index = Index::build(&ctx.library.config().id, tracks);
-        let extras = ctx
+        let paths: Vec<String> = ctx
             .cache
             .extras()?
             .into_iter()
             .map(|(rel, _)| rel)
             .collect();
-        let snap = (generation, Arc::new(index), Arc::new(extras));
+        let covers = FolderImages::new(paths.iter().map(String::as_str));
+        let snap = (
+            generation,
+            Arc::new(index),
+            Arc::new(Extras { paths, covers }),
+        );
         *slot = Some(snap.clone());
         Ok(snap)
+    }
+
+    /// Whether an index has been built (tests check that thumbnails do not build one).
+    #[cfg(test)]
+    pub fn built(&self) -> bool {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
     }
 }
 
@@ -91,15 +113,18 @@ impl AppExtension for MusicExtension {
     }
 
     fn thumb_source(&self, ctx: &ExtContext, rec: &ItemRecord, abs: &Path) -> ThumbSource {
-        // Without the extras only the embedded picture can be found; that is still a cover.
-        let extras = match self.snapshot(ctx) {
-            Ok((_, _, extras)) => extras,
+        // The extras straight from the cache: a thumbnail never builds the index. Without
+        // them only the embedded picture can be found; that is still a cover.
+        let images = match ctx.cache.extras() {
+            Ok(extras) => {
+                FolderImages::for_track(&rec.path, extras.iter().map(|(rel, _)| rel.as_str()))
+            }
             Err(e) => {
-                tracing::warn!(error = %e, "music index unavailable; looking for embedded cover only");
-                Arc::default()
+                tracing::warn!(error = %e, "extras unavailable; looking for embedded cover only");
+                FolderImages::default()
             }
         };
-        cover::thumb_source(ctx.library.root(), &rec.path, abs, &extras)
+        cover::thumb_source(ctx.library.root(), &rec.path, abs, &images)
     }
 
     fn rpc(

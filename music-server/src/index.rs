@@ -367,32 +367,30 @@ fn draft(
     }
 }
 
-/// The artist, when every track has the same non-empty artist list (the first one names it).
+/// The artist, when every track has the same non-empty set of artists, whatever their order.
+/// The first track's first artist names it; each track votes with its own spelling of it.
 fn single_artist(group: &[Track]) -> Option<(String, NameVotes)> {
-    let list = |t: &Track| -> Vec<String> {
+    fn names(t: &Track) -> Vec<&str> {
         t.tags
             .artists
             .iter()
             .map(|a| a.trim())
             .filter(|a| !a.is_empty())
-            .map(name_key)
             .collect()
-    };
-    let first = list(group.first()?);
-    if first.is_empty() || group.iter().any(|t| list(t) != first) {
+    }
+    let keys = |t: &Track| names(t).into_iter().map(name_key).collect::<BTreeSet<_>>();
+    let first = group.first()?;
+    let set = keys(first);
+    if set.is_empty() || group.iter().any(|t| keys(t) != set) {
         return None;
     }
+    let key = name_key(names(first)[0]);
     let mut votes = NameVotes::default();
     for t in group {
-        let name = t
-            .tags
-            .artists
-            .iter()
-            .map(|a| a.trim())
-            .find(|a| !a.is_empty())?;
+        let name = names(t).into_iter().find(|a| name_key(a) == key)?;
         votes.vote(name, clean(&t.tags.artist_sort));
     }
-    Some((first[0].clone(), votes))
+    Some((key, votes))
 }
 
 #[cfg(test)]
@@ -440,6 +438,23 @@ mod tests {
         ]);
         assert_eq!(idx.albums()[0].album_artist, "Amy");
         assert_eq!(idx.artists().len(), 1);
+    }
+
+    #[test]
+    fn artist_order_does_not_matter_for_a_single_artist_list() {
+        let idx = build(vec![
+            ("d/1.flac", t(&["Amy", "Bob"], Some("Al"))),
+            ("d/2.flac", t(&["bob", "Amy"], Some("Al"))),
+        ]);
+        let album = &idx.albums()[0];
+        assert_eq!(album.album_artist, "Amy");
+        assert_eq!(album.album_artist_id, artist_id(&lib(), "amy"));
+        // A different set is still mixed.
+        let idx = build(vec![
+            ("d/1.flac", t(&["Amy", "Bob"], Some("Al"))),
+            ("d/2.flac", t(&["Amy"], Some("Al"))),
+        ]);
+        assert_eq!(idx.albums()[0].album_artist, "Various Artists");
     }
 
     #[test]
