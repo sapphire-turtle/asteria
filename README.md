@@ -14,9 +14,11 @@ asteria-photos-server serve --config ~/.config/asteria/photos.toml
 - `init` refuses to overwrite an existing config unless you pass `--force`. Only the token goes to stdout.
 - The default address is `127.0.0.1:7810` (`init --listen` sets it; `serve --listen` overrides it).
 - The cache (index and thumbnails) lives in `$XDG_CACHE_HOME/asteria-photos/<library-id>/` (usually `~/.cache/...`) and can be deleted safely; ratings and tags live in the library's sidecar files.
+- The server's own state (the journal of operations, unfinished uploads, the server lock) lives in `$XDG_DATA_HOME/asteria-photos/<library-id>/` (usually `~/.local/share/...`), not in the library. The library's `.asteria/` holds only `library.toml` and `users.toml`.
 - `token add` writes the config only; a running server picks the new token up after a restart. `init --force` writes a new config, which replaces every existing token.
 - Tokens travel in clear text (plain HTTP). Expose the server only on a LAN or a VPN such as Tailscale, never directly on the internet.
-- One server per library: `serve` holds a lock on `<library>/.asteria/server.lock` and a second one exits with an error.
+- One server per library on a host: `serve` holds a lock on `server.lock` in its data directory, and a second one on the same host exits with an error.
+- Servers on different hosts may share one library (over NFS, say), such as a production server and a test server. Each has its own journal, cache and unfinished uploads. File watching does not see changes made from another NFS host; they appear after the periodic rescan (every 15 minutes) or `library.rescan`. The duplicate check on upload knows only what this server has scanned. Two servers of the same library on one host are not supported, since they would share the cache and data directories.
 - Thumbnails need `vipsthumbnail` (libvips-tools) and, for videos, `ffmpeg`. Set `RUST_LOG` to change log verbosity (default `info`).
 
 ## Running the photos client
