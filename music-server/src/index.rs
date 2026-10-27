@@ -218,7 +218,9 @@ impl Index {
         });
 
         let mut out: Vec<IndexedArtist> = artists.iter().map(|(_, a, _)| a.clone()).collect();
-        for d in &drafts {
+        for d in &mut drafts {
+            // An album shows the same spelling as the artist it points to.
+            d.album.album_artist = out[artist_pos[d.artist_key.as_str()]].name.clone();
             out[artist_pos[d.artist_key.as_str()]]
                 .albums
                 .push(d.album.id.clone());
@@ -546,6 +548,26 @@ mod tests {
         assert_eq!(idx.artists().len(), 1);
         assert_eq!(idx.artists()[0].name, "abc");
         assert_eq!(idx.artists()[0].albums.len(), 2);
+    }
+
+    #[test]
+    fn album_shows_the_library_wide_spelling_of_its_artist() {
+        let tag = |aa: &str, album: &str| TrackTags {
+            album_artist: Some(aa.into()),
+            ..t(&["x"], Some(album))
+        };
+        let idx = build(vec![
+            ("a/1.flac", tag("abc", "A")),
+            ("b/1.flac", tag("ＡＢＣ", "B")),
+            ("c/1.flac", tag("ＡＢＣ", "C")),
+            ("d/1.flac", tag("ＡＢＣ", "D")),
+        ]);
+        assert_eq!(idx.artists().len(), 1);
+        assert_eq!(idx.artists()[0].name, "ＡＢＣ");
+        for album in idx.albums() {
+            let artist = idx.artist(&album.album_artist_id).unwrap();
+            assert_eq!(album.album_artist, artist.name, "{}", album.title);
+        }
     }
 
     #[test]
