@@ -390,9 +390,11 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-api"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "asteria-framework-api",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
