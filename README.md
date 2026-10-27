@@ -36,7 +36,7 @@ asteria-music-server serve --config ~/.config/asteria/music.toml
 - It shows the audio files of the library (FLAC, MP3 and the like) along three axes: albums, artists and playlists. Albums and artists are built from the files' tags; a file without tags is still listed, under its file name.
 - Playlists are the `.m3u8` and `.m3u` files in the library. An entry whose file has moved is found again by its content hash when the playlist carries one; an entry that cannot be found is reported as missing.
 - The tags and the playlists are only read. The server never writes to your music files or playlists.
-- The cover of an album is the picture embedded in a track, else an image in the album's folder named `cover`, `folder`, `front` or `album` (`.jpg`, `.jpeg`, `.png` or `.webp`).
+- The cover of an album is the picture embedded in a track, else an image named `cover`, `folder`, `front` or `album` (`.jpg`, `.jpeg`, `.png` or `.webp`) in the track's folder or, failing that, in the album folder above it (for a disc folder such as `CD1`).
 - Covers need `vipsthumbnail` (libvips-tools). The offline copy of a track (Ogg Opus, for listening where the original is too large) needs `ffmpeg` built with libopus. Without them those requests answer 503 and everything else works.
 
 ## Running the photos client
