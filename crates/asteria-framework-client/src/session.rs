@@ -257,6 +257,7 @@ impl Session {
                     cancelled: cancelled.clone(),
                     path: PathBuf::new(),
                 };
+                let profile_id = profile.id;
                 session.submit(move |rpc| {
                     let result = rpc.and_then(|rpc| handshake(rpc, &client));
                     if let (Ok(library), Some(root)) = (&result, &dirs.cache) {
@@ -270,12 +271,12 @@ impl Session {
                         }
                     }
                     if let (Ok(library), Some(root)) = (&result, &dirs.data) {
-                        match queue_path(root, &library.library_id) {
+                        match queue_path(root, &library.library_id, &profile_id.to_string()) {
                             Some(path) => {
                                 let _ =
                                     uploads.set(Uploads::start(EngineConfig { path, ..engine }));
                             }
-                            None => tracing::warn!("library id is not a safe file name"),
+                            None => tracing::warn!("library or profile id is not a safe file name"),
                         }
                     }
                     *lock_gate(&gate) = match &result {

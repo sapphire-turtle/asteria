@@ -119,9 +119,15 @@ pub(crate) fn save_groups(groups: &[QueuedGroup], path: &Path) -> io::Result<()>
     write_atomic(path, &bytes, false)
 }
 
-/// `<data_root>/uploads/<library_id>.json`, or `None` if the id is not a safe file name.
-pub fn queue_path(data_root: &Path, library_id: &str) -> Option<PathBuf> {
-    safe_component(library_id).then(|| data_root.join("uploads").join(format!("{library_id}.json")))
+/// `<data_root>/uploads/<library_id>/<profile_id>.json`, or `None` if either id is not a safe
+/// file name. One queue per library and profile, so two users of one server never share one.
+pub fn queue_path(data_root: &Path, library_id: &str, profile_id: &str) -> Option<PathBuf> {
+    (safe_component(library_id) && safe_component(profile_id)).then(|| {
+        data_root
+            .join("uploads")
+            .join(library_id)
+            .join(format!("{profile_id}.json"))
+    })
 }
 
 impl UploadQueue {

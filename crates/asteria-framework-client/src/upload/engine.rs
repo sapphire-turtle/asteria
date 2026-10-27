@@ -236,7 +236,7 @@ pub(crate) struct EngineConfig {
     pub health: Health,
     /// The session's worker flag: set once the session is dropped.
     pub cancelled: Arc<AtomicBool>,
-    /// `<data_root>/uploads/<library_id>.json`.
+    /// `<data_root>/uploads/<library_id>/<profile_id>.json`.
     pub path: PathBuf,
 }
 

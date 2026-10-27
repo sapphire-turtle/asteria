@@ -74,6 +74,8 @@ struct TestServer {
     token: String,
     library_id: String,
     puts: Arc<Puts>,
+    /// One profile for the whole test, so every session on it uses the same queue.
+    profile: ServerProfile,
 }
 
 impl TestServer {
@@ -139,6 +141,7 @@ impl TestServer {
             });
             addr
         });
+        let profile = profile(addr, &token);
         TestServer {
             dir,
             rt: Some(rt),
@@ -146,11 +149,17 @@ impl TestServer {
             token,
             library_id,
             puts,
+            profile,
         }
     }
 
     fn profile(&self) -> ServerProfile {
-        profile(self.addr, &self.token)
+        self.profile.clone()
+    }
+
+    /// The queue file of this server's profile under `data`.
+    fn queue_file(&self, data: &Path) -> PathBuf {
+        queue_path(data, &self.library_id, &self.profile.id.to_string()).unwrap()
     }
 
     fn inbox(&self, name: &str) -> PathBuf {
@@ -484,7 +493,7 @@ fn discard_aborts_session() {
     }
     assert!(!server.inbox("big.jpg").exists());
     // The queue on disk says the same.
-    let file = queue_path(data.path(), &server.library_id).unwrap();
+    let file = server.queue_file(data.path());
     wait_plain("queue saved", || {
         UploadQueue::load(&file).is_ok_and(|q| {
             q.groups
@@ -567,7 +576,7 @@ fn switching_servers_pauses_queue() {
     drop(on_b);
 
     // A's queue is still on disk, unfinished.
-    let file = queue_path(data.path(), &a.library_id).unwrap();
+    let file = a.queue_file(data.path());
     wait_plain("A's queue saved with its session", || {
         UploadQueue::load(&file).is_ok_and(|q| {
             q.groups.len() == 1
@@ -646,7 +655,7 @@ fn cancel_reaches_disk_while_a_request_hangs() {
     assert!(session.uploads().unwrap().cancel(id));
     drop(session);
     // The engine is still stuck in the PUT; the cancel is on disk regardless.
-    let file = queue_path(data.path(), &server.library_id).unwrap();
+    let file = server.queue_file(data.path());
     wait_plain("cancel saved", || {
         UploadQueue::load(&file).is_ok_and(|q| {
             q.groups
@@ -728,4 +737,36 @@ fn expired_session_begins_again() {
     assert_eq!(fs::read(server.inbox("big.jpg")).unwrap(), bytes);
     // The held chunk found no session; both chunks went to the new one.
     assert_eq!(server.puts.stored(), vec![0, 1]);
+}
+
+#[test]
+fn two_profiles_on_one_server_keep_separate_queues() {
+    let server = TestServer::start();
+    let data = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let path = write(src.path(), "big.jpg", &padded("blue.jpg", CHUNK + 1000));
+    server.puts.hold_from.store(0, Ordering::SeqCst);
+
+    let mut first = open(&server.profile(), data.path());
+    first.uploads().unwrap().drop_paths(vec![path]);
+    wait_until(&mut first, "a chunk on its way", || {
+        server.puts.arrived.load(Ordering::SeqCst) >= 1
+    });
+    drop(first);
+
+    // Another profile (another user, say) on the same server sees none of it.
+    let other = profile(server.addr, &server.token);
+    let mut second = open(&other, data.path());
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(300) {
+        second.poll();
+        assert!(second.uploads().unwrap().snapshot().groups.is_empty());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(second);
+    let file = server.queue_file(data.path());
+    wait_plain("the first profile's queue is kept", || {
+        UploadQueue::load(&file).is_ok_and(|q| q.groups.len() == 1)
+    });
+    server.puts.released.store(true, Ordering::SeqCst);
 }

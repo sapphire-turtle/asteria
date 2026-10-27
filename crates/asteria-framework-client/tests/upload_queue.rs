@@ -162,13 +162,17 @@ fn group_id_text_roundtrip() {
 }
 
 #[test]
-fn unsafe_library_id_has_no_queue_path() {
+fn unsafe_ids_have_no_queue_path() {
     let root = std::path::Path::new("/data");
-    assert_eq!(queue_path(root, "../x"), None);
-    assert_eq!(queue_path(root, ""), None);
+    assert_eq!(queue_path(root, "../x", "p1"), None);
+    assert_eq!(queue_path(root, "", "p1"), None);
+    assert_eq!(queue_path(root, "abc-1", "../p"), None);
+    assert_eq!(queue_path(root, "abc-1", ""), None);
+    assert_eq!(queue_path(root, "abc-1", "CON"), None);
+    // One queue per library and profile: two users of one server never share a queue.
     assert_eq!(
-        queue_path(root, "abc-1"),
-        Some(root.join("uploads").join("abc-1.json"))
+        queue_path(root, "abc-1", "p1"),
+        Some(root.join("uploads").join("abc-1").join("p1.json"))
     );
 }
 
