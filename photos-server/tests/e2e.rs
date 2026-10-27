@@ -409,6 +409,21 @@ mod linux {
         };
         server.stop();
         assert_eq!(rating(&sidecar), Some(4));
+        // The server's own state (lock, journal, upload sessions) is in its data directory;
+        // the workspace keeps only the library's files.
+        let mut meta: Vec<_> = std::fs::read_dir(lib.join(".asteria"))
+            .unwrap()
+            .map(|d| d.unwrap().file_name().into_string().unwrap())
+            .collect();
+        meta.sort();
+        assert_eq!(meta, ["library.toml", "users.toml"]);
+        let data = std::fs::read_dir(env.home.join("data/asteria-photos"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(data.join("journal").is_dir() && data.join("server.lock").is_file());
         std::fs::remove_dir_all(env.home.join("cache")).unwrap();
         let mut server = Server::start(&env, &config, &listen);
         api.wait_ready(&mut server);
