@@ -1,6 +1,7 @@
 //! The Asteria Music server: `init`, `token add` and `serve`.
 
 mod ext;
+mod index;
 mod tags;
 
 use std::sync::Arc;
