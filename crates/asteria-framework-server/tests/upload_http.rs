@@ -270,3 +270,42 @@ async fn begin_rejects_a_malformed_hash_and_abort_removes() {
     .await;
     assert_eq!(code(&v), -32001);
 }
+
+/// The workspace may be shared between instances: a server's own state (journal, upload
+/// sessions) goes to its state directory, and `.asteria/` keeps only the library's files.
+#[tokio::test]
+async fn instance_state_stays_out_of_the_workspace() {
+    let e = env();
+    let id = item_id(&e, "a.jpg");
+    let v = call(
+        &e.app,
+        &e.owner_token,
+        "media.update",
+        json!({"id": id, "rating": 4}),
+    )
+    .await;
+    assert!(v["error"].is_null(), "{v}");
+    let bytes = big_jpeg(&e, 5000);
+    let session = begin(&e, &e.owner_token, &bytes).await;
+    let tok = Some(e.owner_token.as_str());
+    let s = put(&e.app, tok, &format!("/upload/{session}/0"), bytes).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let v = call(
+        &e.app,
+        &e.owner_token,
+        "upload.commit",
+        json!({"files": [{"session": session, "path": "x.jpg"}], "allow_duplicate": false}),
+    )
+    .await;
+    assert_eq!(v["result"]["outcome"], "placed", "{v}");
+
+    let mut meta: Vec<_> = fs::read_dir(e.root.join(".asteria"))
+        .unwrap()
+        .map(|d| d.unwrap().file_name().into_string().unwrap())
+        .collect();
+    meta.sort();
+    assert_eq!(meta, ["library.toml", "users.toml"]);
+    let state = e._dir.path().join("state");
+    assert!(state.join("journal").read_dir().unwrap().next().is_some());
+    assert!(state.join("uploads").join(&session).is_dir());
+}

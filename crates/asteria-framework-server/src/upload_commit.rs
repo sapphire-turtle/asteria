@@ -25,7 +25,7 @@ use grain_id::GrainId;
 
 use crate::cache::Cache;
 use crate::error::ServerError;
-use crate::fsutil::move_no_clobber;
+use crate::fsutil::{Placed, place_no_clobber};
 use crate::upload::{Committed, SealGuard, UploadError, UploadStore};
 
 /// Library-relative folder that every upload lands in.
@@ -244,21 +244,32 @@ fn place_with(
         roll_back(&[], &dir, created_from.as_deref());
         return Err(e.into());
     }
-    let mut placed: Vec<(&Item, PathBuf, String)> = Vec::with_capacity(kept.len());
+    let mut placed: Vec<(&Item, PathBuf, String, Placed)> = Vec::with_capacity(kept.len());
     for item in &kept {
         let name = target_name(&item.name, n);
         let target = dir.join(&name);
         let rel = format!("{rel_dir}/{name}");
         before_place(&target);
-        if let Err(e) = move_no_clobber(&item.data, &target) {
-            tracing::warn!(path = %rel, error = %e, "could not place upload; rolling back the group");
-            roll_back(&placed, &dir, created_from.as_deref());
-            return Err(UploadError::Io(format!("could not place {rel}: {e}")));
+        match place_no_clobber(&item.data, &target) {
+            Ok(how) => placed.push((item, target, rel, how)),
+            Err(e) => {
+                tracing::warn!(path = %rel, error = %e, "could not place upload; rolling back the group");
+                roll_back(&placed, &dir, created_from.as_deref());
+                return Err(UploadError::Io(format!("could not place {rel}: {e}")));
+            }
         }
-        placed.push((item, target, rel));
+    }
+    // The whole group is in place: a copied file's session data is not needed for a rollback
+    // any more (the tombstone below would drop it too).
+    for (item, _, rel, how) in &placed {
+        if *how == Placed::Copied
+            && let Err(e) = fs::remove_file(&item.data)
+        {
+            tracing::warn!(path = %rel, error = %e, "could not remove a copied upload's data");
+        }
     }
 
-    for (item, _, rel) in &placed {
+    for (item, _, rel, _) in &placed {
         let entry = JournalEntry {
             op_id: OpId(GrainId::random()),
             plan_id: None,
@@ -276,7 +287,7 @@ fn place_with(
     let result = UploadCommitResult::Placed {
         files: placed
             .iter()
-            .map(|(item, _, rel)| PlacedFile {
+            .map(|(item, _, rel, _)| PlacedFile {
                 session: item.session.clone(),
                 path: rel.clone(),
             })
@@ -288,7 +299,7 @@ fn place_with(
         sessions: sorted_sessions(&params),
         result: result.clone(),
     };
-    for session in placed.iter().map(|(i, _, _)| &i.session).chain(&dropped) {
+    for session in placed.iter().map(|(i, _, _, _)| &i.session).chain(&dropped) {
         if let Err(e) = store.mark_committed(session, &committed) {
             // Without its tombstone a repeated commit finds the session gone (NotFound).
             tracing::error!(%session, error = %e, "could not record a committed upload");
@@ -428,11 +439,16 @@ fn free_number(dir: &Path, items: &[Item]) -> Result<u32, UploadError> {
         .ok_or_else(|| UploadError::Invalid("too many files with these names".into()))
 }
 
-/// Moves the placed files back into their sessions and removes the folders this commit
-/// created (`created_from` and below), as far as they are empty.
-fn roll_back(placed: &[(&Item, PathBuf, String)], dir: &Path, created_from: Option<&Path>) {
-    for (item, target, rel) in placed.iter().rev() {
-        if let Err(e) = fs::rename(target, &item.data) {
+/// Moves the placed files back into their sessions (a copy, whose session still has the
+/// data, is removed) and removes the folders this commit created (`created_from` and below),
+/// as far as they are empty.
+fn roll_back(placed: &[(&Item, PathBuf, String, Placed)], dir: &Path, created_from: Option<&Path>) {
+    for (item, target, rel, how) in placed.iter().rev() {
+        let undone = match how {
+            Placed::Moved => fs::rename(target, &item.data),
+            Placed::Copied => fs::remove_file(target),
+        };
+        if let Err(e) = undone {
             tracing::error!(path = %rel, error = %e, "could not take back a placed upload");
         }
     }
@@ -510,7 +526,7 @@ mod tests {
             .unwrap()
             .with_state_dir(dir.path().join("state"));
         let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
-        let store = Arc::new(UploadStore::open(&root).unwrap());
+        let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
         let me = lib.owner();
         let upload = |bytes: &[u8]| {
             let tmp = dir.path().join("hash-me");
@@ -561,6 +577,141 @@ mod tests {
         assert_eq!(files[0].path, "Inbox/a/b/IMG_0001 (2).HEIC");
     }
 
+    /// The session data is on another filesystem than the library (EXDEV): the files are
+    /// copied into place, and the sessions end as tombstones without their data.
+    #[test]
+    fn cross_device_commit_copies_the_files_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        fs::create_dir(&root).unwrap();
+        let lib = Library::init(&root, "owner")
+            .unwrap()
+            .with_state_dir(dir.path().join("state"));
+        let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
+        let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
+        let me = lib.owner();
+        let upload = |bytes: &[u8]| {
+            let tmp = dir.path().join("hash-me");
+            fs::write(&tmp, bytes).unwrap();
+            let s = store
+                .begin(me, bytes.len() as u64, file_hash(&tmp).unwrap())
+                .unwrap()
+                .session;
+            store.put_chunk(me, &s, 0, bytes).unwrap();
+            s
+        };
+        let (heic, mov) = (upload(b"heic bytes"), upload(b"mov bytes"));
+        let data = |s: &str| dir.path().join("state/uploads").join(s).join("data");
+        let params = UploadCommitParams {
+            files: vec![
+                UploadFile {
+                    session: heic.clone(),
+                    path: "IMG_0001.HEIC".into(),
+                },
+                UploadFile {
+                    session: mov.clone(),
+                    path: "IMG_0001.MOV".into(),
+                },
+            ],
+            allow_duplicate: false,
+        };
+        let r = crate::fsutil::test_hook::cross_device(|| {
+            commit(&lib, &cache, &store, me, params.clone())
+        })
+        .unwrap();
+        assert!(matches!(r, UploadCommitResult::Placed { .. }), "{r:?}");
+        assert_eq!(
+            fs::read(root.join("Inbox/IMG_0001.HEIC")).unwrap(),
+            b"heic bytes"
+        );
+        assert_eq!(
+            fs::read(root.join("Inbox/IMG_0001.MOV")).unwrap(),
+            b"mov bytes"
+        );
+        assert!(!data(&heic).exists() && !data(&mov).exists());
+        let mut inbox: Vec<_> = fs::read_dir(root.join("Inbox"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        inbox.sort();
+        assert_eq!(inbox, ["IMG_0001.HEIC", "IMG_0001.MOV"]);
+        // A repeated commit gets the same answer from the tombstones.
+        assert_eq!(commit(&lib, &cache, &store, me, params).unwrap(), r);
+    }
+
+    #[test]
+    fn cross_device_failure_midway_leaves_no_partial_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        fs::create_dir(&root).unwrap();
+        let lib = Library::init(&root, "owner")
+            .unwrap()
+            .with_state_dir(dir.path().join("state"));
+        let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
+        let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
+        let me = lib.owner();
+        let upload = |bytes: &[u8]| {
+            let tmp = dir.path().join("hash-me");
+            fs::write(&tmp, bytes).unwrap();
+            let s = store
+                .begin(me, bytes.len() as u64, file_hash(&tmp).unwrap())
+                .unwrap()
+                .session;
+            store.put_chunk(me, &s, 0, bytes).unwrap();
+            s
+        };
+        let (heic, mov) = (upload(b"heic bytes"), upload(b"mov bytes"));
+        #[cfg(unix)]
+        let inode = |s: &str| {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(store.completed(me, s).unwrap().data_path)
+                .unwrap()
+                .ino()
+        };
+        #[cfg(unix)]
+        let heic_inode = inode(&heic);
+        let params = UploadCommitParams {
+            files: vec![
+                UploadFile {
+                    session: heic.clone(),
+                    path: "IMG_0001.HEIC".into(),
+                },
+                UploadFile {
+                    session: mov.clone(),
+                    path: "IMG_0001.MOV".into(),
+                },
+            ],
+            allow_duplicate: false,
+        };
+        // Someone takes the second name after numbering chose it.
+        let mut hook = |target: &Path| {
+            if target.ends_with("IMG_0001.MOV") {
+                fs::write(target, b"theirs").unwrap();
+            }
+        };
+        let r = crate::fsutil::test_hook::cross_device(|| {
+            commit_with(&lib, &cache, &store, me, params, &mut hook)
+        });
+        assert!(matches!(r, Err(UploadError::Io(_))), "{r:?}");
+        let inbox: Vec<_> = fs::read_dir(root.join("Inbox"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(inbox, ["IMG_0001.MOV"]);
+        assert_eq!(
+            fs::read(root.join("Inbox/IMG_0001.MOV")).unwrap(),
+            b"theirs"
+        );
+        for (s, bytes) in [(&heic, &b"heic bytes"[..]), (&mov, &b"mov bytes"[..])] {
+            let done = store.completed(me, s).unwrap();
+            assert_eq!(fs::read(done.data_path).unwrap(), bytes);
+        }
+        // The copy was removed, not moved back over the session's own data (which a real
+        // cross-device rename could not do).
+        #[cfg(unix)]
+        assert_eq!(inode(&heic), heic_inode);
+    }
+
     #[test]
     fn rollback_removes_the_folders_it_created() {
         let dir = tempfile::tempdir().unwrap();
@@ -570,7 +721,7 @@ mod tests {
             .unwrap()
             .with_state_dir(dir.path().join("state"));
         let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
-        let store = Arc::new(UploadStore::open(&root).unwrap());
+        let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
         let me = lib.owner();
         let upload = |bytes: &[u8]| {
             let tmp = dir.path().join("hash-me");
@@ -618,7 +769,7 @@ mod tests {
             .unwrap()
             .with_state_dir(dir.path().join("state"));
         let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
-        let store = Arc::new(UploadStore::open(&root).unwrap());
+        let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
         let me = lib.owner();
         let upload = |bytes: &[u8]| {
             let tmp = dir.path().join("hash-me");
@@ -701,7 +852,7 @@ mod tests {
         )
         .unwrap();
         crate::scan(&lib, &cache, &Photos).unwrap();
-        let store = Arc::new(UploadStore::open(&root).unwrap());
+        let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
         let me = lib.owner();
         let tmp = dir.path().join("hash-me");
         fs::write(&tmp, b"heic bytes").unwrap();

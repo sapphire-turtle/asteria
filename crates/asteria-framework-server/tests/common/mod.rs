@@ -92,7 +92,7 @@ pub fn env_with(make: impl FnOnce(PathBuf) -> Processor) -> Env {
         rescan,
         Arc::new(Photos),
         processor.clone(),
-        Arc::new(UploadStore::open(&root).unwrap()),
+        Arc::new(UploadStore::open(&dir.path().join("state")).unwrap()),
     );
     Env {
         _dir: dir,

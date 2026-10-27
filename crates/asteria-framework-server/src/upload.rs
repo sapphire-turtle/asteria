@@ -1,4 +1,5 @@
-//! Resumable upload sessions under `<root>/.asteria/uploads/<session>/`.
+//! Resumable upload sessions under `<state dir>/uploads/<session>/`, in the server
+//! instance's own data directory.
 //!
 //! A session directory holds `session.json` (owner, size, claimed hash), `data`
 //! (pre-sized to the file's length; chunks are written in place) and `received`
@@ -140,12 +141,14 @@ fn is_session_id(name: &str) -> bool {
 }
 
 impl UploadStore {
-    pub fn open(root: &Path) -> Result<Self, ServerError> {
-        Self::open_with_limits(root, UploadLimits::default())
+    /// The sessions in `<state_dir>/uploads/`. `state_dir` is the server instance's own
+    /// (see `data_dir_for`), not the workspace: each instance keeps its own sessions.
+    pub fn open(state_dir: &Path) -> Result<Self, ServerError> {
+        Self::open_with_limits(state_dir, UploadLimits::default())
     }
 
-    pub fn open_with_limits(root: &Path, limits: UploadLimits) -> Result<Self, ServerError> {
-        let dir = root.join(".asteria").join("uploads");
+    pub fn open_with_limits(state_dir: &Path, limits: UploadLimits) -> Result<Self, ServerError> {
+        let dir = state_dir.join("uploads");
         fs::create_dir_all(&dir)?;
         Ok(Self {
             dir,

@@ -68,7 +68,7 @@ impl TestServer {
             1,
             Duration::from_secs(60),
         ));
-        let uploads = Arc::new(UploadStore::open(lib.root()).unwrap());
+        let uploads = Arc::new(UploadStore::open(lib.state_dir().unwrap()).unwrap());
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()

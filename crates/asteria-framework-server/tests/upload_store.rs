@@ -235,7 +235,7 @@ fn purge_removes_only_stale_sessions() {
     let old = store.begin(me, 10, hash()).unwrap().session;
     let fresh = store.begin(me, 10, hash()).unwrap().session;
 
-    let uploads = dir.path().join(".asteria").join("uploads");
+    let uploads = dir.path().join("uploads");
     // Junk: not a session id, and a session dir without a readable session.json.
     fs::create_dir(uploads.join("junk")).unwrap();
     let broken = GrainId::random().to_string();
@@ -312,7 +312,7 @@ fn vanished_session_is_not_found() {
     let me = user();
     let s = store.begin(me, 10, hash()).unwrap().session;
     // Gone after the ownership check would have passed.
-    fs::remove_dir_all(dir.path().join(".asteria/uploads").join(&s)).unwrap();
+    fs::remove_dir_all(dir.path().join("uploads").join(&s)).unwrap();
     assert!(matches!(store.status(me, &s), Err(UploadError::NotFound)));
     assert!(matches!(
         store.completed(me, &s),
@@ -329,11 +329,7 @@ fn short_received_map_is_an_error() {
     let (dir, store) = store();
     let me = user();
     let s = store.begin(me, 2 * CHUNK, hash()).unwrap().session;
-    let received = dir
-        .path()
-        .join(".asteria/uploads")
-        .join(&s)
-        .join("received");
+    let received = dir.path().join("uploads").join(&s).join("received");
     fs::write(received, [1u8]).unwrap();
     assert!(matches!(store.completed(me, &s), Err(UploadError::Io(_))));
     assert!(matches!(store.status(me, &s), Err(UploadError::Io(_))));
@@ -397,14 +393,14 @@ fn a_complete_session_without_data_is_not_found() {
     let data = pattern(10);
     let s = store.begin(me, 10, hash()).unwrap().session;
     store.put_chunk(me, &s, 0, &data).unwrap();
-    let session_dir = dir.path().join(".asteria/uploads").join(&s);
+    let session_dir = dir.path().join("uploads").join(&s);
     fs::remove_file(session_dir.join("data")).unwrap();
     assert!(matches!(store.status(me, &s), Err(UploadError::NotFound)));
     assert!(!session_dir.exists());
 
     let t = store.begin(me, 10, hash()).unwrap().session;
     store.put_chunk(me, &t, 0, &data).unwrap();
-    let session_dir = dir.path().join(".asteria/uploads").join(&t);
+    let session_dir = dir.path().join("uploads").join(&t);
     fs::remove_file(session_dir.join("data")).unwrap();
     assert!(matches!(
         store.completed(me, &t),

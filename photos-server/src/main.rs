@@ -212,8 +212,7 @@ fn serve(config_path: &Path, listen: Option<SocketAddr>) -> AnyResult<()> {
     let processor = Arc::new(Processor::new(thumbs, RENDER_JOBS, RENDER_TIMEOUT));
     processor.sweep_tmp();
     let tokens = Arc::new(Tokens::from_config(&cfg));
-    // After the tmp cleanup above, so that nothing live under the library is swept.
-    let uploads = Arc::new(UploadStore::open(library.root())?);
+    let uploads = Arc::new(UploadStore::open(&data_dir)?);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

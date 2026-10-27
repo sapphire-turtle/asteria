@@ -49,7 +49,7 @@ fn env_with_limits(limits: UploadLimits) -> Env {
             .with_state_dir(dir.path().join("state")),
     );
     let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
-    let store = Arc::new(UploadStore::open_with_limits(&root, limits).unwrap());
+    let store = Arc::new(UploadStore::open_with_limits(&dir.path().join("state"), limits).unwrap());
     Env {
         dir,
         root,
@@ -101,7 +101,7 @@ impl Env {
     }
 
     fn session_dir(&self, session: &str) -> PathBuf {
-        self.root.join(".asteria/uploads").join(session)
+        self.dir.path().join("state/uploads").join(session)
     }
 
     /// Committed: only a tombstone is left, with nothing missing and no data.
