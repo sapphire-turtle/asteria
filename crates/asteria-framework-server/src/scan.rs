@@ -2,7 +2,9 @@
 //! (size, mtime), refreshes sidecar snapshots and removes vanished items.
 
 use std::collections::{HashMap, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 
 use asteria_framework::paths::is_sidecar;
@@ -69,6 +71,17 @@ pub fn scan(
     cache: &Cache,
     ext: &dyn AppExtension,
 ) -> Result<ScanReport, ServerError> {
+    scan_cancellable(library, cache, ext, &AtomicBool::new(false))
+}
+
+/// [`scan`] that stops between entries once `cancel` is set. A cancelled scan keeps what
+/// it has written but skips the removal pass: unvisited paths are not known to be gone.
+pub fn scan_cancellable(
+    library: &Library,
+    cache: &Cache,
+    ext: &dyn AppExtension,
+    cancel: &AtomicBool,
+) -> Result<ScanReport, ServerError> {
     let root = library.root();
     // Failing to read the root aborts the scan.
     std::fs::read_dir(root)?;
@@ -90,7 +103,12 @@ pub fn scan(
         .follow_links(false)
         .sort_by_file_name()
         .into_iter();
+    let mut cancelled = false;
     while let Some(next) = it.next() {
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
         let entry = match next {
             Ok(e) => e,
             Err(e) => {
@@ -218,7 +236,9 @@ pub fn scan(
             }
         };
         // Only a new or (size, mtime)-changed file is extracted; a sidecar edit is not.
-        let extracted = unchanged.is_none().then(|| ext.extract(&rel, entry.path()));
+        let extracted = unchanged
+            .is_none()
+            .then(|| extract_guarded(ext, &rel, entry.path()));
         let rec = ItemRecord {
             id: item_id_for(&lib_id, &rel),
             path: rel.clone(),
@@ -240,17 +260,20 @@ pub fn scan(
         }
         pending.push(rec);
         if pending.len() >= BATCH {
-            cache.put_many(&pending)?;
-            cache.put_app_data_many(&pending_app)?;
+            cache.put_many_with_app_data(&pending, &pending_app)?;
             pending.clear();
             pending_app.clear();
         }
     }
     if !pending.is_empty() {
-        cache.put_many(&pending)?;
-        cache.put_app_data_many(&pending_app)?;
+        cache.put_many_with_app_data(&pending, &pending_app)?;
     }
     cache.put_extras(&pending_extras)?;
+    if cancelled {
+        tracing::info!("scan cancelled; skipping the removal pass");
+        cache.flush()?;
+        return Ok(report);
+    }
     let gone_extras: Vec<String> = known_extras
         .into_keys()
         .filter(|p| !seen_extras.contains(p) && !under_any(p, &unreadable))
@@ -270,6 +293,15 @@ pub fn scan(
     report.removed = gone.len();
     cache.flush()?;
     Ok(report)
+}
+
+/// A panicking extension must not wedge every later scan at the same file: the panic
+/// counts as "no app data" and the scan goes on.
+fn extract_guarded(ext: &dyn AppExtension, rel: &str, abs: &Path) -> Option<Vec<u8>> {
+    catch_unwind(AssertUnwindSafe(|| ext.extract(rel, abs))).unwrap_or_else(|_| {
+        tracing::warn!(path = %rel, "app extension panicked while extracting; storing no app data");
+        None
+    })
 }
 
 /// The library's `.asteria/library.toml` must still be there and name the same library.

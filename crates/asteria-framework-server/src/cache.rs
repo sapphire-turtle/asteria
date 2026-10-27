@@ -246,7 +246,18 @@ impl Cache {
 
     /// Insert or replace several records in one transaction.
     pub fn put_many(&self, recs: &[ItemRecord]) -> Result<(), ServerError> {
+        self.put_many_with_app_data(recs, &[])
+    }
+
+    /// [`Cache::put_many`] plus [`Cache::put_app_data_many`] in one transaction, so a crash
+    /// can never leave a record's new (size, mtime) without the app data extracted for it.
+    pub fn put_many_with_app_data(
+        &self,
+        recs: &[ItemRecord],
+        app_updates: &[(String, Option<Vec<u8>>)],
+    ) -> Result<(), ServerError> {
         let w = self.write_txn()?;
+        let mut app_changed = false;
         {
             let mut items = w.open_table(ITEMS).map_err(ce)?;
             let mut ids = w.open_table(IDS).map_err(ce)?;
@@ -270,8 +281,16 @@ impl Cache {
                 ids.insert(rec.id.0.as_str(), rec.path.as_str())
                     .map_err(ce)?;
             }
+            if !app_updates.is_empty() {
+                let mut app = w.open_table(APP_DATA).map_err(ce)?;
+                app_changed = write_app_data(&mut app, app_updates)?;
+            }
         }
-        w.commit().map_err(ce)
+        w.commit().map_err(ce)?;
+        if app_changed {
+            self.app_generation.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
     }
 
     /// Sets only the `hash` of the record at `path`, re-reading the current record inside
@@ -403,19 +422,10 @@ impl Cache {
             return Ok(());
         }
         let w = self.write_txn()?;
-        let mut changed = false;
-        {
+        let changed = {
             let mut app = w.open_table(APP_DATA).map_err(ce)?;
-            for (rel, data) in updates {
-                match data {
-                    Some(d) => {
-                        let old = app.insert(rel.as_str(), d.as_slice()).map_err(ce)?;
-                        changed |= old.is_none_or(|o| o.value() != d.as_slice());
-                    }
-                    None => changed |= app.remove(rel.as_str()).map_err(ce)?.is_some(),
-                }
-            }
-        }
+            write_app_data(&mut app, updates)?
+        };
         w.commit().map_err(ce)?;
         if changed {
             self.app_generation.fetch_add(1, Ordering::SeqCst);
@@ -716,6 +726,24 @@ impl Cache {
 }
 
 /// Format is relied on by the prefix range in `paths_with_hash`.
+/// Stores (`Some`) or deletes (`None`) app data; returns whether anything changed.
+fn write_app_data(
+    app: &mut redb::Table<&str, &[u8]>,
+    updates: &[(String, Option<Vec<u8>>)],
+) -> Result<bool, ServerError> {
+    let mut changed = false;
+    for (rel, data) in updates {
+        match data {
+            Some(d) => {
+                let old = app.insert(rel.as_str(), d.as_slice()).map_err(ce)?;
+                changed |= old.is_none_or(|o| o.value() != d.as_slice());
+            }
+            None => changed |= app.remove(rel.as_str()).map_err(ce)?.is_some(),
+        }
+    }
+    Ok(changed)
+}
+
 fn hash_key(scope: &str, hash: &str, path: &str) -> String {
     format!("{scope}\n{hash}\n{path}")
 }

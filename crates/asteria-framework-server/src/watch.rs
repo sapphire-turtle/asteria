@@ -2,7 +2,8 @@
 //! events, `library.rescan` triggers and a periodic timer.
 //!
 //! Shutdown: cancel the [`CancellationToken`] in [`ScanLoop::shutdown`]. The loop then sets the
-//! `hash_pending` cancel flag (so a long hashing pass stops promptly) and exits.
+//! cancel flag shared by `scan_cancellable` and `hash_pending` (so a long pass stops
+//! promptly between files) and exits.
 //!
 //! Coalescing: the trigger channel is drained just before a pass starts, so any number of
 //! triggers arriving while a pass runs cause exactly one more pass.
@@ -21,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cache::Cache;
 use crate::ext::AppExtension;
-use crate::scan::scan;
+use crate::scan::scan_cancellable;
 use crate::writer::Writer;
 
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -179,7 +180,7 @@ async fn pass(s: &ScanLoop, cancel: &Arc<AtomicBool>) {
         cancel.clone(),
     );
     let res = tokio::task::spawn_blocking(move || {
-        let report = scan(&library, &cache, extension.as_ref())?;
+        let report = scan_cancellable(&library, &cache, extension.as_ref(), &flag)?;
         let hashed = crate::hashing::hash_pending(&library, &cache, &flag)?;
         Ok::<_, crate::error::ServerError>((report, hashed))
     })

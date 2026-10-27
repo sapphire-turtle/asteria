@@ -5,13 +5,16 @@ mod common;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 use asteria_framework::journal::Actor;
 use asteria_framework::{Library, MediaKind};
 use asteria_framework_api::{RpcError, codes};
-use asteria_framework_server::{AppExtension, CACHE_SCHEMA, Cache, ExtContext, rpc_error, scan};
+use asteria_framework_server::{
+    AppExtension, CACHE_SCHEMA, Cache, ExtContext, rpc_error, scan, scan_cancellable,
+};
 use serde_json::{Value, json};
 
 /// Stores the file length as app data and counts the calls to `extract`.
@@ -294,4 +297,89 @@ async fn extension_errors_pass_through() {
     let v = common::call(&e.app, &e.owner_token, "test.missing", json!({})).await;
     assert_eq!(v["error"]["code"], codes::NOT_FOUND);
     assert_eq!(v["error"]["message"], "no such thing");
+}
+
+/// Panics while extracting `b.jpg`; stores `ok` for every other file.
+struct Panicky;
+
+impl AppExtension for Panicky {
+    fn accepts(&self, kind: MediaKind) -> bool {
+        matches!(kind, MediaKind::Image)
+    }
+    fn extract(&self, rel: &str, _abs: &Path) -> Option<Vec<u8>> {
+        assert_ne!(rel, "b.jpg", "test extension panics on b.jpg");
+        Some(b"ok".to_vec())
+    }
+}
+
+#[test]
+fn a_panicking_extract_does_not_stop_the_scan() {
+    let e = env();
+    for name in ["a.jpg", "b.jpg", "c.jpg"] {
+        e.red(name);
+    }
+    let report = scan(&e.lib, &e.cache, &Panicky).unwrap();
+    assert_eq!(report.added, 3);
+    for name in ["a.jpg", "b.jpg", "c.jpg"] {
+        assert!(e.cache.get_by_path(name).unwrap().is_some(), "{name}");
+    }
+    assert_eq!(
+        e.cache.app_data("a.jpg").unwrap().as_deref(),
+        Some(&b"ok"[..])
+    );
+    assert_eq!(e.cache.app_data("b.jpg").unwrap(), None);
+    assert_eq!(
+        e.cache.app_data("c.jpg").unwrap().as_deref(),
+        Some(&b"ok"[..])
+    );
+}
+
+/// Sets the cancel flag from the first `extract`, as Ctrl-C would mid-scan.
+struct CancelOnFirst(Arc<AtomicBool>);
+
+impl AppExtension for CancelOnFirst {
+    fn accepts(&self, kind: MediaKind) -> bool {
+        matches!(kind, MediaKind::Image)
+    }
+    fn extract(&self, _rel: &str, _abs: &Path) -> Option<Vec<u8>> {
+        self.0.store(true, Ordering::Relaxed);
+        None
+    }
+}
+
+#[test]
+fn a_cancelled_scan_stops_early_and_removes_nothing() {
+    let e = env();
+    e.red("old.jpg");
+    fs::write(e.root.join("old.m3u8"), "abc").unwrap();
+    e.scan();
+    fs::remove_file(e.root.join("old.jpg")).unwrap();
+    fs::remove_file(e.root.join("old.m3u8")).unwrap();
+    e.red("a.jpg");
+    e.red("b.jpg");
+
+    let flag = Arc::new(AtomicBool::new(false));
+    let report = scan_cancellable(&e.lib, &e.cache, &CancelOnFirst(flag.clone()), &flag).unwrap();
+    assert_eq!(report.added, 1);
+    assert_eq!(report.removed, 0);
+    assert!(e.cache.get_by_path("a.jpg").unwrap().is_some());
+    assert!(
+        e.cache.get_by_path("b.jpg").unwrap().is_none(),
+        "not reached"
+    );
+    assert!(
+        e.cache.get_by_path("old.jpg").unwrap().is_some(),
+        "no removal pass"
+    );
+    assert_eq!(
+        e.cache.extras().unwrap().len(),
+        1,
+        "no extras removal either"
+    );
+
+    // A pass that is not cancelled catches up.
+    e.scan();
+    assert!(e.cache.get_by_path("b.jpg").unwrap().is_some());
+    assert!(e.cache.get_by_path("old.jpg").unwrap().is_none());
+    assert!(e.cache.extras().unwrap().is_empty());
 }

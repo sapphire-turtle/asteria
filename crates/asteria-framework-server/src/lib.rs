@@ -31,7 +31,7 @@ pub use ext::{AppExtension, ExtContext, ThumbSource};
 pub use hashing::{RelinkReport, hash_pending, relink_orphans};
 pub use process::{Preset, ProcessError, Processor};
 pub use rpc::{media_item, rpc_error};
-pub use scan::{ScanReport, scan};
+pub use scan::{ScanReport, scan, scan_cancellable};
 pub use state::AppState;
 pub use watch::{ScanLoop, spawn_scan_loop};
 pub use writer::{WriteError, Writer, spawn_writer};
