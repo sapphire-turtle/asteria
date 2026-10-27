@@ -408,3 +408,34 @@ fn a_complete_session_without_data_is_not_found() {
     ));
     assert!(!session_dir.exists());
 }
+
+/// A tombstone that a power cut left empty or torn is not a commit's answer: it is dropped,
+/// and the session (whose data the commit took) is gone.
+#[test]
+fn a_garbled_tombstone_counts_as_missing() {
+    use asteria_framework_api::UploadCommitResult;
+    use asteria_framework_server::upload::Committed;
+
+    let (dir, store) = store();
+    let me = user();
+    for garbage in [&b""[..], &b"{\"sessions\": [\""[..]] {
+        let s = store.begin(me, 3, hash()).unwrap().session;
+        store.put_chunk(me, &s, 0, b"abc").unwrap();
+        let committed = Committed {
+            sessions: vec![s.clone()],
+            result: UploadCommitResult::Placed {
+                files: Vec::new(),
+                warnings: Vec::new(),
+            },
+        };
+        store.mark_committed(&s, &committed).unwrap();
+        assert_eq!(store.committed(me, &s).unwrap(), Some(committed));
+
+        let tombstone = dir.path().join("uploads").join(&s).join("committed.json");
+        fs::write(&tombstone, garbage).unwrap();
+        assert_eq!(store.committed(me, &s).unwrap(), None);
+        assert!(!tombstone.exists());
+        fs::write(&tombstone, garbage).unwrap();
+        assert!(matches!(store.status(me, &s), Err(UploadError::NotFound)));
+    }
+}

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
+use asteria_framework::fsutil::atomic_write;
 use asteria_framework::hash::ContentHash;
 use asteria_framework::ids::UserId;
 use asteria_framework_api::{
@@ -128,6 +129,24 @@ fn being_committed() -> UploadError {
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The session's tombstone in `dir`, if any. One that does not parse (torn by a crash) is
+/// no commit's answer: it is removed and counts as missing.
+fn read_tombstone(dir: &Path) -> Result<Option<Committed>, UploadError> {
+    let path = dir.join(COMMITTED);
+    match fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(c) => Ok(Some(c)),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "dropping an unreadable upload tombstone");
+                fs::remove_file(&path)?;
+                Ok(None)
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn chunk_count(size: u64) -> u64 {
@@ -285,7 +304,7 @@ impl UploadStore {
     /// The chunks still missing. A committed session (a tombstone) misses none.
     pub fn status(&self, owner: UserId, session: &str) -> Result<UploadStatus, UploadError> {
         let s = self.owned(owner, session)?;
-        if self.is_committed(session) {
+        if self.locked(session, read_tombstone)?.is_some() {
             return Ok(UploadStatus {
                 size: s.size,
                 missing: Vec::new(),
@@ -337,13 +356,7 @@ impl UploadStore {
         session: &str,
     ) -> Result<Option<Committed>, UploadError> {
         self.owned(owner, session)?;
-        self.locked(session, |dir| match fs::read(dir.join(COMMITTED)) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|e| UploadError::Io(format!("{COMMITTED}: {e}"))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        })
+        self.locked(session, read_tombstone)
     }
 
     /// Turns a session whose file was placed (or dropped) by a commit into a tombstone
@@ -351,9 +364,10 @@ impl UploadStore {
     pub fn mark_committed(&self, session: &str, committed: &Committed) -> Result<(), UploadError> {
         let bytes = serde_json::to_vec(committed).map_err(|e| UploadError::Io(e.to_string()))?;
         self.locked(session, |dir| {
-            let tmp = dir.join("committed.json.tmp");
-            fs::write(&tmp, &bytes)?;
-            fs::rename(&tmp, dir.join(COMMITTED))?;
+            // Synced, renamed into place and the rename synced: a tombstone that exists after
+            // a power cut is whole.
+            atomic_write(&dir.join(COMMITTED), &bytes)
+                .map_err(|e| UploadError::Io(e.to_string()))?;
             match fs::remove_file(dir.join("data")) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
                 _ => Ok(()),

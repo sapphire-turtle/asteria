@@ -557,6 +557,33 @@ fn a_repeated_commit_returns_the_first_result() {
     assert_eq!(journaled, 2);
 }
 
+/// A crash while the tombstones were written leaves some of the group's sessions without
+/// one. The commit happened (tombstones come after placing), so the repeated commit gets its
+/// answer and the missing tombstones are written.
+#[test]
+fn a_commit_with_some_tombstones_missing_is_answered_and_completed() {
+    let e = env();
+    let heic = e.upload(b"heic bytes");
+    let mov = e.upload(b"mov bytes");
+    let files = [
+        (heic.as_str(), "IMG_0001.HEIC"),
+        (mov.as_str(), "IMG_0001.MOV"),
+    ];
+    let first = e.commit(&files, false).unwrap();
+    fs::remove_file(e.session_dir(&mov).join("committed.json")).unwrap();
+    // Its data may still be there (a staged commit drops it just before the tombstones).
+    fs::write(e.session_dir(&mov).join("data"), b"mov bytes").unwrap();
+
+    assert_eq!(e.commit(&files, false).unwrap(), first);
+    assert!(e.committed(&heic) && e.committed(&mov));
+    assert_eq!(e.inbox_files(), ["IMG_0001.HEIC", "IMG_0001.MOV"]);
+    // Only one of them in the commit's set of sessions is not enough.
+    assert!(matches!(
+        e.commit(&files[..1], false),
+        Err(UploadError::Invalid(_))
+    ));
+}
+
 #[test]
 fn status_of_a_committed_session_has_nothing_missing() {
     let e = env();

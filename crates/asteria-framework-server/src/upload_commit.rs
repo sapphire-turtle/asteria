@@ -301,9 +301,9 @@ fn place_with(
     };
     for session in placed.iter().map(|(i, _, _, _)| &i.session).chain(&dropped) {
         if let Err(e) = store.mark_committed(session, &committed) {
-            // Without its tombstone a repeated commit finds the session gone (NotFound).
+            // A repeated commit writes it, from the group's other tombstones; with none at
+            // all it finds the session without its data (NotFound).
             tracing::error!(%session, error = %e, "could not record a committed upload");
-            store.remove(session);
         }
     }
     Ok(result)
@@ -315,9 +315,10 @@ fn sorted_sessions(params: &UploadCommitParams) -> Vec<String> {
     sessions
 }
 
-/// The result of an earlier commit of exactly these sessions, if they are its tombstones. A
-/// commit naming some committed sessions and not others, or not all of one earlier commit's,
-/// is `Invalid`.
+/// The result of an earlier commit of exactly these sessions, if they are its tombstones.
+/// Sessions of that commit that lack a tombstone (a crash while they were written) get one
+/// now: the tombstones are written only after the whole group was placed. A commit naming
+/// some committed sessions and not others, or not all of one earlier commit's, is `Invalid`.
 fn earlier_commit(
     store: &UploadStore,
     user: UserId,
@@ -327,19 +328,24 @@ fn earlier_commit(
     for f in &params.files {
         found.push(store.committed(user, &f.session)?);
     }
-    if found.iter().all(Option::is_none) {
+    let Some(first) = found.iter().flatten().next() else {
         return Ok(None);
-    }
-    let sessions = sorted_sessions(params);
-    let first = found[0].as_ref();
+    };
     let same =
-        first.is_some_and(|c| c.sessions == sessions) && found.iter().all(|c| c.as_ref() == first);
-    match first {
-        Some(c) if same => Ok(Some(c.result.clone())),
-        _ => Err(UploadError::Invalid(
+        first.sessions == sorted_sessions(params) && found.iter().flatten().all(|c| c == first);
+    if !same {
+        return Err(UploadError::Invalid(
             "some of these uploads were committed already, in another group".into(),
-        )),
+        ));
     }
+    for (f, c) in params.files.iter().zip(&found) {
+        if c.is_none()
+            && let Err(e) = store.mark_committed(&f.session, first)
+        {
+            tracing::error!(session = %f.session, error = %e, "could not record a committed upload");
+        }
+    }
+    Ok(Some(first.result.clone()))
 }
 
 /// Checks every path and the group's shape; returns the group's folder (`""` for `Inbox/`
