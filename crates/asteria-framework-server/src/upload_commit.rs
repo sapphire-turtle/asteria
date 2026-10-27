@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use asteria_framework::hash::{HashOutcome, HashScope, content_hash, file_hash};
 use asteria_framework::journal::{Actor, Journal, JournalEntry, OpId, OpKind};
-use asteria_framework::paths::media_path_for_sidecar;
+use asteria_framework::paths::{media_path_for_sidecar, sidecar_path_for};
 use asteria_framework::upload_path::validate_inbox_path;
 use asteria_framework::{Error as FwError, Library, Sidecar, UserId};
 use asteria_framework_api::{PlacedFile, UploadCommitParams, UploadCommitResult, UploadWarning};
@@ -154,7 +154,7 @@ fn commit_with(
     }
     let mut placed: Vec<(&Item, PathBuf, String)> = Vec::with_capacity(kept.len());
     for item in &kept {
-        let name = numbered(&item.name, n);
+        let name = target_name(&item.name, n);
         let target = dir.join(&name);
         let rel = format!("{rel_dir}/{name}");
         before_place(&target);
@@ -209,14 +209,16 @@ fn validate_group(params: &UploadCommitParams) -> Result<&str, UploadError> {
         validate_inbox_path(&f.path).map_err(UploadError::Invalid)?;
     }
     let folder = folder_of(&first.path);
-    let (mut names, mut sessions) = (HashSet::new(), HashSet::new());
+    let (mut names, mut targets, mut sessions) = (HashSet::new(), HashSet::new(), HashSet::new());
     for f in &params.files {
         if folder_of(&f.path) != folder {
             return invalid("all files of a group must be in one folder".into());
         }
-        if !names.insert(file_name(&f.path)) {
+        // Compared as placed: `x.jpg.XMP` and `x.jpg.xmp` would both be `x.jpg.xmp`.
+        if !targets.insert(target_name(file_name(&f.path), 1)) {
             return invalid(format!("path {:?} appears twice", f.path));
         }
+        names.insert(file_name(&f.path));
         if !sessions.insert(f.session.as_str()) {
             return invalid(format!("session {:?} appears twice", f.session));
         }
@@ -246,15 +248,32 @@ fn is_sidecar_name(name: &str) -> bool {
     asteria_framework::paths::is_sidecar(Path::new(name))
 }
 
-/// `name` for `n == 1`; otherwise ` (n)` goes before the first `.`.
+/// `name` for `n == 1`; otherwise ` (n)` goes before the last extension (`a.b (2).HEIC`).
 fn numbered(name: &str, n: u32) -> String {
     if n == 1 {
         return name.to_string();
     }
-    match name.find('.') {
-        Some(i) => format!("{} ({n}){}", &name[..i], &name[i..]),
-        None => format!("{name} ({n})"),
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => format!("{stem} ({n}).{ext}"),
+        _ => format!("{name} ({n})"),
     }
+}
+
+/// Where the group's file `name` goes under number `n`. A sidecar follows its media and is
+/// spelled with a lowercase `.xmp`, the only spelling the library reads
+/// (`IMG.HEIC.XMP` -> `IMG (2).HEIC.xmp`).
+fn target_name(name: &str, n: u32) -> String {
+    match media_path_for_sidecar(Path::new(name)) {
+        Some(media) => sidecar_name(&numbered(&media.to_string_lossy(), n)),
+        None => numbered(name, n),
+    }
+}
+
+/// The sidecar name of media file `media`.
+fn sidecar_name(media: &str) -> String {
+    sidecar_path_for(Path::new(media))
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// The first `n` under which no file of the group is taken in `dir`, nor the sidecar name
@@ -263,7 +282,7 @@ fn free_number(dir: &Path, items: &[Item]) -> Result<u32, UploadError> {
     let names: Vec<String> = items
         .iter()
         .flat_map(|i| {
-            let sidecar = i.content.is_some().then(|| format!("{}.xmp", i.name));
+            let sidecar = i.content.is_some().then(|| sidecar_name(&i.name));
             std::iter::once(i.name.clone()).chain(sidecar)
         })
         .collect();
@@ -271,7 +290,7 @@ fn free_number(dir: &Path, items: &[Item]) -> Result<u32, UploadError> {
         .find(|&n| {
             names
                 .iter()
-                .all(|name| dir.join(numbered(name, n)).symlink_metadata().is_err())
+                .all(|name| dir.join(target_name(name, n)).symlink_metadata().is_err())
         })
         .ok_or_else(|| UploadError::Invalid("too many files with these names".into()))
 }
@@ -311,8 +330,17 @@ mod tests {
     #[test]
     fn numbering() {
         assert_eq!(numbered("IMG_0001.HEIC", 1), "IMG_0001.HEIC");
-        assert_eq!(numbered("IMG_0001.HEIC.xmp", 2), "IMG_0001 (2).HEIC.xmp");
+        assert_eq!(target_name("IMG_0001.HEIC.xmp", 2), "IMG_0001 (2).HEIC.xmp");
+        assert_eq!(target_name("a.b.HEIC.XMP", 2), "a.b (2).HEIC.xmp");
+        assert_eq!(target_name("a.b.HEIC.Xmp", 1), "a.b.HEIC.xmp");
+        assert_eq!(target_name("a.b.HEIC", 3), "a.b (3).HEIC");
         assert_eq!(numbered("README", 3), "README (3)");
+        // Before the last extension, not the first '.'.
+        assert_eq!(numbered("a.b.HEIC", 2), "a.b (2).HEIC");
+        assert_eq!(
+            numbered("Screenshot 2026-10-26 at 10.15.30.png", 2),
+            "Screenshot 2026-10-26 at 10.15.30 (2).png"
+        );
     }
 
     #[test]

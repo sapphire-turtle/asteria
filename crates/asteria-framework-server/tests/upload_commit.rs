@@ -265,12 +265,15 @@ fn malformed_groups_are_invalid() {
     let a = e.upload(b"one");
     let b = e.upload(b"two");
     let xmp = e.upload(&fs::read(fixture("xmp/asteria_full.xmp")).unwrap());
-    let cases: [&[(&str, &str)]; 4] = [
+    let c = e.upload(&fs::read(fixture("xmp/asteria_full.xmp")).unwrap());
+    let cases: [&[(&str, &str)]; 5] = [
         &[],
         &[(&a, "x.jpg"), (&b, "x.jpg")],
         &[(&a, "x.jpg"), (&a, "y.jpg")],
         // The sidecar names no media of the group.
         &[(&a, "x.jpg"), (&xmp, "y.jpg.xmp")],
+        // Both sidecars would be placed as `x.jpg.xmp`.
+        &[(&a, "x.jpg"), (&xmp, "x.jpg.xmp"), (&c, "x.jpg.XMP")],
     ];
     for files in cases {
         let r = e.commit(files, false);
@@ -280,7 +283,7 @@ fn malformed_groups_are_invalid() {
         );
     }
     assert!(e.inbox_is_empty());
-    assert!(e.alive(&a) && e.alive(&b) && e.alive(&xmp));
+    assert!(e.alive(&a) && e.alive(&b) && e.alive(&xmp) && e.alive(&c));
 }
 
 #[test]
@@ -441,4 +444,45 @@ fn a_stray_sidecar_is_not_adopted() {
     let (files, _) = placed(e.commit(&[(&s, "IMG_0001.HEIC")], false).unwrap());
     assert_eq!(files[0].1, "Inbox/IMG_0001 (2).HEIC");
     assert!(!e.root.join("Inbox/IMG_0001.HEIC").exists());
+}
+
+#[test]
+fn collision_of_a_dotted_name_numbers_before_the_extension() {
+    let e = env();
+    fs::create_dir(e.root.join("Inbox")).unwrap();
+    fs::write(e.root.join("Inbox/a.b.HEIC"), b"older").unwrap();
+    let heic = e.upload(b"heic bytes");
+    let xmp = e.upload(&fs::read(fixture("xmp/asteria_full.xmp")).unwrap());
+    let (files, _) = placed(
+        e.commit(&[(&heic, "a.b.HEIC"), (&xmp, "a.b.HEIC.xmp")], false)
+            .unwrap(),
+    );
+    let paths: Vec<_> = files.iter().map(|(_, p)| p.as_str()).collect();
+    assert_eq!(paths, ["Inbox/a.b (2).HEIC", "Inbox/a.b (2).HEIC.xmp"]);
+    assert!(e.root.join("Inbox/a.b (2).HEIC.xmp").is_file());
+}
+
+#[test]
+fn an_uppercase_sidecar_is_placed_as_lowercase_xmp() {
+    let e = env();
+    let jpg = e.upload(b"jpeg bytes");
+    let xmp = e.upload(&fs::read(fixture("xmp/asteria_full.xmp")).unwrap());
+    let (files, warnings) = placed(
+        e.commit(&[(&jpg, "x.jpg"), (&xmp, "x.jpg.XMP")], false)
+            .unwrap(),
+    );
+    assert!(warnings.is_empty());
+    assert_eq!(
+        files,
+        vec![
+            (jpg, "Inbox/x.jpg".to_string()),
+            (xmp, "Inbox/x.jpg.xmp".to_string()),
+        ]
+    );
+    let names: Vec<_> = fs::read_dir(e.root.join("Inbox"))
+        .unwrap()
+        .map(|d| d.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(names.contains(&"x.jpg.xmp".to_string()), "{names:?}");
+    assert!(!names.contains(&"x.jpg.XMP".to_string()), "{names:?}");
 }
