@@ -76,7 +76,6 @@ fn leading_year(date: &str) -> Option<i32> {
 }
 
 /// The title to show: the title tag, or the file name without its extension.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by the music RPC methods"))]
 pub fn display_title(tags: &TrackTags, rel: &str) -> String {
     if let Some(title) = &tags.title {
         return title.clone();

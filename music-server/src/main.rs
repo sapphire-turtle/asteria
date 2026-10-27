@@ -4,6 +4,7 @@ mod cover;
 mod ext;
 mod index;
 mod playlist;
+mod rpc;
 mod tags;
 
 use std::sync::Arc;

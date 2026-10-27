@@ -1,8 +1,7 @@
 //! Album art: a track's embedded picture, else an image file in its folder.
-#![cfg_attr(not(test), expect(dead_code, reason = "used by the music extension"))]
 
 use std::io::Read;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use asteria_framework_server::ThumbSource;
 use lofty::picture::{Picture, PictureType};
@@ -92,18 +91,22 @@ fn key(bytes: &[u8]) -> String {
 /// A folder image larger than this is not used.
 const MAX_FOLDER_IMAGE: u64 = 32 * 1024 * 1024;
 
-/// Reads `root/img` unless it resolves (through symlinks) outside the library, into a hidden
-/// path, or is too big. The bytes come from the canonical path that passed the check.
-fn read_folder_image(root: &Path, img: &str) -> Option<(Vec<u8>, &'static str)> {
+/// The canonical path of `root/rel`, unless it resolves (through symlinks) outside the
+/// library or into a hidden path. Open the returned path, not `root/rel`.
+pub fn canonical_in_library(root: &Path, rel: &str) -> Option<PathBuf> {
     let canon_root = root.canonicalize().ok()?;
-    let canon = root.join(img).canonicalize().ok()?;
+    let canon = root.join(rel).canonicalize().ok()?;
     let inside = canon.strip_prefix(&canon_root).ok()?;
     let clean = inside
         .components()
         .all(|c| matches!(c, Component::Normal(n) if !n.to_string_lossy().starts_with('.')));
-    if !clean {
-        return None;
-    }
+    clean.then_some(canon)
+}
+
+/// Reads `root/img` unless it resolves (through symlinks) outside the library, into a hidden
+/// path, or is too big. The bytes come from the canonical path that passed the check.
+fn read_folder_image(root: &Path, img: &str) -> Option<(Vec<u8>, &'static str)> {
+    let canon = canonical_in_library(root, img)?;
     let ext = match canon.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "jpg" => "jpg",
         "jpeg" => "jpeg",

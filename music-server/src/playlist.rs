@@ -2,8 +2,6 @@
 //!
 //! Pure functions only; nothing here touches the filesystem.
 
-#![cfg_attr(not(test), expect(dead_code, reason = "used by the music RPC methods"))]
-
 use std::path::Path;
 
 /// The most entries read from one playlist; the rest are dropped.

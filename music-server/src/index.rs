@@ -3,8 +3,6 @@
 //! The rules are those of the design spec §4.9: an album is a folder plus an album name,
 //! the artist list is made of album artists, and names compare under NFKC and lower case.
 
-#![cfg_attr(not(test), expect(dead_code, reason = "used by the music RPC methods"))]
-
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
