@@ -100,6 +100,7 @@ asteria-photos-uploads-state-awaiting = ライブラリにあります
 asteria-photos-uploads-state-uploading = 送信中
 asteria-photos-uploads-state-committing = 保存中
 asteria-photos-uploads-state-done = 完了
+asteria-photos-uploads-state-done-warnings = 完了（警告 { $count } 件）
 asteria-photos-uploads-state-discarded = 破棄しました
 asteria-photos-uploads-state-failed = 失敗：{ $reason }
 

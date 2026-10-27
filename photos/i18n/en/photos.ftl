@@ -103,6 +103,7 @@ asteria-photos-uploads-state-awaiting = Already in the library
 asteria-photos-uploads-state-uploading = Uploading
 asteria-photos-uploads-state-committing = Saving
 asteria-photos-uploads-state-done = Done
+asteria-photos-uploads-state-done-warnings = Done, with warnings ({ $count })
 asteria-photos-uploads-state-discarded = Discarded
 asteria-photos-uploads-state-failed = Failed: { $reason }
 

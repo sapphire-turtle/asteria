@@ -45,6 +45,15 @@ pub fn actions(state: &GroupState) -> Actions {
     }
 }
 
+/// What the server did not do as asked for a group that is done (an XMP it dropped, say);
+/// empty for any other state.
+pub fn done_warnings(state: &GroupState) -> &[String] {
+    match state {
+        GroupState::Done { warnings, .. } => warnings,
+        _ => &[],
+    }
+}
+
 /// What the status bar shows while some group is unfinished (not done, not discarded):
 /// `(done, total, waiting for a decision)`, from the queue's own [`QueueSummary`], so "12 / 40"
 /// is groups done over all groups in the queue. `None` when everything is finished.
@@ -273,7 +282,18 @@ fn row(
                 } else {
                     ui.add(egui::Label::new(name.as_str()).truncate());
                 }
-                ui.weak(state_text(ui, &group.state));
+                let warnings = done_warnings(&group.state);
+                if warnings.is_empty() {
+                    ui.weak(state_text(ui, &group.state));
+                } else {
+                    let text = tr!(
+                        ui,
+                        "asteria-photos-uploads-state-done-warnings",
+                        count = warnings.len()
+                    );
+                    ui.colored_label(ui.visuals().warn_fg_color, text)
+                        .on_hover_text(warnings.join("\n"));
+                }
                 if let Some((id, sent, total)) = snap.summary.active
                     && id == group.id
                     && total > 0

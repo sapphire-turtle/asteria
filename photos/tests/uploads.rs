@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use asteria_framework_client::upload::UploadSnapshot;
 use asteria_framework_client::upload::queue::{GroupId, GroupState, QueueSummary, QueuedGroup};
 use asteria_photos::app::{PhotosApp, Screen};
-use asteria_photos::uploads::{Actions, actions, status_counts};
+use asteria_photos::uploads::{Actions, actions, done_warnings, status_counts};
 use corundum_framework::egui;
 
 use support::server::TestServer;
@@ -253,4 +253,47 @@ fn clicking_the_status_bar_count_opens_uploads() {
         x -= 8.0;
     }
     assert_eq!(app.current_screen(), Some(Screen::Uploads));
+}
+
+#[test]
+fn done_warnings_are_shown() {
+    let quiet = GroupState::Done {
+        placed: vec!["Inbox/a.jpg".into()],
+        warnings: vec![],
+    };
+    assert!(done_warnings(&quiet).is_empty());
+    let warned = GroupState::Done {
+        placed: vec!["Inbox/a.jpg".into()],
+        warnings: vec!["sidecar dropped: not XML".into()],
+    };
+    assert_eq!(done_warnings(&warned), ["sidecar dropped: not XML"]);
+    assert!(done_warnings(&GroupState::Hashing).is_empty());
+}
+
+#[test]
+fn a_dropped_sidecar_is_reported_on_its_row() {
+    let server = TestServer::start(&[], |_| {});
+    let (_fx, ctx, mut app) = start(&server);
+    let src = tempfile::tempdir().unwrap();
+    jpeg(&src.path().join("a.jpg"), 3);
+    let broken = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../crates/asteria-framework/tests/fixtures/xmp/malformed.xmp");
+    std::fs::copy(broken, src.path().join("a.jpg.xmp")).unwrap();
+
+    app.drop_files(vec![src.path().join("a.jpg"), src.path().join("a.jpg.xmp")]);
+    run_until(
+        &ctx,
+        &mut app,
+        "the upload",
+        |_| {},
+        |app| snapshot(app).is_some_and(|s| s.summary.done == 1),
+    );
+    let snap = snapshot(&app).unwrap();
+    let warnings = done_warnings(&snap.groups[0].state);
+    assert_eq!(warnings.len(), 1, "{:?}", snap.groups[0].state);
+    assert!(warnings[0].starts_with("sidecar dropped"), "{warnings:?}");
+    assert!(server.root.join("Inbox/a.jpg").is_file());
+    // The Uploads screen draws the row with its warning.
+    assert_eq!(app.current_screen(), Some(Screen::Uploads));
+    frame(&ctx, &mut app);
 }
