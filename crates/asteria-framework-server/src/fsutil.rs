@@ -35,52 +35,71 @@ pub(crate) fn move_no_clobber(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 
-/// How [`place_no_clobber`] put a file in place.
+/// How [`stage`] put a file's content on the target filesystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Placed {
-    /// Moved (renamed): `from` is gone.
-    Moved,
-    /// Copied, since `from` is on another filesystem: `from` is still there, so that a
-    /// rollback only has to remove the copy. The caller removes `from` when done.
+pub(crate) enum Staged {
+    /// A hard link to the source, on the same filesystem.
+    Linked,
+    /// A synced copy, made since the source is on another filesystem or the target's
+    /// filesystem has no hard links.
     Copied,
 }
 
-/// Puts `from` at `to` without ever replacing an existing `to`: [`move_no_clobber`] when both
-/// are on one filesystem, otherwise (`EXDEV`, or `ERROR_NOT_SAME_DEVICE` on Windows) a copy
-/// into a temp file beside `to`, synced and then moved into place the same no-clobber way.
-pub(crate) fn place_no_clobber(from: &Path, to: &Path) -> io::Result<Placed> {
-    let moved = if test_hook::is_cross_device() {
+/// Whether `e` says that source and target are on different filesystems (`EXDEV`, and
+/// `ERROR_NOT_SAME_DEVICE` on Windows, which std both reports as `CrossesDevices`).
+pub(crate) fn is_cross_device(e: &io::Error) -> bool {
+    e.kind() == ErrorKind::CrossesDevices
+}
+
+/// Puts the content of `from` at the new file `tmp`, so that it can later be renamed into
+/// place on `tmp`'s filesystem: a hard link where possible, otherwise a copy synced to disk.
+/// `from` is left alone. Fails with `AlreadyExists`, before copying anything, when `tmp` is
+/// taken; on any failure nothing is left at `tmp`.
+pub(crate) fn stage(from: &Path, tmp: &Path) -> io::Result<Staged> {
+    let linked = if test_hook::is_cross_device() {
         Err(ErrorKind::CrossesDevices.into())
     } else {
-        move_no_clobber(from, to)
+        fs::hard_link(from, tmp)
     };
-    match moved {
-        Ok(()) => Ok(Placed::Moved),
-        Err(e) if e.kind() == ErrorKind::CrossesDevices => {
-            copy_no_clobber(from, to)?;
-            Ok(Placed::Copied)
+    match linked {
+        Ok(()) => Ok(Staged::Linked),
+        Err(e) if matches!(e.kind(), ErrorKind::AlreadyExists | ErrorKind::NotFound) => Err(e),
+        // Another filesystem (or one without hard links, such as vfat): copy.
+        Err(e) => {
+            if !is_cross_device(&e) {
+                tracing::debug!(path = %tmp.display(), error = %e, "no hard link; copying instead");
+            }
+            copy_new(from, tmp).map(|()| Staged::Copied)
         }
-        Err(e) => Err(e),
     }
 }
 
-/// Copies `from` to `to` through a temp file in `to`'s directory, which is removed if
-/// anything fails. `from` is left alone.
-fn copy_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
-    let tmp = asteria_framework::fsutil::tmp_path_for(to);
+/// Copies `from` into the new file `tmp` and syncs it; `tmp` is removed if anything fails
+/// after it was created.
+fn copy_new(from: &Path, tmp: &Path) -> io::Result<()> {
     let mut src = File::open(from)?;
-    let mut dst = File::options().write(true).create_new(true).open(&tmp)?;
+    let mut dst = File::options().write(true).create_new(true).open(tmp)?;
     let copied = io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all());
-    // Closed before it is moved or removed (Windows will not do either to an open file).
+    // Closed before it is removed (Windows will not remove an open file).
     drop(dst);
-    let result = copied.and_then(|()| move_no_clobber(&tmp, to));
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
+    if copied.is_err() {
+        let _ = fs::remove_file(tmp);
     }
-    result
+    copied
 }
 
-/// Lets a test make every placement look cross-filesystem, on the current thread.
+/// Persists the entries of `dir` (renames into it); best effort, and only where the
+/// platform can sync a directory.
+pub(crate) fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = File::open(dir) {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
+/// Lets a test make every staging look cross-filesystem, on the current thread.
 pub(crate) mod test_hook {
     #[cfg(test)]
     thread_local! {
@@ -97,13 +116,19 @@ pub(crate) mod test_hook {
         false
     }
 
-    /// Runs `f` with placements forced onto the copy path.
+    /// Runs `f` with staging forced onto the copy path; the switch is reset however `f`
+    /// ends, a panic included.
     #[cfg(test)]
     pub(crate) fn cross_device<T>(f: impl FnOnce() -> T) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                CROSS_DEVICE.with(|c| c.set(false));
+            }
+        }
         CROSS_DEVICE.with(|c| c.set(true));
-        let out = f();
-        CROSS_DEVICE.with(|c| c.set(false));
-        out
+        let _reset = Reset;
+        f()
     }
 }
 
@@ -121,56 +146,96 @@ mod tests {
         v
     }
 
-    /// `from` in one directory and the target directory `to_dir`, as for an upload commit.
-    fn dirs() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    /// `from` in a session directory and the target directory `dst`, as for an upload commit,
+    /// and the staged file's path in `dst`.
+    fn dirs() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
         let d = tempfile::tempdir().unwrap();
         let (src, dst) = (d.path().join("state"), d.path().join("lib"));
         std::fs::create_dir(&src).unwrap();
         std::fs::create_dir(&dst).unwrap();
         std::fs::write(src.join("data"), b"payload").unwrap();
-        (d, src.join("data"), dst)
+        let tmp = dst.join(".session.tag.asteria-tmp");
+        (d, src.join("data"), dst, tmp)
     }
 
     #[test]
-    fn same_filesystem_placement_moves() {
-        let (_d, from, dst) = dirs();
-        let to = dst.join("a.jpg");
-        assert_eq!(place_no_clobber(&from, &to).unwrap(), Placed::Moved);
-        assert!(!from.exists());
-        assert_eq!(std::fs::read(&to).unwrap(), b"payload");
-    }
-
-    #[test]
-    fn cross_device_placement_copies_and_keeps_the_source() {
-        let (_d, from, dst) = dirs();
-        let to = dst.join("a.jpg");
-        let placed = test_hook::cross_device(|| place_no_clobber(&from, &to)).unwrap();
-        assert_eq!(placed, Placed::Copied);
-        assert_eq!(std::fs::read(&to).unwrap(), b"payload");
-        // The caller drops the source once the whole group is in place.
+    fn same_filesystem_staging_links() {
+        let (_d, from, dst, tmp) = dirs();
+        assert_eq!(stage(&from, &tmp).unwrap(), Staged::Linked);
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"payload");
         assert_eq!(std::fs::read(&from).unwrap(), b"payload");
-        assert_eq!(names(&dst), ["a.jpg"]);
+        assert_eq!(names(&dst), [".session.tag.asteria-tmp"]);
     }
 
     #[test]
-    fn cross_device_placement_never_clobbers() {
-        let (_d, from, dst) = dirs();
-        let to = dst.join("a.jpg");
-        std::fs::write(&to, b"theirs").unwrap();
-        let err = test_hook::cross_device(|| place_no_clobber(&from, &to)).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
-        assert_eq!(std::fs::read(&to).unwrap(), b"theirs");
-        assert!(from.exists());
-        assert_eq!(names(&dst), ["a.jpg"]);
+    fn cross_device_staging_copies_and_keeps_the_source() {
+        let (_d, from, dst, tmp) = dirs();
+        let staged = test_hook::cross_device(|| stage(&from, &tmp)).unwrap();
+        assert_eq!(staged, Staged::Copied);
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"payload");
+        assert_eq!(std::fs::read(&from).unwrap(), b"payload");
+        assert_eq!(names(&dst), [".session.tag.asteria-tmp"]);
+    }
+
+    /// A taken temp name is found before anything is copied, and left alone.
+    #[test]
+    fn staging_never_clobbers() {
+        let (_d, from, _dst, tmp) = dirs();
+        for cross in [false, true] {
+            std::fs::write(&tmp, b"theirs").unwrap();
+            let r = if cross {
+                test_hook::cross_device(|| stage(&from, &tmp))
+            } else {
+                stage(&from, &tmp)
+            };
+            assert_eq!(r.unwrap_err().kind(), ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read(&tmp).unwrap(), b"theirs");
+        }
     }
 
     #[test]
-    fn failed_cross_device_copy_leaves_no_temp_file() {
-        let (_d, from, dst) = dirs();
+    fn staging_a_missing_source_fails_without_litter() {
+        let (_d, from, dst, tmp) = dirs();
         std::fs::remove_file(&from).unwrap();
-        let to = dst.join("a.jpg");
-        assert!(test_hook::cross_device(|| place_no_clobber(&from, &to)).is_err());
+        assert!(stage(&from, &tmp).is_err());
+        assert!(test_hook::cross_device(|| stage(&from, &tmp)).is_err());
         assert!(names(&dst).is_empty());
+    }
+
+    /// The copy fails after its temp file exists: the temp file is removed.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_failing_midway_leaves_no_temp_file() {
+        let (_d, from, dst, tmp) = dirs();
+        // A directory opens on unix, but reading it fails.
+        let from = from.parent().unwrap();
+        assert!(test_hook::cross_device(|| stage(from, &tmp)).is_err());
+        assert!(names(&dst).is_empty());
+    }
+
+    #[test]
+    fn cross_device_errors_are_recognised() {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let exdev = 18;
+        #[cfg(windows)]
+        let exdev = 17; // ERROR_NOT_SAME_DEVICE
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        assert!(is_cross_device(&io::Error::from_raw_os_error(exdev)));
+        assert!(is_cross_device(&ErrorKind::CrossesDevices.into()));
+        assert!(!is_cross_device(&ErrorKind::PermissionDenied.into()));
+        assert!(!is_cross_device(&ErrorKind::AlreadyExists.into()));
+    }
+
+    #[test]
+    fn the_cross_device_hook_is_reset_after_a_panic() {
+        let r = std::panic::catch_unwind(|| test_hook::cross_device(|| panic!("in the hook")));
+        assert!(r.is_err());
+        assert!(!test_hook::is_cross_device());
     }
 
     #[test]

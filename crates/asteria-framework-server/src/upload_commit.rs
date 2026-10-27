@@ -1,19 +1,23 @@
 //! `upload.commit`: places a group of finished upload sessions under `Inbox/` (spec §4.7).
 //!
-//! Two phases, so that hashing a big file never holds up the write queue:
-//! - [`prepare`] seals the sessions, then checks and hashes them (and reads the sidecars),
-//!   outside the queue;
+//! Two phases, so that the heavy work never holds up the write queue:
+//! - [`prepare`] seals the sessions, then checks and hashes them (and reads the sidecars)
+//!   and stages each file in the group's folder: a hard link, or a synced copy when the
+//!   sessions are on another filesystem than the library. All outside the queue;
 //! - [`place`] runs in the write queue ([`crate::writer::Writer::commit_upload`]): it checks
-//!   for duplicates again, numbers, places, journals and leaves the tombstones.
+//!   for duplicates again, numbers, renames the staged files into place, journals them and
+//!   leaves the tombstones.
 //!
-//! The seals are held from the start of `prepare` to the end of `place`. The caller asks for
-//! a rescan afterwards; this module does not touch the cache.
+//! The seals are held from the start of `prepare` to the end of `place`. Staged files that
+//! were not placed (a failure, or duplicates found) are removed. The caller asks for a
+//! rescan afterwards; this module does not touch the cache.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use asteria_framework::fsutil::tmp_path_for;
 use asteria_framework::hash::{HashOutcome, HashScope, content_hash, file_hash};
 use asteria_framework::journal::{Actor, JournalEntry, OpId, OpKind};
 use asteria_framework::paths::{media_path_for_sidecar, sidecar_path_for};
@@ -25,7 +29,7 @@ use grain_id::GrainId;
 
 use crate::cache::Cache;
 use crate::error::ServerError;
-use crate::fsutil::{Placed, place_no_clobber};
+use crate::fsutil::{move_no_clobber, stage, sync_dir};
 use crate::upload::{Committed, SealGuard, UploadError, UploadStore};
 
 /// Library-relative folder that every upload lands in.
@@ -42,9 +46,69 @@ struct Item {
     data: PathBuf,
     /// Payload hash; `None` for a sidecar.
     content: Option<HashOutcome>,
+    /// The file's content staged in the group's folder, under a temp name; renamed into
+    /// place by [`place`].
+    staged: PathBuf,
 }
 
-/// A group whose sessions are sealed, complete and hashed, ready for [`place`].
+/// The group's folder, the folders made for it, the files staged in it and the sessions'
+/// seals. Whatever is still staged when this is dropped is removed, and so are the folders
+/// made for it, as far as they are empty, unless [`Staging::keep_folders`] was called; the
+/// seals are released only after that.
+struct Staging {
+    dir: PathBuf,
+    /// The topmost folder this commit made (`dir` and the ones between), if any.
+    created_from: Option<PathBuf>,
+    files: Vec<PathBuf>,
+    _seals: Vec<SealGuard>,
+}
+
+impl Staging {
+    fn new(dir: PathBuf, seals: Vec<SealGuard>) -> Result<Staging, UploadError> {
+        let created_from = dir
+            .ancestors()
+            .take_while(|d| !d.exists())
+            .last()
+            .map(Path::to_path_buf);
+        let staging = Staging {
+            dir,
+            created_from,
+            files: Vec::new(),
+            _seals: seals,
+        };
+        // On failure the drop removes what was made.
+        fs::create_dir_all(&staging.dir)?;
+        Ok(staging)
+    }
+
+    /// The group is in place: its folders stay.
+    fn keep_folders(&mut self) {
+        self.created_from = None;
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        for f in &self.files {
+            match fs::remove_file(f) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    tracing::warn!(path = %f.display(), error = %e, "could not remove a staged upload");
+                }
+                _ => {}
+            }
+        }
+        if let Some(top) = &self.created_from {
+            for d in self.dir.ancestors() {
+                let _ = fs::remove_dir(d);
+                if d == top {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// A group whose sessions are sealed, complete, hashed and staged, ready for [`place`].
 pub struct Prepared {
     user: UserId,
     params: UploadCommitParams,
@@ -56,8 +120,23 @@ pub struct Prepared {
     warnings: Vec<UploadWarning>,
     /// Their sessions.
     dropped: Vec<String>,
-    /// Held until the group is placed (or not).
-    _seals: Vec<SealGuard>,
+    /// The staged files; also holds the seals until the group is placed (or not).
+    staging: Staging,
+}
+
+/// A group whose sessions are sealed, before the heavy part of [`prepare`].
+pub struct Sealed {
+    user: UserId,
+    params: UploadCommitParams,
+    folder: String,
+    seals: Vec<SealGuard>,
+}
+
+/// What [`seal_group`] came to.
+pub enum Begun {
+    /// These sessions were committed before: this is that commit's answer.
+    Answered(UploadCommitResult),
+    Sealed(Sealed),
 }
 
 /// What [`prepare`] came to.
@@ -88,24 +167,36 @@ fn commit_with(
     params: UploadCommitParams,
     before_place: &mut dyn FnMut(&Path),
 ) -> Result<UploadCommitResult, UploadError> {
-    match prepare(store, user, params)? {
+    match prepare(library, store, user, params)? {
         Prepare::Answered(result) => Ok(result),
         Prepare::Ready(p) => place_with(library, cache, store, p, before_place),
     }
 }
 
-/// The first phase of a commit, outside the write queue: checks the group, seals its
-/// sessions, answers a repeated commit from the tombstones, and otherwise checks that every
-/// session is complete and matches the hash claimed at `begin`, hashes the payloads and reads
-/// the sidecars. Blocking.
+/// The first phase of a commit, outside the write queue: [`seal_group`], then
+/// [`prepare_sealed`]. Blocking.
 pub fn prepare(
+    library: &Library,
     store: &Arc<UploadStore>,
     user: UserId,
     params: UploadCommitParams,
 ) -> Result<Prepare, UploadError> {
+    match seal_group(store, user, params)? {
+        Begun::Answered(result) => Ok(Prepare::Answered(result)),
+        Begun::Sealed(sealed) => prepare_sealed(library, store, sealed).map(Prepare::Ready),
+    }
+}
+
+/// The quick start of a commit: checks the group, seals its sessions and answers a
+/// repeated commit from the tombstones. Blocking.
+pub fn seal_group(
+    store: &Arc<UploadStore>,
+    user: UserId,
+    params: UploadCommitParams,
+) -> Result<Begun, UploadError> {
     let folder = validate_group(&params)?.to_owned();
 
-    // No chunk write or abort may touch a session while we hash and move its file.
+    // No chunk write or abort may touch a session while we hash and stage its file.
     let seals = params
         .files
         .iter()
@@ -113,9 +204,30 @@ pub fn prepare(
         .collect::<Result<Vec<_>, _>>()?;
 
     if let Some(result) = earlier_commit(store, user, &params)? {
-        return Ok(Prepare::Answered(result));
+        return Ok(Begun::Answered(result));
     }
+    Ok(Begun::Sealed(Sealed {
+        user,
+        params,
+        folder,
+        seals,
+    }))
+}
 
+/// The heavy part of a commit's first phase: checks that every session is complete and
+/// matches the hash claimed at `begin`, hashes the payloads, reads the sidecars and stages
+/// the files in the group's folder. Blocking.
+pub fn prepare_sealed(
+    library: &Library,
+    store: &Arc<UploadStore>,
+    sealed: Sealed,
+) -> Result<Prepared, UploadError> {
+    let Sealed {
+        user,
+        params,
+        folder,
+        seals,
+    } = sealed;
     let mut items = Vec::with_capacity(params.files.len());
     for f in &params.files {
         #[cfg(test)]
@@ -136,51 +248,67 @@ pub fn prepare(
             store.remove(&f.session);
             return Err(UploadError::HashMismatch);
         }
-        items.push(Item {
-            session: f.session.clone(),
-            name,
-            data: done.data_path,
-            content,
-        });
+        items.push((f.session.clone(), name, done.data_path, content));
     }
 
     // A sidecar that does not parse is dropped; the media still goes in.
     let mut warnings = Vec::new();
     let mut dropped = Vec::new();
-    let mut kept = Vec::with_capacity(items.len());
-    for item in items {
-        if item.content.is_none() {
-            match Sidecar::read(&item.data) {
+    let mut keep = Vec::with_capacity(items.len());
+    for (session, name, data, content) in items {
+        if content.is_none() {
+            match Sidecar::read(&data) {
                 Ok(Some(_)) => {}
                 Ok(None) => return Err(UploadError::NotFound),
                 Err(FwError::MalformedSidecar { reason, .. }) => {
                     warnings.push(UploadWarning::SidecarDropped {
-                        session: item.session.clone(),
+                        session: session.clone(),
                         reason,
                     });
-                    dropped.push(item.session);
+                    dropped.push(session);
                     continue;
                 }
                 Err(e) => return Err(fw(e)),
             }
         }
-        kept.push(item);
+        keep.push((session, name, data, content));
     }
-    Ok(Prepare::Ready(Prepared {
+
+    // Staged on the library's filesystem now, so that placing them is only a rename.
+    let dir = folder
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .fold(library.root().join(INBOX), |d, s| d.join(s));
+    let mut staging = Staging::new(dir, seals)?;
+    let mut kept = Vec::with_capacity(keep.len());
+    for (session, name, data, content) in keep {
+        let staged = tmp_path_for(&staging.dir.join(&session));
+        stage(&data, &staged)
+            .map_err(|e| UploadError::Io(format!("could not stage {name}: {e}")))?;
+        staging.files.push(staged.clone());
+        kept.push(Item {
+            session,
+            name,
+            data,
+            content,
+            staged,
+        });
+    }
+    Ok(Prepared {
         user,
         params,
         folder,
         kept,
         warnings,
         dropped,
-        _seals: seals,
-    }))
+        staging,
+    })
 }
 
 /// The second phase of a commit, in the write queue: unless duplicates are allowed, looks
 /// for the payloads in the library (again: it may have changed since the client's check),
-/// then numbers and places the files, journals them and turns their sessions into
-/// tombstones. Blocking; the seals are released when it returns.
+/// then numbers the files, renames them into place, journals them and turns their sessions
+/// into tombstones. Blocking; the seals are released when it returns.
 pub fn place(
     library: &Library,
     cache: &Cache,
@@ -204,7 +332,7 @@ fn place_with(
         kept,
         warnings,
         dropped,
-        _seals,
+        mut staging,
     } = prepared;
     // Before anything is placed: a commit that cannot be journaled is not made.
     let journal = library.journal().map_err(fw)?;
@@ -224,52 +352,36 @@ fn place_with(
         }
     }
 
-    let dir = folder
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .fold(library.root().join(INBOX), |d, s| d.join(s));
+    let dir = staging.dir.clone();
     let rel_dir = if folder.is_empty() {
         INBOX.to_string()
     } else {
         format!("{INBOX}/{folder}")
     };
     let n = free_number(&dir, &kept)?;
-
-    let created_from = dir
-        .ancestors()
-        .take_while(|d| !d.exists())
-        .last()
-        .map(Path::to_path_buf);
-    if let Err(e) = fs::create_dir_all(&dir) {
-        roll_back(&[], &dir, created_from.as_deref());
-        return Err(e.into());
-    }
-    let mut placed: Vec<(&Item, PathBuf, String, Placed)> = Vec::with_capacity(kept.len());
+    let mut placed: Vec<(&Item, PathBuf, String)> = Vec::with_capacity(kept.len());
     for item in &kept {
         let name = target_name(&item.name, n);
         let target = dir.join(&name);
         let rel = format!("{rel_dir}/{name}");
         before_place(&target);
-        match place_no_clobber(&item.data, &target) {
-            Ok(how) => placed.push((item, target, rel, how)),
-            Err(e) => {
-                tracing::warn!(path = %rel, error = %e, "could not place upload; rolling back the group");
-                roll_back(&placed, &dir, created_from.as_deref());
-                return Err(UploadError::Io(format!("could not place {rel}: {e}")));
-            }
+        if let Err(e) = move_no_clobber(&item.staged, &target) {
+            tracing::warn!(path = %rel, error = %e, "could not place upload; rolling back the group");
+            roll_back(&placed);
+            return Err(UploadError::Io(format!("could not place {rel}: {e}")));
         }
+        placed.push((item, target, rel));
     }
-    // The whole group is in place: a copied file's session data is not needed for a rollback
-    // any more (the tombstone below would drop it too).
-    for (item, _, rel, how) in &placed {
-        if *how == Placed::Copied
-            && let Err(e) = fs::remove_file(&item.data)
-        {
-            tracing::warn!(path = %rel, error = %e, "could not remove a copied upload's data");
+    staging.keep_folders();
+    // The renames are on disk before the sessions' data, the files' other copy, goes.
+    sync_dir(&dir);
+    for (item, _, rel) in &placed {
+        if let Err(e) = fs::remove_file(&item.data) {
+            tracing::warn!(path = %rel, error = %e, "could not remove a placed upload's data");
         }
     }
 
-    for (item, _, rel, _) in &placed {
+    for (item, _, rel) in &placed {
         let entry = JournalEntry {
             op_id: OpId(GrainId::random()),
             plan_id: None,
@@ -287,7 +399,7 @@ fn place_with(
     let result = UploadCommitResult::Placed {
         files: placed
             .iter()
-            .map(|(item, _, rel, _)| PlacedFile {
+            .map(|(item, _, rel)| PlacedFile {
                 session: item.session.clone(),
                 path: rel.clone(),
             })
@@ -299,7 +411,7 @@ fn place_with(
         sessions: sorted_sessions(&params),
         result: result.clone(),
     };
-    for session in placed.iter().map(|(i, _, _, _)| &i.session).chain(&dropped) {
+    for session in placed.iter().map(|(i, _, _)| &i.session).chain(&dropped) {
         if let Err(e) = store.mark_committed(session, &committed) {
             // A repeated commit writes it, from the group's other tombstones; with none at
             // all it finds the session without its data (NotFound).
@@ -445,25 +557,13 @@ fn free_number(dir: &Path, items: &[Item]) -> Result<u32, UploadError> {
         .ok_or_else(|| UploadError::Invalid("too many files with these names".into()))
 }
 
-/// Moves the placed files back into their sessions (a copy, whose session still has the
-/// data, is removed) and removes the folders this commit created (`created_from` and below),
-/// as far as they are empty.
-fn roll_back(placed: &[(&Item, PathBuf, String, Placed)], dir: &Path, created_from: Option<&Path>) {
-    for (item, target, rel, how) in placed.iter().rev() {
-        let undone = match how {
-            Placed::Moved => fs::rename(target, &item.data),
-            Placed::Copied => fs::remove_file(target),
-        };
-        if let Err(e) = undone {
+/// Takes the placed files back out of the library. Their content is still in the sessions
+/// (a staged file is a link or a copy), so they are only removed; the [`Staging`] then
+/// removes the folders made for the group.
+fn roll_back(placed: &[(&Item, PathBuf, String)]) {
+    for (_, target, rel) in placed.iter().rev() {
+        if let Err(e) = fs::remove_file(target) {
             tracing::error!(path = %rel, error = %e, "could not take back a placed upload");
-        }
-    }
-    if let Some(top) = created_from {
-        for d in dir.ancestors() {
-            let _ = fs::remove_dir(d);
-            if d == top {
-                break;
-            }
         }
     }
 }
@@ -490,6 +590,8 @@ mod hold {
     }
 
     pub static HOLD: Mutex<Option<Arc<Hold>>> = Mutex::new(None);
+    /// Taken by each test that sets `HOLD`, so that they do not run at once.
+    pub static TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     pub fn before_hash(session: &str) {
         let hold = HOLD.lock().unwrap().clone();
@@ -740,7 +842,6 @@ mod tests {
             s
         };
         let (heic, mov) = (upload(b"heic bytes"), upload(b"mov bytes"));
-        let mov_data = store.completed(me, &mov).unwrap().data_path;
         let params = UploadCommitParams {
             files: vec![
                 UploadFile {
@@ -748,16 +849,16 @@ mod tests {
                     path: "a/b/IMG_0001.HEIC".into(),
                 },
                 UploadFile {
-                    session: mov,
+                    session: mov.clone(),
                     path: "a/b/IMG_0001.MOV".into(),
                 },
             ],
             allow_duplicate: false,
         };
-        // The second file vanishes from its session before it is moved.
+        // The second file's staged copy vanishes before it is renamed into place.
         let mut hook = |target: &Path| {
             if target.ends_with("IMG_0001.MOV") {
-                fs::remove_file(&mov_data).unwrap();
+                fs::remove_file(tmp_path_for(&target.parent().unwrap().join(&mov))).unwrap();
             }
         };
         let r = commit_with(&lib, &cache, &store, me, params, &mut hook);
@@ -869,6 +970,7 @@ mod tests {
         store.put_chunk(me, &session, 0, b"heic bytes").unwrap();
         let (writer, _h) = crate::spawn_writer(lib.clone(), cache.clone());
 
+        let _serial = hold::TESTS.lock().await;
         // The commit stops as it starts hashing, as a big file would keep it there.
         let (entered, entered_rx) = mpsc::channel();
         let (release, release_rx) = mpsc::channel();
@@ -912,5 +1014,160 @@ mod tests {
         let r = committing.await.unwrap().unwrap();
         assert!(matches!(r, UploadCommitResult::Placed { .. }), "{r:?}");
         assert!(root.join("Inbox/IMG_0001.HEIC").is_file());
+    }
+
+    /// The client gives up on a slow commit (its request future is dropped): the commit
+    /// still finishes, and asking again gets its answer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_commit_finishes_after_its_caller_gave_up() {
+        use std::sync::{Arc, Mutex, mpsc};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        fs::create_dir(&root).unwrap();
+        let lib = Arc::new(
+            Library::init(&root, "owner")
+                .unwrap()
+                .with_state_dir(dir.path().join("state")),
+        );
+        let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
+        let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
+        let me = lib.owner();
+        let tmp = dir.path().join("hash-me");
+        fs::write(&tmp, b"heic bytes").unwrap();
+        let session = store
+            .begin(me, 10, file_hash(&tmp).unwrap())
+            .unwrap()
+            .session;
+        store.put_chunk(me, &session, 0, b"heic bytes").unwrap();
+        let (writer, _h) = crate::spawn_writer(lib.clone(), cache.clone());
+        let params = UploadCommitParams {
+            files: vec![UploadFile {
+                session: session.clone(),
+                path: "IMG_0001.HEIC".into(),
+            }],
+            allow_duplicate: false,
+        };
+
+        let _serial = hold::TESTS.lock().await;
+        let (entered, entered_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        *hold::HOLD.lock().unwrap() = Some(Arc::new(hold::Hold {
+            session: session.clone(),
+            entered,
+            release: Mutex::new(release_rx),
+        }));
+        let request = {
+            let (writer, store, params) = (writer.clone(), store.clone(), params.clone());
+            tokio::spawn(async move { writer.commit_upload(store, me, params).await })
+        };
+        tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(20)))
+            .await
+            .unwrap()
+            .expect("the commit reached its hashing");
+        // The request goes away (a client timeout drops it) while the commit hashes.
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        // Meanwhile a repeated commit finds the sessions busy.
+        let again = writer
+            .commit_upload(store.clone(), me, params.clone())
+            .await;
+        assert!(matches!(again, Err(UploadError::Busy(_))), "{again:?}");
+        release.send(()).unwrap();
+        *hold::HOLD.lock().unwrap() = None;
+
+        // Nobody asks again: the abandoned commit places the file and leaves its tombstone
+        // on its own.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while store.committed(me, &session).unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the abandoned commit did not finish"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let r = writer
+            .commit_upload(store.clone(), me, params)
+            .await
+            .unwrap();
+        let UploadCommitResult::Placed { files, .. } = r else {
+            panic!("{r:?}")
+        };
+        assert_eq!(files[0].path, "Inbox/IMG_0001.HEIC");
+        assert_eq!(
+            fs::read(root.join("Inbox/IMG_0001.HEIC")).unwrap(),
+            b"heic bytes"
+        );
+        assert!(store.committed(me, &session).unwrap().is_some());
+    }
+
+    /// The files are staged by the first phase, outside the queue; a commit that does not
+    /// place them removes them, and the folders made for them.
+    #[test]
+    fn staged_files_that_are_not_placed_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        fs::create_dir(&root).unwrap();
+        let lib = Library::init(&root, "owner")
+            .unwrap()
+            .with_state_dir(dir.path().join("state"));
+        let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
+        let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
+        let me = lib.owner();
+        let tmp = dir.path().join("hash-me");
+        fs::write(&tmp, b"jpeg bytes").unwrap();
+        let s = store
+            .begin(me, 10, file_hash(&tmp).unwrap())
+            .unwrap()
+            .session;
+        store.put_chunk(me, &s, 0, b"jpeg bytes").unwrap();
+        let params = UploadCommitParams {
+            files: vec![UploadFile {
+                session: s.clone(),
+                path: "trip/x.jpg".into(),
+            }],
+            allow_duplicate: false,
+        };
+        let names = |d: &Path| -> Vec<String> {
+            fs::read_dir(d)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect()
+        };
+        for cross in [false, true] {
+            let prepared = if cross {
+                crate::fsutil::test_hook::cross_device(|| prepare(&lib, &store, me, params.clone()))
+            } else {
+                prepare(&lib, &store, me, params.clone())
+            };
+            let prepared = prepared.unwrap();
+            let Prepare::Ready(p) = prepared else {
+                panic!("not prepared")
+            };
+            let staged = names(&root.join("Inbox/trip"));
+            assert_eq!(staged.len(), 1, "{staged:?}");
+            assert!(staged[0].ends_with(".asteria-tmp"), "{staged:?}");
+            drop(p);
+            assert!(!root.join("Inbox").exists());
+            assert!(store.completed(me, &s).is_ok());
+        }
+
+        // Duplicates found in the queue: nothing placed, nothing left staged.
+        fs::create_dir(root.join("Inbox")).unwrap();
+        fs::write(root.join("Inbox/old.jpg"), b"jpeg bytes").unwrap();
+        crate::scan(&lib, &cache, &AllMedia).unwrap();
+        crate::hash_pending(&lib, &cache, &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        let r = commit(&lib, &cache, &store, me, params).unwrap();
+        assert!(matches!(r, UploadCommitResult::Duplicate { .. }), "{r:?}");
+        assert_eq!(names(&root.join("Inbox")), ["old.jpg"]);
+        assert!(store.completed(me, &s).is_ok());
+    }
+
+    struct AllMedia;
+    impl crate::MediaFilter for AllMedia {
+        fn accepts(&self, _: asteria_framework::MediaKind) -> bool {
+            true
+        }
     }
 }
