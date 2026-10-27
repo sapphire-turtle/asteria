@@ -2,6 +2,7 @@
 
 mod ext;
 mod index;
+mod playlist;
 mod tags;
 
 use std::sync::Arc;
