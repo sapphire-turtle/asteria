@@ -50,6 +50,11 @@ struct Puts {
     /// The chunk requests from this one on (counting from 0) wait until `released`.
     hold_from: AtomicUsize,
     released: AtomicBool,
+    /// The RPC methods called, in order.
+    methods: Mutex<Vec<String>>,
+    /// This many `upload.commit` answers are lost (a 503 goes back instead) after the commit
+    /// has run.
+    lose_commits: AtomicUsize,
 }
 
 impl Puts {
@@ -62,6 +67,10 @@ impl Puts {
 
     fn stored(&self) -> Vec<u64> {
         self.stored.lock().unwrap().clone()
+    }
+
+    fn methods(&self) -> Vec<String> {
+        self.methods.lock().unwrap().clone()
     }
 }
 
@@ -216,6 +225,18 @@ async fn count_puts(
     } else {
         None
     };
+    let mut commit = false;
+    let req = if req.method() == Method::POST && req.uri().path() == "/rpc" {
+        let (parts, body) = req.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let call: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let method = call["method"].as_str().unwrap_or_default().to_string();
+        commit = method == "upload.commit";
+        puts.methods.lock().unwrap().push(method);
+        axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))
+    } else {
+        req
+    };
     if chunk.is_some() {
         let n = puts.arrived.fetch_add(1, Ordering::SeqCst);
         while n >= puts.hold_from.load(Ordering::SeqCst) && !puts.released.load(Ordering::SeqCst) {
@@ -223,6 +244,19 @@ async fn count_puts(
         }
     }
     let resp = next.run(req).await;
+    if commit
+        && puts
+            .lose_commits
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+    {
+        // The commit ran, but its answer never reaches the client.
+        return axum::response::Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("retry-after", "0")
+            .body(axum::body::Body::empty())
+            .unwrap();
+    }
     if let Some(c) = chunk
         && resp.status() == StatusCode::NO_CONTENT
     {
@@ -770,3 +804,44 @@ fn two_profiles_on_one_server_keep_separate_queues() {
     });
     server.puts.released.store(true, Ordering::SeqCst);
 }
+
+#[test]
+fn a_lost_commit_answer_is_asked_again_not_sent_again() {
+    let server = TestServer::start();
+    let data = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let bytes = padded("blue.jpg", CHUNK + 1000);
+    let path = write(src.path(), "big.jpg", &bytes);
+    server.puts.lose_commits.store(1, Ordering::SeqCst);
+
+    let mut session = open(&server.profile(), data.path());
+    session.uploads().unwrap().drop_paths(vec![path]);
+    let snap = wait_for(&mut session, "done", |s| {
+        s.groups.len() == 1 && is_done(&s.groups[0])
+    });
+    assert_eq!(
+        snap.groups[0].state,
+        GroupState::Done {
+            placed: vec!["Inbox/big.jpg".into()],
+            warnings: vec![],
+        }
+    );
+    // Placed once, sent once.
+    assert_eq!(fs::read(server.inbox("big.jpg")).unwrap(), bytes);
+    assert!(!server.inbox("big (2).jpg").exists());
+    assert_eq!(server.puts.stored(), vec![0, 1]);
+    // After the lost answer, the commit is simply asked again.
+    let methods: Vec<String> = server
+        .puts
+        .methods()
+        .into_iter()
+        .filter(|m| m.starts_with("upload."))
+        .collect();
+    let first = methods.iter().position(|m| m == "upload.commit").unwrap();
+    assert_eq!(
+        methods[first..],
+        ["upload.commit", "upload.commit"],
+        "{methods:?}"
+    );
+}
+

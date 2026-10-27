@@ -984,14 +984,30 @@ impl Engine {
 
     /// Takes the first group being sent one exchange (or a run of chunks) further.
     fn upload_some(&mut self) -> Option<Result<(), ClientError>> {
-        let (hint, id, files, allow_duplicate) = {
+        let (hint, id, files, allow_duplicate, committing) = {
             let s = self.inner.lock();
-            s.queue
-                .groups
-                .iter()
-                .enumerate()
-                .find_map(|(i, g)| uploading(&g.state).map(|a| (i, g.id, g.files.clone(), a)))?
+            s.queue.groups.iter().enumerate().find_map(|(i, g)| {
+                let committing = matches!(g.state, GroupState::Committing { .. });
+                uploading(&g.state).map(|a| (i, g.id, g.files.clone(), a, committing))
+            })?
         };
+        // A commit whose answer never came (lost, or the app closed first) is asked again
+        // before anything else: the server answers a repeat with the first commit's result,
+        // and only a session that is really gone (NotFound) sends the group again.
+        if committing {
+            let sessions: Option<Vec<UploadFile>> = files
+                .iter()
+                .map(|f| {
+                    f.session.clone().map(|session| UploadFile {
+                        session,
+                        path: f.inbox_path.clone(),
+                    })
+                })
+                .collect();
+            if let Some(sessions) = sessions {
+                return Some(self.commit(hint, id, sessions, allow_duplicate));
+            }
+        }
         Some(self.upload_group(hint, id, files, allow_duplicate))
     }
 
@@ -1172,6 +1188,8 @@ impl Engine {
         if !ready {
             return Ok(());
         }
+        // Through the upload client: the server hashes the whole group before it answers,
+        // which may take minutes (UPLOAD_TIMEOUT).
         let result: Result<UploadCommitResult, ClientError> = self.call(
             UPLOAD_COMMIT,
             &UploadCommitParams {
