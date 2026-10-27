@@ -311,7 +311,7 @@ mod tests {
     use asteria_framework::journal::Actor;
     use asteria_framework::{Library, MediaKind};
     use asteria_framework_server::{
-        AppExtension, Cache, ExtContext, ExtraRecord, ThumbSource, hash_pending, item_id_for, scan,
+        AppExtension, Cache, ExtContext, ThumbSource, hash_pending, item_id_for, scan,
     };
     use asteria_music_api::*;
     use lofty::config::WriteOptions;
@@ -881,6 +881,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn playlist_outside_the_library_is_not_found() {
+        use asteria_framework_server::ExtraRecord;
+
         let e = env();
         e.library();
         e.scan();
