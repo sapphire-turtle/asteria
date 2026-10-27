@@ -146,11 +146,70 @@ fn uppercase_xmp_extension_is_a_sidecar() {
     assert_eq!(
         paths(&plan),
         vec![
-            vec!["S/a.JPG", "S/a.JPG.XMP"],
+            // The server reads only a lowercase `.xmp`, so that is what is sent.
+            vec!["S/a.JPG", "S/a.JPG.xmp"],
             vec!["S/b.JPG", "S/b.JPG.xmp"]
         ]
     );
+    assert_eq!(
+        plan.groups[0].files[1].local,
+        dir.path().join("S/a.JPG.XMP")
+    );
     assert_eq!(plan.excluded, 0);
+}
+
+#[test]
+fn dotted_names_group_by_the_name_without_its_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    touch(dir.path(), "D/Screenshot 2026-10-26 at 10.15.30.png");
+    touch(dir.path(), "D/Screenshot 2026-10-26 at 10.42.07.png");
+    touch(dir.path(), "D/2024.05.01 party.jpg");
+    touch(dir.path(), "D/2024.05.02 beach.jpg");
+    touch(dir.path(), "D/a.b.HEIC");
+    touch(dir.path(), "D/a.b.MOV");
+    touch(dir.path(), "D/a.b.HEIC.xmp");
+    let plan = plan_drop(&[dir.path().join("D")], media);
+    assert_eq!(
+        paths(&plan),
+        vec![
+            vec!["D/2024.05.01 party.jpg"],
+            vec!["D/2024.05.02 beach.jpg"],
+            vec!["D/Screenshot 2026-10-26 at 10.15.30.png"],
+            vec!["D/Screenshot 2026-10-26 at 10.42.07.png"],
+            vec!["D/a.b.HEIC", "D/a.b.HEIC.xmp", "D/a.b.MOV"],
+        ]
+    );
+    assert_eq!(plan.excluded, 0);
+    assert!(plan.warnings.is_empty());
+}
+
+#[test]
+fn lightroom_sidecar_of_a_dotted_name() {
+    let dir = tempfile::tempdir().unwrap();
+    touch(dir.path(), "D/IMG.1.jpg");
+    touch(dir.path(), "D/IMG.1.xmp");
+    touch(dir.path(), "D/IMG.2.jpg");
+    let plan = plan_drop(&[dir.path().join("D")], media);
+    assert_eq!(
+        paths(&plan),
+        vec![vec!["D/IMG.1.jpg", "D/IMG.1.jpg.xmp"], vec!["D/IMG.2.jpg"]]
+    );
+    assert_eq!(
+        plan.groups[0].files[1].local,
+        dir.path().join("D/IMG.1.xmp")
+    );
+    assert_eq!(plan.excluded, 0);
+}
+
+#[test]
+fn a_sidecar_names_one_media_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    // `IMG.xmp` is no sidecar of `IMG.1.jpg` (its name without the extension is `IMG.1`).
+    touch(dir.path(), "D/IMG.1.jpg");
+    touch(dir.path(), "D/IMG.xmp");
+    let plan = plan_drop(&[dir.path().join("D")], media);
+    assert_eq!(paths(&plan), vec![vec!["D/IMG.1.jpg"]]);
+    assert_eq!(plan.excluded, 1);
 }
 
 #[test]
