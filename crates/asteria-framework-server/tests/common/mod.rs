@@ -9,7 +9,7 @@ use std::time::Duration;
 use asteria_framework::{Library, MediaKind, UserId};
 use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
-    AppState, Cache, MediaFilter, Processor, ServerConfig, TokenEntry, Tokens, new_token, router,
+    AppExtension, AppState, Cache, Processor, ServerConfig, TokenEntry, Tokens, new_token, router,
     scan, spawn_writer, token_hash,
 };
 use axum::Router;
@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 pub struct Photos;
-impl MediaFilter for Photos {
+impl AppExtension for Photos {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }

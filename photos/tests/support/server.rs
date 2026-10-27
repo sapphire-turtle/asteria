@@ -10,12 +10,12 @@ use std::time::Duration;
 use asteria_framework::{Library, MediaKind};
 use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
-    AppState, Cache, MediaFilter, Processor, ServerConfig, TokenEntry, Tokens, hash_pending,
+    AppExtension, AppState, Cache, Processor, ServerConfig, TokenEntry, Tokens, hash_pending,
     new_token, router, scan, spawn_writer, token_hash,
 };
 
 struct Photos;
-impl MediaFilter for Photos {
+impl AppExtension for Photos {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }

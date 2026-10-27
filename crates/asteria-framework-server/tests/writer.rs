@@ -5,12 +5,12 @@ use std::sync::Arc;
 use asteria_framework::{Library, MediaKind, UserId};
 use asteria_framework_api::{ItemId, MediaUpdateParams};
 use asteria_framework_server::{
-    Cache, MediaFilter, StoredHash, WriteError, Writer, scan, spawn_writer,
+    AppExtension, Cache, StoredHash, WriteError, Writer, scan, spawn_writer,
 };
 use grain_id::GrainId;
 
 struct Photos;
-impl MediaFilter for Photos {
+impl AppExtension for Photos {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }

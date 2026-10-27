@@ -10,11 +10,11 @@ use asteria_framework::{Library, MediaKind, UserId};
 use asteria_framework_api::{UploadCommitParams, UploadCommitResult, UploadFile, UploadWarning};
 use asteria_framework_server::upload::{UploadError, UploadLimits, UploadStore};
 use asteria_framework_server::upload_commit::commit;
-use asteria_framework_server::{Cache, MediaFilter, hash_pending, scan, spawn_writer};
+use asteria_framework_server::{AppExtension, Cache, hash_pending, scan, spawn_writer};
 use grain_id::GrainId;
 
 struct Photos;
-impl MediaFilter for Photos {
+impl AppExtension for Photos {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }

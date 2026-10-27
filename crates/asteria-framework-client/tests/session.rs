@@ -19,7 +19,7 @@ use asteria_framework_client::session::{
 };
 use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
-    AppState, Cache, MediaFilter, Processor, ServerConfig, TokenEntry, Tokens, new_token, router,
+    AppExtension, AppState, Cache, Processor, ServerConfig, TokenEntry, Tokens, new_token, router,
     scan, spawn_writer, token_hash,
 };
 use corundum_framework::egui;
@@ -31,7 +31,7 @@ use common::{
 };
 
 struct Photos;
-impl MediaFilter for Photos {
+impl AppExtension for Photos {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }

@@ -5,6 +5,7 @@ pub mod auth;
 pub mod cache;
 pub mod config;
 pub mod error;
+pub mod ext;
 mod fsutil;
 pub mod hashing;
 mod media_http;
@@ -20,12 +21,15 @@ pub mod writer;
 
 pub use app::router;
 pub use auth::{Tokens, new_token, token_hash};
-pub use cache::{CACHE_SCHEMA, Cache, ItemRecord, SidecarSnapshot, StoredHash, item_id_for};
+pub use cache::{
+    CACHE_SCHEMA, Cache, ExtraRecord, ItemRecord, SidecarSnapshot, StoredHash, item_id_for,
+};
 pub use config::{ServerConfig, TokenEntry, cache_dir_for, data_dir_for};
 pub use error::ServerError;
+pub use ext::{AppExtension, ExtContext, ThumbSource};
 pub use hashing::{RelinkReport, hash_pending, relink_orphans};
 pub use process::{Preset, ProcessError, Processor};
-pub use scan::{MediaFilter, ScanReport, scan};
+pub use scan::{ScanReport, scan};
 pub use state::AppState;
 pub use watch::{ScanLoop, spawn_scan_loop};
 pub use writer::{WriteError, Writer, spawn_writer};

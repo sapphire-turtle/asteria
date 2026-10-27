@@ -5,11 +5,11 @@ use std::time::{Duration, SystemTime};
 
 use asteria_framework::journal::{Actor, OpKind};
 use asteria_framework::{Library, MediaKind};
-use asteria_framework_server::{Cache, MediaFilter, hash_pending, relink_orphans, scan};
+use asteria_framework_server::{AppExtension, Cache, hash_pending, relink_orphans, scan};
 use chrono::Utc;
 
 struct Photos;
-impl MediaFilter for Photos {
+impl AppExtension for Photos {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }
@@ -319,7 +319,7 @@ fn interrupted_relink_is_completed() {
 }
 
 struct Music;
-impl MediaFilter for Music {
+impl AppExtension for Music {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Audio)
     }

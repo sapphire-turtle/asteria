@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::ops::Bound;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use asteria_framework::{LibraryId, Sidecar};
 use asteria_framework_api::{ItemId, MediaKind};
@@ -18,7 +19,7 @@ use uuid::Uuid;
 
 use crate::error::ServerError;
 
-pub const CACHE_SCHEMA: u32 = 3;
+pub const CACHE_SCHEMA: u32 = 4;
 
 const FILE_NAME: &str = "cache.redb";
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
@@ -29,6 +30,17 @@ const IDS: TableDefinition<&str, &str> = TableDefinition::new("ids");
 /// record's size or mtime changed), so readers re-check the record.
 const HASHES: TableDefinition<&str, ()> = TableDefinition::new("hashes");
 const UNPROCESSABLE: TableDefinition<&str, &str> = TableDefinition::new("unprocessable");
+/// Per-item data an app extracted at scan time, keyed by path and removed with its item.
+const APP_DATA: TableDefinition<&str, &[u8]> = TableDefinition::new("app_data");
+/// Non-item files an app asked to track (`ExtraRecord` as JSON), keyed by path.
+const EXTRAS: TableDefinition<&str, &[u8]> = TableDefinition::new("extras");
+
+/// The (size, mtime) a tracked extra file had when it was last seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtraRecord {
+    pub size: u64,
+    pub mtime_ns: i128,
+}
 
 /// A content hash and the whole-file hash, remembered with the (size, mtime) they were
 /// computed for. Valid only while both still match the file on disk.
@@ -123,6 +135,8 @@ pub struct Cache {
     db: Database,
     epoch: String,
     library: LibraryId,
+    /// Counts writes that changed `APP_DATA` or `EXTRAS`; starts at 0 on every open.
+    app_generation: AtomicU64,
 }
 
 impl Cache {
@@ -160,6 +174,8 @@ impl Cache {
             w.open_table(IDS).map_err(classify)?;
             w.open_table(HASHES).map_err(classify)?;
             w.open_table(UNPROCESSABLE).map_err(classify)?;
+            w.open_table(APP_DATA).map_err(classify)?;
+            w.open_table(EXTRAS).map_err(classify)?;
             let mut meta = w.open_table(META).map_err(classify)?;
             let existing_schema = meta
                 .get("schema")
@@ -200,6 +216,7 @@ impl Cache {
             db,
             epoch,
             library: *library_id,
+            app_generation: AtomicU64::new(0),
         })
     }
 
@@ -349,11 +366,16 @@ impl Cache {
     /// Remove several paths in one transaction.
     pub fn remove_many(&self, rels: &[String]) -> Result<(), ServerError> {
         let w = self.write_txn()?;
+        let mut app_changed = false;
         {
             let mut items = w.open_table(ITEMS).map_err(ce)?;
             let mut ids = w.open_table(IDS).map_err(ce)?;
             let mut hashes = w.open_table(HASHES).map_err(ce)?;
+            let mut app = w.open_table(APP_DATA).map_err(ce)?;
             for rel in rels {
+                if app.remove(rel.as_str()).map_err(ce)?.is_some() {
+                    app_changed = true;
+                }
                 let old = items
                     .remove(rel.as_str())
                     .map_err(ce)?
@@ -364,7 +386,115 @@ impl Cache {
                 }
             }
         }
-        w.commit().map_err(ce)
+        w.commit().map_err(ce)?;
+        if app_changed {
+            self.app_generation.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// Stores (`Some`) or deletes (`None`) the app data of each path in one transaction.
+    /// Entries that change nothing do not move [`Cache::app_generation`].
+    pub fn put_app_data_many(
+        &self,
+        updates: &[(String, Option<Vec<u8>>)],
+    ) -> Result<(), ServerError> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let w = self.write_txn()?;
+        let mut changed = false;
+        {
+            let mut app = w.open_table(APP_DATA).map_err(ce)?;
+            for (rel, data) in updates {
+                match data {
+                    Some(d) => {
+                        let old = app.insert(rel.as_str(), d.as_slice()).map_err(ce)?;
+                        changed |= old.is_none_or(|o| o.value() != d.as_slice());
+                    }
+                    None => changed |= app.remove(rel.as_str()).map_err(ce)?.is_some(),
+                }
+            }
+        }
+        w.commit().map_err(ce)?;
+        if changed {
+            self.app_generation.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    pub fn app_data(&self, rel: &str) -> Result<Option<Vec<u8>>, ServerError> {
+        let r = self.db.begin_read().map_err(ce)?;
+        let app = r.open_table(APP_DATA).map_err(ce)?;
+        Ok(app.get(rel).map_err(ce)?.map(|v| v.value().to_vec()))
+    }
+
+    pub fn all_app_data(&self) -> Result<Vec<(String, Vec<u8>)>, ServerError> {
+        let r = self.db.begin_read().map_err(ce)?;
+        let app = r.open_table(APP_DATA).map_err(ce)?;
+        let mut out = Vec::new();
+        for row in app.iter().map_err(ce)? {
+            let (k, v) = row.map_err(ce)?;
+            out.push((k.value().to_string(), v.value().to_vec()));
+        }
+        Ok(out)
+    }
+
+    /// Records (or replaces) the tracked extra files in one transaction.
+    pub fn put_extras(&self, extras: &[(String, ExtraRecord)]) -> Result<(), ServerError> {
+        if extras.is_empty() {
+            return Ok(());
+        }
+        let w = self.write_txn()?;
+        {
+            let mut t = w.open_table(EXTRAS).map_err(ce)?;
+            for (rel, rec) in extras {
+                let bytes = serde_json::to_vec(rec).map_err(ce)?;
+                t.insert(rel.as_str(), bytes.as_slice()).map_err(ce)?;
+            }
+        }
+        w.commit().map_err(ce)?;
+        self.app_generation.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn extras(&self) -> Result<Vec<(String, ExtraRecord)>, ServerError> {
+        let r = self.db.begin_read().map_err(ce)?;
+        let t = r.open_table(EXTRAS).map_err(ce)?;
+        let mut out = Vec::new();
+        for row in t.iter().map_err(ce)? {
+            let (k, v) = row.map_err(ce)?;
+            out.push((
+                k.value().to_string(),
+                serde_json::from_slice(v.value()).map_err(ce)?,
+            ));
+        }
+        Ok(out)
+    }
+
+    pub fn remove_extras(&self, rels: &[String]) -> Result<(), ServerError> {
+        if rels.is_empty() {
+            return Ok(());
+        }
+        let w = self.write_txn()?;
+        let mut changed = false;
+        {
+            let mut t = w.open_table(EXTRAS).map_err(ce)?;
+            for rel in rels {
+                changed |= t.remove(rel.as_str()).map_err(ce)?.is_some();
+            }
+        }
+        w.commit().map_err(ce)?;
+        if changed {
+            self.app_generation.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// Moves whenever a write changed app data or extras; 0 right after `open`. Lets an
+    /// app notice that what it derived from them is stale.
+    pub fn app_generation(&self) -> u64 {
+        self.app_generation.load(Ordering::SeqCst)
     }
 
     /// Remove the id entry of a replaced/removed record. If the old bytes cannot be

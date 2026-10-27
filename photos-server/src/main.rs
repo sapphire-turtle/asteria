@@ -14,7 +14,7 @@ use asteria_framework::{Library, MediaKind, UserId};
 use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::watch::{DEFAULT_DEBOUNCE, DEFAULT_PERIOD};
 use asteria_framework_server::{
-    AppState, Cache, MediaFilter, Processor, ScanLoop, ServerConfig, TokenEntry, Tokens,
+    AppExtension, AppState, Cache, Processor, ScanLoop, ServerConfig, TokenEntry, Tokens,
     cache_dir_for, data_dir_for, new_token, router, spawn_scan_loop, spawn_writer, token_hash,
 };
 use asteria_photos_api::{APP, APP_API};
@@ -87,9 +87,9 @@ enum TokenCommand {
 }
 
 /// Photos shows images and videos.
-struct PhotosFilter;
+struct PhotosExtension;
 
-impl MediaFilter for PhotosFilter {
+impl AppExtension for PhotosExtension {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }
@@ -266,7 +266,7 @@ async fn run(
     let closer = writer.clone();
     let scanning = Arc::new(AtomicBool::new(false));
     let (rescan_tx, rescan_rx) = mpsc::channel(1);
-    let filter: Arc<dyn MediaFilter> = Arc::new(PhotosFilter);
+    let extension: Arc<dyn AppExtension> = Arc::new(PhotosExtension);
     let state = AppState::new(
         library.clone(),
         cache.clone(),
@@ -276,7 +276,7 @@ async fn run(
         APP_API,
         scanning.clone(),
         rescan_tx,
-        filter.clone(),
+        extension.clone(),
         processor,
         uploads.clone(),
     );
@@ -294,7 +294,7 @@ async fn run(
     let mut scan = spawn_scan_loop(ScanLoop {
         library,
         cache: cache.clone(),
-        filter,
+        extension,
         writer,
         scanning,
         trigger: rescan_rx,
