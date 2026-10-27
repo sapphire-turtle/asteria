@@ -192,7 +192,9 @@ async fn thumbnail(
         Ok(path) => serve_thumb(path, preset, req).await,
         // The render task already recorded it (see `AppState::new`).
         Err(ProcessError::Unprocessable(_)) => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
-        Err(ProcessError::ToolMissing(_) | ProcessError::Busy) => not_ready(),
+        Err(ProcessError::ToolMissing(_) | ProcessError::Busy | ProcessError::TimedOut) => {
+            not_ready()
+        }
         Err(ProcessError::Io(e)) => {
             tracing::error!("thumbnail rendering failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()

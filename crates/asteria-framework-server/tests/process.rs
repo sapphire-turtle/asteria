@@ -650,3 +650,106 @@ async fn image_bytes_are_rendered_once_per_key() {
     assert_eq!(p.renders_started(), 1);
     assert!(leftovers(&dir.path().join("thumbs")).is_empty());
 }
+
+/// A fake `vipsthumbnail` that writes a few bytes to the output named after `-o`.
+#[cfg(unix)]
+fn quick_vips(dir: &Path) -> PathBuf {
+    script(
+        dir,
+        "vips.sh",
+        "while [ \"$1\" != -o ]; do shift; done\nprintf x > \"${2%%\\[*}\"",
+    )
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn thumbnails_do_not_wait_for_offline_audio() {
+    let dir = tempfile::tempdir().unwrap();
+    let slow = script(dir.path(), "ffmpeg.sh", "exec sleep 30");
+    let p = std::sync::Arc::new(Processor::with_tools(
+        dir.path().join("thumbs"),
+        1,
+        Duration::from_secs(60),
+        quick_vips(dir.path()),
+        &slow,
+    ));
+    let audio = {
+        let p = p.clone();
+        tokio::spawn(async move {
+            p.render(&red(), MediaKind::Audio, HASH, Preset::OfflineAudio)
+                .await
+        })
+    };
+    for _ in 0..100 {
+        if p.renders_started() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(p.renders_started(), 1, "the encode holds its permit");
+    let thumb = tokio::time::timeout(
+        Duration::from_secs(5),
+        p.render(&red(), MediaKind::Image, "blake3:ee99", Preset::Thumb),
+    )
+    .await
+    .expect("the thumbnail does not wait for the encode");
+    assert!(thumb.unwrap().exists());
+    // A second encode does wait: audio has a single slot.
+    let second = tokio::time::timeout(
+        Duration::from_millis(300),
+        p.render(
+            &red(),
+            MediaKind::Audio,
+            "blake3:ee98",
+            Preset::OfflineAudio,
+        ),
+    )
+    .await;
+    assert!(second.is_err());
+    assert_eq!(p.renders_started(), 2);
+    audio.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_offline_audio_timeout_is_retryable_and_not_recorded() {
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let hang = script(dir.path(), "ffmpeg.sh", "exec sleep 10");
+    let p = Processor::with_tools(
+        dir.path().join("thumbs"),
+        1,
+        Duration::from_secs(60),
+        "vipsthumbnail",
+        &hang,
+    )
+    .with_audio_timeout(Duration::from_millis(500));
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let r2 = recorded.clone();
+    p.set_unprocessable_hook(move |h, _, reason| {
+        r2.lock().unwrap().push((h.to_string(), reason.to_string()))
+    });
+    let r = p
+        .render(&red(), MediaKind::Audio, HASH, Preset::OfflineAudio)
+        .await;
+    assert_eq!(r, Err(ProcessError::TimedOut));
+    assert!(recorded.lock().unwrap().is_empty());
+    // A decode failure is still recorded.
+    let fail = script(dir.path(), "fail.sh", "echo 'invalid data' >&2\nexit 1");
+    let p = Processor::with_tools(
+        dir.path().join("thumbs"),
+        1,
+        Duration::from_secs(60),
+        "vipsthumbnail",
+        &fail,
+    );
+    let r2 = recorded.clone();
+    p.set_unprocessable_hook(move |h, _, reason| {
+        r2.lock().unwrap().push((h.to_string(), reason.to_string()))
+    });
+    let r = p
+        .render(&red(), MediaKind::Audio, HASH, Preset::OfflineAudio)
+        .await;
+    assert!(matches!(r, Err(ProcessError::Unprocessable(_))), "{r:?}");
+    assert_eq!(recorded.lock().unwrap().len(), 1);
+}

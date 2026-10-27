@@ -6,6 +6,9 @@
 //! At most `max_jobs * 32` renders are queued or running; beyond that a request gets
 //! [`ProcessError::Busy`]. A queued render whose requests have all gone away is dropped
 //! right away, freeing its queue place without waiting for a slot.
+//!
+//! Offline-audio encodes run in a pool of their own (one at a time, 32 queued), so a long
+//! encode never holds up a thumbnail.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -27,6 +30,8 @@ pub const FFMPEG_ENV: &str = "ASTERIA_FFMPEG";
 
 /// Queued or running renders allowed per render slot.
 const QUEUE_PER_JOB: usize = 32;
+/// Offline-audio encodes that run at once.
+const AUDIO_JOBS: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Preset {
@@ -97,6 +102,10 @@ pub enum ProcessError {
     /// The external tool is not installed.
     #[error("{0} is not installed")]
     ToolMissing(&'static str),
+    /// An offline-audio encode ran out of time. It is not recorded as unprocessable: a long
+    /// file on a busy or slow machine may well finish another time.
+    #[error("the render timed out")]
+    TimedOut,
     #[error("i/o error: {0}")]
     Io(String),
     /// Too many renders are queued; try again shortly.
@@ -129,9 +138,13 @@ struct Inner {
     thumbs_dir: PathBuf,
     /// Set when the thumbs directory cannot be used; every render then fails with it.
     config_error: Option<String>,
+    /// Slots for thumbnails and previews.
     permits: Semaphore,
+    /// Slots for offline-audio encodes, kept apart so thumbnails never wait for audio.
+    audio_permits: Semaphore,
     queue_limit: usize,
     timeout: Duration,
+    audio_timeout: Duration,
     vips: OsString,
     ffmpeg: OsString,
     /// Renders queued or running, by key. Its length is the queue size.
@@ -209,8 +222,10 @@ impl Processor {
                 thumbs_dir,
                 config_error,
                 permits: Semaphore::new(jobs),
+                audio_permits: Semaphore::new(AUDIO_JOBS),
                 queue_limit: jobs * QUEUE_PER_JOB,
                 timeout,
+                audio_timeout: Preset::OfflineAudio.timeout(timeout),
                 vips: vipsthumbnail.into(),
                 ffmpeg: ffmpeg.into(),
                 inflight: Mutex::new(HashMap::new()),
@@ -219,6 +234,15 @@ impl Processor {
                 tmp_counter: AtomicUsize::new(0),
             }),
         }
+    }
+
+    /// Replaces the time an offline-audio encode may take (by default
+    /// [`Preset::timeout`] of [`Preset::OfflineAudio`]).
+    pub fn with_audio_timeout(mut self, timeout: Duration) -> Processor {
+        Arc::get_mut(&mut self.inner)
+            .expect("a new processor is not shared yet")
+            .audio_timeout = timeout;
+        self
     }
 
     /// Removes stale `.tmp-*` and `.src-*` files that an earlier run left under the thumbs
@@ -252,7 +276,8 @@ impl Processor {
         }
     }
 
-    /// How many renders may be queued or running at once.
+    /// How many thumbnail and preview renders may be queued or running at once. Offline
+    /// audio has a queue of its own.
     pub fn queue_limit(&self) -> usize {
         self.inner.queue_limit
     }
@@ -344,7 +369,13 @@ impl Processor {
             match map.get(&key) {
                 Some(tx) => tx.subscribe(),
                 None => {
-                    if map.len() >= self.inner.queue_limit {
+                    let audio = is_audio(preset);
+                    let limit = if audio {
+                        AUDIO_JOBS * QUEUE_PER_JOB
+                    } else {
+                        self.inner.queue_limit
+                    };
+                    if map.keys().filter(|k| is_audio(k.1) == audio).count() >= limit {
                         return Err(ProcessError::Busy);
                     }
                     let (tx, rx) = watch::channel(None);
@@ -384,10 +415,15 @@ async fn render_task(
     };
     // Wait for a slot, but give up as soon as nobody waits for the result, so an abandoned
     // render does not hold its queue place until a slot frees up.
+    let permits = if is_audio(key.1) {
+        &inner.audio_permits
+    } else {
+        &inner.permits
+    };
     let permit = loop {
         tokio::select! {
             biased;
-            permit = inner.permits.acquire() => match permit {
+            permit = permits.acquire() => match permit {
                 Ok(p) => break p,
                 Err(e) => {
                     tx.send_replace(Some(Err(ProcessError::Io(e.to_string()))));
@@ -425,6 +461,11 @@ async fn render_task(
     // `send_replace` stores the result even with no receiver: a request may subscribe after
     // the last one left but before `Unregister` removes the entry, and must still see it.
     tx.send_replace(Some(result));
+}
+
+/// Whether `preset` renders in the offline-audio pool.
+fn is_audio(preset: Preset) -> bool {
+    preset == Preset::OfflineAudio
 }
 
 /// Removes the render's entry and returns `true` if no request waits for it any more.
@@ -518,7 +559,7 @@ impl Inner {
                 self.run_ffmpeg(path, &tmp, preset).await
             }
             (MediaKind::Audio, Preset::OfflineAudio, Source::File(path)) => {
-                self.run_ffmpeg_audio(path, &tmp, preset).await
+                self.run_ffmpeg_audio(path, &tmp).await
             }
             _ => Err(ProcessError::Unprocessable(
                 "cannot render this kind of media with this preset".into(),
@@ -585,12 +626,7 @@ impl Inner {
     }
 
     /// Transcodes the first audio stream to Ogg Opus without tags or cover art.
-    async fn run_ffmpeg_audio(
-        &self,
-        src: &Path,
-        tmp: &Path,
-        preset: Preset,
-    ) -> Result<(), ProcessError> {
+    async fn run_ffmpeg_audio(&self, src: &Path, tmp: &Path) -> Result<(), ProcessError> {
         let mut cmd = Command::new(&self.ffmpeg);
         cmd.args(["-nostdin", "-v", "error", "-y"])
             // As for video: plain files in ordinary audio containers only.
@@ -601,7 +637,13 @@ impl Inner {
             .args(["-map", "0:a:0", "-map_metadata", "-1", "-vn"])
             .args(["-c:a", "libopus", "-b:a", "96k", "-vbr", "on", "-f", "ogg"])
             .arg(tmp);
-        run_tool(cmd, "ffmpeg", preset.timeout(self.timeout), tmp).await
+        match run_tool(cmd, "ffmpeg", self.audio_timeout, tmp).await {
+            Err(ProcessError::Unprocessable(reason)) if reason == "timeout" => {
+                tracing::warn!("an offline-audio encode timed out; not recording it");
+                Err(ProcessError::TimedOut)
+            }
+            other => other,
+        }
     }
 }
 
