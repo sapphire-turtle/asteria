@@ -92,10 +92,13 @@ impl AppExtension for MusicExtension {
 
     fn thumb_source(&self, ctx: &ExtContext, rec: &ItemRecord, abs: &Path) -> ThumbSource {
         // Without the extras only the embedded picture can be found; that is still a cover.
-        let extras = self
-            .snapshot(ctx)
-            .map(|(_, _, extras)| extras)
-            .unwrap_or_default();
+        let extras = match self.snapshot(ctx) {
+            Ok((_, _, extras)) => extras,
+            Err(e) => {
+                tracing::warn!(error = %e, "music index unavailable; looking for embedded cover only");
+                Arc::default()
+            }
+        };
         cover::thumb_source(ctx.library.root(), &rec.path, abs, &extras)
     }
 

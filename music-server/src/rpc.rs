@@ -8,6 +8,8 @@
 //! produced; a path written in a playlist is never opened.
 
 use std::cell::RefCell;
+use std::io::Read;
+use std::path::Path;
 
 use asteria_framework::MediaKind;
 use asteria_framework::ids::LibraryId;
@@ -32,6 +34,24 @@ const DEFAULT_LIMIT: u32 = 200;
 const MAX_LIMIT: u32 = 1000;
 /// The hash scope `#ASTERIA-HASH` values are looked up in.
 const PAYLOAD_SCOPE: &str = "media-payload/1";
+/// The most bytes read from one playlist file; a longer file is read up to here.
+const MAX_PLAYLIST_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Reads at most [`MAX_PLAYLIST_BYTES`] of the file at `canon`. Returns the bytes and whether
+/// the file was longer; a cut file ends at its last whole line, so no entry is half-read.
+fn read_playlist(canon: &Path) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(canon)?
+        .take(MAX_PLAYLIST_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 <= MAX_PLAYLIST_BYTES {
+        return Ok((bytes, false));
+    }
+    bytes.truncate(MAX_PLAYLIST_BYTES as usize);
+    let whole_lines = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    bytes.truncate(whole_lines);
+    Ok((bytes, true))
+}
 
 fn params<P: DeserializeOwned>(v: Value) -> Result<P, RpcError> {
     serde_json::from_value(v)
@@ -42,8 +62,10 @@ fn to_value<R: Serialize>(r: R) -> Result<Value, RpcError> {
     serde_json::to_value(r).map_err(|_| rpc_error(codes::INTERNAL_ERROR, "internal error"))
 }
 
-/// Cache errors may name server paths, so none of their text reaches the client.
-fn internal(_: ServerError) -> RpcError {
+/// Cache errors may name server paths, so they are logged and none of their text reaches the
+/// client.
+fn internal(detail: ServerError) -> RpcError {
+    tracing::error!(error = %detail, "music rpc internal error");
     rpc_error(codes::INTERNAL_ERROR, "internal error")
 }
 
@@ -221,8 +243,8 @@ pub fn playlist_get(ext: &MusicExtension, ctx: &ExtContext, v: Value) -> Result<
         .ok_or_else(not_found)?;
     let root = ctx.library.root();
     // Only a file that stays inside the library, outside hidden folders, is read.
-    let bytes = cover::canonical_in_library(root, &summary.path)
-        .and_then(|canon| std::fs::read(canon).ok())
+    let (bytes, cut) = cover::canonical_in_library(root, &summary.path)
+        .and_then(|canon| read_playlist(&canon).ok())
         .ok_or_else(not_found)?;
     let parsed = playlist::parse(&bytes);
 
@@ -272,7 +294,7 @@ pub fn playlist_get(ext: &MusicExtension, ctx: &ExtContext, v: Value) -> Result<
     to_value(Playlist {
         summary,
         entries,
-        truncated: parsed.truncated,
+        truncated: parsed.truncated || cut,
     })
 }
 
@@ -802,6 +824,40 @@ mod tests {
                 .all(|en| en.status == EntryStatus::Missing)
         );
         assert!(pl.entries.iter().all(|en| en.track.is_none()));
+    }
+
+    #[test]
+    fn oversized_playlist_is_read_up_to_the_cap_and_truncated() {
+        let e = env();
+        e.library();
+        e.write("big.m3u8", b"#EXTM3U\nArtist A/Album One/01.flac\n");
+        // Padding without line breaks takes the file just over the cap.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(e.root.join("big.m3u8"))
+            .unwrap()
+            .set_len(super::MAX_PLAYLIST_BYTES + 1)
+            .unwrap();
+        e.scan();
+        let listing: PlaylistListing = e.ok(PLAYLIST_LIST, json!({}));
+        let pl: Playlist = e.ok(PLAYLIST_GET, json!({ "id": listing.playlists[0].id }));
+        assert!(pl.truncated);
+        assert_eq!(
+            pl.entries.len(),
+            1,
+            "the cut, unfinished line is not an entry"
+        );
+        assert_eq!(pl.entries[0].status, EntryStatus::Found);
+
+        // Exactly at the cap is not truncated.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(e.root.join("big.m3u8"))
+            .unwrap()
+            .set_len(super::MAX_PLAYLIST_BYTES)
+            .unwrap();
+        let pl: Playlist = e.ok(PLAYLIST_GET, json!({ "id": listing.playlists[0].id }));
+        assert!(!pl.truncated);
     }
 
     #[cfg(unix)]
