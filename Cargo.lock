@@ -365,6 +365,7 @@ dependencies = [
  "base64 0.23.1",
  "blake3",
  "chrono",
+ "clap",
  "corundum-framework",
  "getrandom 0.4.3",
  "grain-id",
@@ -430,16 +431,10 @@ dependencies = [
  "asteria-framework-api",
  "asteria-framework-server",
  "asteria-photos-api",
- "axum",
- "clap",
  "grain-id",
  "reqwest",
  "serde_json",
  "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

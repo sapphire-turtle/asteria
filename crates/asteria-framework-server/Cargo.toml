@@ -23,7 +23,9 @@ grain-id.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
 chrono.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "net"] }
+clap.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tokio-util.workspace = true
 notify.workspace = true
 axum.workspace = true
@@ -33,6 +35,5 @@ tower = { workspace = true }
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-tracing-subscriber.workspace = true
 http-body-util.workspace = true
 lofty.workspace = true
