@@ -584,6 +584,29 @@ fn a_commit_with_some_tombstones_missing_is_answered_and_completed() {
     ));
 }
 
+/// A tombstone could not be written and the client, resuming, asks for the session's status
+/// before it commits again: the session is not taken for one that lost its data (which
+/// would make the client send it again and the group Invalid for good), but recognised as
+/// part of the commit its siblings' tombstones name.
+#[test]
+fn status_of_a_session_whose_tombstone_is_missing_completes_it() {
+    let e = env();
+    let heic = e.upload(b"heic bytes");
+    let mov = e.upload(b"mov bytes");
+    let files = [
+        (heic.as_str(), "IMG_0001.HEIC"),
+        (mov.as_str(), "IMG_0001.MOV"),
+    ];
+    let first = e.commit(&files, false).unwrap();
+    fs::remove_file(e.session_dir(&mov).join("committed.json")).unwrap();
+    assert!(!e.session_dir(&mov).join("data").exists());
+
+    let status = e.store.status(e.me, &mov).unwrap();
+    assert!(status.missing.is_empty());
+    assert!(e.committed(&mov));
+    assert_eq!(e.commit(&files, false).unwrap(), first);
+}
+
 #[test]
 fn status_of_a_committed_session_has_nothing_missing() {
     let e = env();

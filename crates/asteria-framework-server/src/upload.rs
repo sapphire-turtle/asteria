@@ -131,6 +131,13 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Writes the tombstone in `dir`: synced, renamed into place and the rename synced, so a
+/// tombstone that exists after a power cut is whole.
+fn write_tombstone(dir: &Path, committed: &Committed) -> Result<(), UploadError> {
+    let bytes = serde_json::to_vec(committed).map_err(|e| UploadError::Io(e.to_string()))?;
+    atomic_write(&dir.join(COMMITTED), &bytes).map_err(|e| UploadError::Io(e.to_string()))
+}
+
 /// The session's tombstone in `dir`, if any. One that does not parse (torn by a crash) is
 /// no commit's answer: it is removed and counts as missing.
 fn read_tombstone(dir: &Path) -> Result<Option<Committed>, UploadError> {
@@ -333,9 +340,16 @@ impl UploadStore {
     /// the sessions it sealed itself.
     fn check_data(&self, session: &str, in_commit: bool) -> Result<(), UploadError> {
         let vanished = self.locked(session, |dir| {
-            let vanished = (in_commit || !self.is_sealed(session))
+            let mut vanished = (in_commit || !self.is_sealed(session))
                 && !dir.join(COMMITTED).is_file()
                 && !dir.join("data").exists();
+            if vanished && let Some(committed) = self.tombstone_naming(session) {
+                // Its commit finished, but this tombstone was not written (a crash, or a
+                // failed write): write it now, as a repeated commit would.
+                tracing::warn!(%session, "writing the missing tombstone of a committed upload");
+                write_tombstone(dir, &committed)?;
+                vanished = false;
+            }
             if vanished {
                 tracing::warn!(%session, "upload session lost its data; removing it");
                 let _ = fs::remove_dir_all(dir);
@@ -359,15 +373,24 @@ impl UploadStore {
         self.locked(session, read_tombstone)
     }
 
+    /// The tombstone of another session that names `session` as part of its commit. Only
+    /// looked for when a session lost its data, which is rare; reads without the other
+    /// sessions' locks, as tombstones are replaced atomically.
+    fn tombstone_naming(&self, session: &str) -> Option<Committed> {
+        fs::read_dir(&self.dir)
+            .ok()?
+            .flatten()
+            .filter(|e| e.file_name().to_str() != Some(session))
+            .filter_map(|e| fs::read(e.path().join(COMMITTED)).ok())
+            .filter_map(|bytes| serde_json::from_slice::<Committed>(&bytes).ok())
+            .find(|c| c.sessions.iter().any(|s| s == session))
+    }
+
     /// Turns a session whose file was placed (or dropped) by a commit into a tombstone
     /// holding `committed`; its `data`, if still there, is removed.
     pub fn mark_committed(&self, session: &str, committed: &Committed) -> Result<(), UploadError> {
-        let bytes = serde_json::to_vec(committed).map_err(|e| UploadError::Io(e.to_string()))?;
         self.locked(session, |dir| {
-            // Synced, renamed into place and the rename synced: a tombstone that exists after
-            // a power cut is whole.
-            atomic_write(&dir.join(COMMITTED), &bytes)
-                .map_err(|e| UploadError::Io(e.to_string()))?;
+            write_tombstone(dir, committed)?;
             match fs::remove_file(dir.join("data")) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
                 _ => Ok(()),
