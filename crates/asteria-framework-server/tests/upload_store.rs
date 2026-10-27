@@ -387,3 +387,27 @@ fn a_sealed_session_cannot_change() {
     store.abort(me, &s).unwrap();
     assert!(matches!(store.status(me, &s), Err(UploadError::NotFound)));
 }
+
+#[test]
+fn a_complete_session_without_data_is_not_found() {
+    // What a crash in the middle of a commit leaves: every chunk received, `data` moved away.
+    let (dir, store) = store();
+    let me = user();
+    let data = pattern(10);
+    let s = store.begin(me, 10, hash()).unwrap().session;
+    store.put_chunk(me, &s, 0, &data).unwrap();
+    let session_dir = dir.path().join(".asteria/uploads").join(&s);
+    fs::remove_file(session_dir.join("data")).unwrap();
+    assert!(matches!(store.status(me, &s), Err(UploadError::NotFound)));
+    assert!(!session_dir.exists());
+
+    let t = store.begin(me, 10, hash()).unwrap().session;
+    store.put_chunk(me, &t, 0, &data).unwrap();
+    let session_dir = dir.path().join(".asteria/uploads").join(&t);
+    fs::remove_file(session_dir.join("data")).unwrap();
+    assert!(matches!(
+        store.completed(me, &t),
+        Err(UploadError::NotFound)
+    ));
+    assert!(!session_dir.exists());
+}

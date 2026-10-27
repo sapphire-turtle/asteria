@@ -19,7 +19,7 @@ use grain_id::GrainId;
 use crate::cache::Cache;
 use crate::error::ServerError;
 use crate::fsutil::move_no_clobber;
-use crate::upload::{UploadError, UploadStore};
+use crate::upload::{Committed, UploadError, UploadStore};
 
 /// Library-relative folder that every upload lands in.
 pub const INBOX: &str = "Inbox";
@@ -65,6 +65,10 @@ fn commit_with(
         .iter()
         .map(|f| store.seal(user, &f.session))
         .collect::<Result<Vec<_>, _>>()?;
+
+    if let Some(result) = earlier_commit(store, user, &params)? {
+        return Ok(result);
+    }
 
     // Every session must be complete and match the hash claimed at `begin`.
     let mut items = Vec::with_capacity(params.files.len());
@@ -182,20 +186,62 @@ fn commit_with(
             tracing::error!(path = %rel, error = %e, "could not journal an upload");
         }
     }
-    for session in placed.iter().map(|(i, _, _)| &i.session).chain(&dropped) {
-        store.remove(session);
-    }
-
-    Ok(UploadCommitResult::Placed {
+    let result = UploadCommitResult::Placed {
         files: placed
-            .into_iter()
+            .iter()
             .map(|(item, _, rel)| PlacedFile {
                 session: item.session.clone(),
-                path: rel,
+                path: rel.clone(),
             })
             .collect(),
         warnings,
-    })
+    };
+    // Each session keeps the result, so a repeated commit gets it again (see `earlier_commit`).
+    let committed = Committed {
+        sessions: sorted_sessions(&params),
+        result: result.clone(),
+    };
+    for session in placed.iter().map(|(i, _, _)| &i.session).chain(&dropped) {
+        if let Err(e) = store.mark_committed(session, &committed) {
+            // Without its tombstone a repeated commit finds the session gone (NotFound).
+            tracing::error!(%session, error = %e, "could not record a committed upload");
+            store.remove(session);
+        }
+    }
+    Ok(result)
+}
+
+fn sorted_sessions(params: &UploadCommitParams) -> Vec<String> {
+    let mut sessions: Vec<String> = params.files.iter().map(|f| f.session.clone()).collect();
+    sessions.sort();
+    sessions
+}
+
+/// The result of an earlier commit of exactly these sessions, if they are its tombstones. A
+/// commit naming some committed sessions and not others, or not all of one earlier commit's,
+/// is `Invalid`.
+fn earlier_commit(
+    store: &UploadStore,
+    user: UserId,
+    params: &UploadCommitParams,
+) -> Result<Option<UploadCommitResult>, UploadError> {
+    let mut found = Vec::with_capacity(params.files.len());
+    for f in &params.files {
+        found.push(store.committed(user, &f.session)?);
+    }
+    if found.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let sessions = sorted_sessions(params);
+    let first = found[0].as_ref();
+    let same =
+        first.is_some_and(|c| c.sessions == sessions) && found.iter().all(|c| c.as_ref() == first);
+    match first {
+        Some(c) if same => Ok(Some(c.result.clone())),
+        _ => Err(UploadError::Invalid(
+            "some of these uploads were committed already, in another group".into(),
+        )),
+    }
 }
 
 /// Checks every path and the group's shape; returns the group's folder (`""` for `Inbox/`

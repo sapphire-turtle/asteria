@@ -3,6 +3,11 @@
 //! A session directory holds `session.json` (owner, size, claimed hash), `data`
 //! (pre-sized to the file's length; chunks are written in place) and `received`
 //! (one byte per chunk, 1 once that chunk is in `data`).
+//!
+//! Once its commit succeeds, a session becomes a tombstone: `data` is gone and
+//! `committed.json` holds the commit's sessions and result, so a repeated `upload.commit`
+//! (its answer was lost) gets the same answer instead of placing the files again. A
+//! tombstone takes no quota and is purged like any session, 7 days after the commit.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -13,7 +18,9 @@ use std::time::{Duration, SystemTime};
 
 use asteria_framework::hash::ContentHash;
 use asteria_framework::ids::UserId;
-use asteria_framework_api::{UPLOAD_CHUNK_SIZE, UPLOAD_MAX_FILE, UploadBegin, UploadStatus};
+use asteria_framework_api::{
+    UPLOAD_CHUNK_SIZE, UPLOAD_MAX_FILE, UploadBegin, UploadCommitResult, UploadStatus,
+};
 use grain_id::GrainId;
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +79,16 @@ pub struct CompletedUpload {
     /// The client's claim; the committer hashes `data_path` itself.
     pub file_hash: ContentHash,
 }
+
+/// What a successful commit leaves in each of its sessions (`committed.json`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Committed {
+    /// Every session of the commit, sorted.
+    pub sessions: Vec<String>,
+    pub result: UploadCommitResult,
+}
+
+const COMMITTED: &str = "committed.json";
 
 #[derive(Serialize, Deserialize)]
 struct SessionFile {
@@ -156,6 +173,7 @@ impl UploadStore {
         for name in self.session_names()? {
             if let Ok(s) = self.read_session(&name)
                 && s.owner == owner_s
+                && !self.is_committed(&name)
             {
                 pending = pending.saturating_add(s.size);
                 count += 1;
@@ -238,6 +256,11 @@ impl UploadStore {
             if self.is_sealed(session) {
                 return Err(being_committed());
             }
+            if dir.join(COMMITTED).is_file() {
+                return Err(UploadError::Invalid(
+                    "the upload is committed already".into(),
+                ));
+            }
             Self::write_chunk(dir, index, body)
         })
     }
@@ -256,10 +279,20 @@ impl UploadStore {
         Ok(())
     }
 
+    /// The chunks still missing. A committed session (a tombstone) misses none.
     pub fn status(&self, owner: UserId, session: &str) -> Result<UploadStatus, UploadError> {
         let s = self.owned(owner, session)?;
-        let missing = self
-            .read_received(session, s.size)?
+        if self.is_committed(session) {
+            return Ok(UploadStatus {
+                size: s.size,
+                missing: Vec::new(),
+            });
+        }
+        let received = self.read_received(session, s.size)?;
+        if !received.contains(&0) {
+            self.check_data(session, false)?;
+        }
+        let missing = received
             .iter()
             .enumerate()
             .filter(|(_, b)| **b == 0)
@@ -269,6 +302,64 @@ impl UploadStore {
             size: s.size,
             missing,
         })
+    }
+
+    /// A session with every chunk but no `data` is what a crash in the middle of its commit
+    /// leaves: the file may be in the library, but the commit is not finished. It is removed
+    /// and is `NotFound`, so the client begins again. With `in_commit` unset, a sealed
+    /// session is left alone (its commit is moving `data` right now); a commit sets it for
+    /// the sessions it sealed itself.
+    fn check_data(&self, session: &str, in_commit: bool) -> Result<(), UploadError> {
+        let vanished = self.locked(session, |dir| {
+            let vanished = (in_commit || !self.is_sealed(session))
+                && !dir.join(COMMITTED).is_file()
+                && !dir.join("data").exists();
+            if vanished {
+                tracing::warn!(%session, "upload session lost its data; removing it");
+                let _ = fs::remove_dir_all(dir);
+            }
+            Ok(vanished)
+        })?;
+        if vanished {
+            lock(&self.locks).remove(session);
+            return Err(UploadError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// The tombstone of `owner`'s session, if its commit succeeded.
+    pub fn committed(
+        &self,
+        owner: UserId,
+        session: &str,
+    ) -> Result<Option<Committed>, UploadError> {
+        self.owned(owner, session)?;
+        self.locked(session, |dir| match fs::read(dir.join(COMMITTED)) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| UploadError::Io(format!("{COMMITTED}: {e}"))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        })
+    }
+
+    /// Turns a session whose file was placed (or dropped) by a commit into a tombstone
+    /// holding `committed`; its `data`, if still there, is removed.
+    pub fn mark_committed(&self, session: &str, committed: &Committed) -> Result<(), UploadError> {
+        let bytes = serde_json::to_vec(committed).map_err(|e| UploadError::Io(e.to_string()))?;
+        self.locked(session, |dir| {
+            let tmp = dir.join("committed.json.tmp");
+            fs::write(&tmp, &bytes)?;
+            fs::rename(&tmp, dir.join(COMMITTED))?;
+            match fs::remove_file(dir.join("data")) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+                _ => Ok(()),
+            }
+        })
+    }
+
+    fn is_committed(&self, session: &str) -> bool {
+        self.dir.join(session).join(COMMITTED).is_file()
     }
 
     pub fn abort(&self, owner: UserId, session: &str) -> Result<(), UploadError> {
@@ -308,11 +399,20 @@ impl UploadStore {
         lock(&self.sealed).contains(session)
     }
 
+    /// The session's file, once every chunk is in. A tombstone is `Invalid`; a session that
+    /// lost its `data` is removed and `NotFound` (see [`UploadStore::status`]).
     pub fn completed(&self, owner: UserId, session: &str) -> Result<CompletedUpload, UploadError> {
         let s = self.owned(owner, session)?;
+        if self.is_committed(session) {
+            return Err(UploadError::Invalid(
+                "the upload is committed already".into(),
+            ));
+        }
         if self.read_received(session, s.size)?.contains(&0) {
             return Err(UploadError::Incomplete);
         }
+        // Called by a commit, on a session it sealed.
+        self.check_data(session, true)?;
         let file_hash = s
             .file_hash
             .parse()
@@ -352,7 +452,13 @@ impl UploadStore {
                 true
             } else {
                 // `received` is rewritten on every chunk; its mtime is the last activity.
-                fs::metadata(path.join("received"))
+                // A tombstone's is its commit.
+                let marker = if path.join(COMMITTED).is_file() {
+                    COMMITTED
+                } else {
+                    "received"
+                };
+                fs::metadata(path.join(marker))
                     .and_then(|m| m.modified())
                     .map(|t| now.duration_since(t).is_ok_and(|age| age > SESSION_TTL))
                     .unwrap_or(true)
