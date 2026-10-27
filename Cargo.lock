@@ -407,6 +407,7 @@ dependencies = [
  "blake3",
  "chrono",
  "lofty",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
