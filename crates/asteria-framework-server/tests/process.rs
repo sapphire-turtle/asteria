@@ -526,3 +526,127 @@ async fn render_queue_is_bounded() {
         w.abort();
     }
 }
+
+#[test]
+fn offline_audio_preset_parses_and_names() {
+    let p = Preset::parse("offline-audio").unwrap();
+    assert_eq!(p, Preset::OfflineAudio);
+    assert_eq!(p.name(), "offline-audio");
+    assert_eq!(p.ext(), "ogg");
+    assert_eq!(p.mime(), "audio/ogg");
+    assert_eq!(p.timeout(Duration::from_secs(5)), Duration::from_secs(600));
+    assert_eq!(Preset::Thumb.ext(), "webp");
+    assert_eq!(Preset::Preview.mime(), "image/webp");
+    assert_eq!(
+        Preset::Thumb.timeout(Duration::from_secs(5)),
+        Duration::from_secs(5)
+    );
+    let proc = Processor::with_tools("/t".into(), 1, Duration::from_secs(1), "v", "f");
+    assert_eq!(
+        proc.thumb_path(HASH, p).unwrap(),
+        Path::new("/t/offline-audio/ab/abcdef0123456789.ogg")
+    );
+}
+
+/// Makes a one-second sine tone at `out` (the format follows the extension).
+fn tone(out: &Path, extra: &[&str]) {
+    let st = std::process::Command::new("ffmpeg")
+        .args(["-nostdin", "-v", "error", "-f", "lavfi", "-i"])
+        .arg("sine=frequency=440:duration=1")
+        .args(extra)
+        .arg("-y")
+        .arg(out)
+        .status()
+        .unwrap();
+    assert!(st.success());
+}
+
+fn has_libopus() -> bool {
+    std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libopus"))
+}
+
+#[tokio::test]
+async fn offline_audio_renders_ogg_opus() {
+    if !have("ffmpeg") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let flac = dir.path().join("sine440.flac");
+    tone(&flac, &[]);
+    let m4a = dir.path().join("sine440.m4a");
+    tone(&m4a, &["-c:a", "aac"]);
+    let p = Processor::new(dir.path().join("thumbs"), 1, Duration::from_secs(30));
+    let r = p
+        .render(&flac, MediaKind::Audio, HASH, Preset::OfflineAudio)
+        .await;
+    if !has_libopus() {
+        assert_eq!(r, Err(ProcessError::ToolMissing("ffmpeg with libopus")));
+        return;
+    }
+    let out = r.unwrap();
+    assert_eq!(
+        out,
+        dir.path()
+            .join("thumbs/offline-audio/ab/abcdef0123456789.ogg")
+    );
+    let b = std::fs::read(&out).unwrap();
+    assert_eq!(&b[..4], b"OggS");
+    assert!(b.windows(8).any(|w| w == b"OpusHead"));
+    // The mov-family demuxer is on the whitelist too.
+    let out = p
+        .render(&m4a, MediaKind::Audio, "blake3:ee99", Preset::OfflineAudio)
+        .await
+        .unwrap();
+    assert_eq!(&std::fs::read(out).unwrap()[..4], b"OggS");
+    // Other media are not audio, and no temporary files remain.
+    let r = p
+        .render(
+            &red(),
+            MediaKind::Image,
+            "blake3:ff00",
+            Preset::OfflineAudio,
+        )
+        .await;
+    assert!(matches!(r, Err(ProcessError::Unprocessable(_))), "{r:?}");
+    assert!(leftovers(&dir.path().join("thumbs")).is_empty());
+}
+
+#[tokio::test]
+async fn offline_audio_refuses_concat_scripts() {
+    if !have("ffmpeg") || !has_libopus() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.wav");
+    tone(&real, &[]);
+    let evil = dir.path().join("evil.mp3");
+    std::fs::write(&evil, "ffconcat version 1.0\nfile 'real.wav'\n").unwrap();
+    let p = Processor::new(dir.path().join("thumbs"), 1, Duration::from_secs(30));
+    let r = p
+        .render(&evil, MediaKind::Audio, HASH, Preset::OfflineAudio)
+        .await;
+    assert!(matches!(r, Err(ProcessError::Unprocessable(_))), "{r:?}");
+    p.render(&real, MediaKind::Audio, "blake3:ee99", Preset::OfflineAudio)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn image_bytes_are_rendered_once_per_key() {
+    if !have("vipsthumbnail") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = std::fs::read(red()).unwrap();
+    let p = Processor::new(dir.path().join("thumbs"), 2, Duration::from_secs(30));
+    let (a, b) = tokio::join!(
+        p.render_image_bytes(&bytes, "jpg", HASH, Preset::Thumb),
+        p.render_image_bytes(&bytes, "jpg", HASH, Preset::Thumb)
+    );
+    assert_eq!(a.unwrap(), b.unwrap());
+    assert_eq!(p.renders_started(), 1);
+    assert!(leftovers(&dir.path().join("thumbs")).is_empty());
+}
