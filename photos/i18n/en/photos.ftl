@@ -83,6 +83,7 @@ asteria-photos-uploads-empty = Drop photos or folders on the window to send them
 asteria-photos-uploads-starting = Opening the upload queue...
 asteria-photos-uploads-waiting = The server is not answering, so uploads are paused and will try again: { $reason }
 asteria-photos-uploads-stopped = Uploads have stopped: { $reason }
+asteria-photos-uploads-unsupported = This server does not support uploads. Update the server to send files to it.
 asteria-photos-uploads-queue-unreadable = The upload queue could not be read, so nothing is sent: { $reason }
 asteria-photos-uploads-clear-finished = Clear finished
 asteria-photos-uploads-in-library = { $count } already in the library

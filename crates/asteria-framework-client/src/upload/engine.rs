@@ -83,11 +83,20 @@ pub enum UploadsState {
     /// (2 s, doubling up to 60 s). Local work (planning, hashing) goes on meanwhile.
     Waiting { error: ClientError },
     /// The engine no longer talks to the server: the token was refused, the server now serves
-    /// another library, or the client could not be built. Nothing is lost; a new session
-    /// (after fixing the cause) carries on.
+    /// another library, the server does not support uploads (see
+    /// [`server_lacks_uploads`](Self::server_lacks_uploads)), or the client could not be
+    /// built. Nothing is lost; a new session (after fixing the cause) carries on.
     Stopped { error: ClientError },
     /// The queue file could not be read. Nothing is sent, and the file is left as it is.
     Unavailable { reason: String },
+}
+
+impl UploadsState {
+    /// Whether the engine stopped because the server does not support uploads (it predates
+    /// them): a [`Stopped`](Self::Stopped) whose error is `METHOD_NOT_FOUND`.
+    pub fn server_lacks_uploads(&self) -> bool {
+        matches!(self, UploadsState::Stopped { error } if lacks_uploads(error))
+    }
 }
 
 /// A copy of the queue for the UI.
@@ -509,7 +518,12 @@ fn halting(e: &ClientError) -> bool {
     matches!(
         e,
         ClientError::Unauthorized | ClientError::LibraryChanged | ClientError::Handshake(_)
-    )
+    ) || lacks_uploads(e)
+}
+
+/// Whether `e` says the server has no upload methods (a server older than API 2.2).
+pub fn lacks_uploads(e: &ClientError) -> bool {
+    matches!(e, ClientError::Rpc { code, .. } if *code == codes::METHOD_NOT_FOUND)
 }
 
 fn not_found(e: &ClientError) -> bool {
@@ -729,6 +743,14 @@ impl Engine {
     }
 
     fn halt(&mut self, error: ClientError) {
+        let error = if lacks_uploads(&error) {
+            ClientError::Rpc {
+                code: codes::METHOD_NOT_FOUND,
+                message: "this server does not support uploads".into(),
+            }
+        } else {
+            error
+        };
         self.halted = Some(error.clone());
         self.inner.set_state(UploadsState::Stopped { error });
     }

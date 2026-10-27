@@ -150,6 +150,9 @@ fn notes(ui: &mut egui::Ui, snap: &UploadSnapshot) {
                 tr!(ui, "asteria-photos-uploads-waiting", reason = reason),
             );
         }
+        state @ UploadsState::Stopped { .. } if state.server_lacks_uploads() => {
+            ui.colored_label(error_color, tr!(ui, "asteria-photos-uploads-unsupported"));
+        }
         UploadsState::Stopped { error } => {
             let reason = error_text(ui.ctx(), error);
             ui.colored_label(

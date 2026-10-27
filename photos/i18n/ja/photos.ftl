@@ -80,6 +80,7 @@ asteria-photos-uploads-empty = 写真やフォルダをウィンドウにドロ�
 asteria-photos-uploads-starting = アップロードのキューを開いています…
 asteria-photos-uploads-waiting = サーバーが応答しないため、送信を止めています。あとでもう一度試します：{ $reason }
 asteria-photos-uploads-stopped = 送信を止めました：{ $reason }
+asteria-photos-uploads-unsupported = このサーバーはアップロードに対応していません。送るには、サーバーを更新してください。
 asteria-photos-uploads-queue-unreadable = アップロードのキューを読めないので、何も送りません：{ $reason }
 asteria-photos-uploads-clear-finished = 完了を消す
 asteria-photos-uploads-in-library = { $count } 件がライブラリにあります

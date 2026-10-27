@@ -845,3 +845,42 @@ fn a_lost_commit_answer_is_asked_again_not_sent_again() {
     );
 }
 
+#[test]
+fn a_server_without_uploads_stops_the_engine() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = attempts.clone();
+    let addr = serve(move |req| match req.rpc() {
+        Some((id, m)) if m == "server.info" => StubResponse::rpc_result(id, photos_server_info()),
+        Some((id, m)) if m == "library.info" => {
+            StubResponse::rpc_result(id, library_info("old-server-lib"))
+        }
+        Some((id, _)) => {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": codes::METHOD_NOT_FOUND, "message": "method not found"},
+            });
+            StubResponse::new(200, body.to_string().into_bytes())
+                .header("content-type", "application/json")
+        }
+        None => StubResponse::new(404, Vec::new()),
+    });
+    let data = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let path = write(src.path(), "blue.jpg", &fixture("blue.jpg"));
+    let mut session = open(&profile(addr, "t"), data.path());
+    session.uploads().unwrap().drop_paths(vec![path]);
+    let snap = wait_for(&mut session, "stopped", |s| {
+        matches!(s.state, UploadsState::Stopped { .. })
+    });
+    assert!(snap.state.server_lacks_uploads(), "{:?}", snap.state);
+    // The group is not failed: it waits for a server that takes uploads.
+    assert_eq!(snap.groups[0].state, GroupState::Checking);
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(300) {
+        session.poll();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
