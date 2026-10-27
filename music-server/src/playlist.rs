@@ -79,19 +79,17 @@ pub enum Resolved {
     Missing,
 }
 
-/// `playlist_rel`: the playlist's library-relative path. `exists(rel)`: an item at that path.
-/// `by_hash(hash)`: item paths with that media-payload hash, sorted.
+/// `playlist_rel`: the playlist's library-relative path. `root`: the library root, for absolute
+/// entries. `exists(rel)`: an item at that path. `by_hash(hash)`: item paths with that
+/// media-payload hash, sorted.
 pub fn resolve(
     playlist_rel: &str,
     entry: &RawEntry,
+    root: &Path,
     exists: impl Fn(&str) -> bool,
     by_hash: impl Fn(&str) -> Vec<String>,
 ) -> Resolved {
-    // `resolve` has no library root, so an absolute path is not looked up by path here; the caller
-    // rewrites those with `library_relative` first. They can still be found by hash.
-    let absolute = entry.path.starts_with(['/', '\\']);
-    if !absolute
-        && let Some(rel) = library_relative(playlist_rel, &entry.path, Path::new(""))
+    if let Some(rel) = library_relative(playlist_rel, &entry.path, root)
         && exists(&rel)
     {
         return Resolved::Found(rel);
@@ -112,16 +110,13 @@ pub fn resolve(
 /// An absolute path is accepted only when it lies under `root`.
 pub fn library_relative(playlist_rel: &str, raw: &str, root: &Path) -> Option<String> {
     let raw = raw.replace('\\', "/");
-    if is_url(&raw) || has_drive(&raw) {
+    if is_url(&raw) {
         return None;
     }
     let mut parts: Vec<&str> = Vec::new();
-    let relative = if raw.starts_with('/') {
+    let relative = if raw.starts_with('/') || has_drive(&raw) {
         let root = root.to_string_lossy().replace('\\', "/");
-        let root = root.trim_end_matches('/');
-        let rest = raw.strip_prefix(root)?;
-        // `/lib` must not match `/library/x`.
-        rest.strip_prefix('/')?
+        under_root(&raw, root.trim_end_matches('/'))?
     } else {
         if let Some((dir, _)) = playlist_rel.rsplit_once('/') {
             fold(dir, &mut parts)?;
@@ -129,10 +124,34 @@ pub fn library_relative(playlist_rel: &str, raw: &str, root: &Path) -> Option<St
         &raw
     };
     fold(relative, &mut parts)?;
-    if parts.is_empty() || parts.iter().any(|p| p.is_empty() || p.starts_with('.')) {
+    // A `:` in a component could name a drive (`../C:/x` after folding) or a stream on Windows.
+    let bad = |p: &str| p.is_empty() || p.starts_with('.') || p.contains([':', '\0']);
+    if parts.is_empty() || parts.iter().copied().any(bad) {
         return None;
     }
     Some(parts.join("/"))
+}
+
+/// The part of the absolute `path` below `root` (both with `/` separators, `root` without a
+/// trailing `/`). The drive letter is compared ignoring ASCII case, the rest exactly.
+fn under_root<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    let (path_drive, path_rest) = split_drive(path);
+    let (root_drive, root_rest) = split_drive(root);
+    match (path_drive, root_drive) {
+        (None, None) => {}
+        (Some(p), Some(r)) if p.eq_ignore_ascii_case(&r) => {}
+        _ => return None,
+    }
+    // The `/` boundary keeps `/music` from matching `/music2/a`.
+    path_rest.strip_prefix(root_rest)?.strip_prefix('/')
+}
+
+fn split_drive(s: &str) -> (Option<char>, &str) {
+    if has_drive(s) {
+        (s.chars().next(), &s[2..])
+    } else {
+        (None, s)
+    }
 }
 
 /// Pushes the components of `path` onto `parts`, folding `.` and `..`. `None` on an escape.
@@ -168,6 +187,10 @@ fn has_drive(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn root_dir() -> &'static Path {
+        Path::new("/lib")
+    }
 
     fn entry(path: &str, hash: Option<&str>) -> RawEntry {
         RawEntry {
@@ -288,11 +311,55 @@ mod tests {
     }
 
     #[test]
+    fn drive_paths_are_accepted_only_under_a_matching_root() {
+        let root = Path::new("C:\\Music");
+        for raw in ["C:\\Music\\A\\1.flac", "c:/Music/A/1.flac"] {
+            assert_eq!(
+                library_relative("Lists/x.m3u8", raw, root).as_deref(),
+                Some("A/1.flac"),
+                "{raw}"
+            );
+        }
+        for raw in [
+            "C:\\Music2\\a.flac",
+            "C:\\music\\a.flac",
+            "D:\\Music\\a.flac",
+            "C:a.flac",
+            "/Music/a.flac",
+            "\\\\server\\share\\a.flac",
+        ] {
+            assert_eq!(library_relative("Lists/x.m3u8", raw, root), None, "{raw}");
+        }
+        assert_eq!(
+            library_relative("x.m3u8", "C:\\Music\\a.flac", root_dir()),
+            None
+        );
+    }
+
+    #[test]
+    fn sibling_prefix_unc_and_folded_drive_components_are_rejected() {
+        let root = Path::new("/music");
+        assert_eq!(library_relative("x.m3u8", "/music2/a.flac", root), None);
+        assert_eq!(
+            library_relative("x.m3u8", "//server/share/a.flac", root),
+            None
+        );
+        assert_eq!(
+            library_relative("x.m3u8", "\\\\server\\share\\a.flac", Path::new("/")),
+            None
+        );
+        for raw in ["../C:/x", "A/../C:x", "A/b:c", "..\\C:\\Windows\\win.ini"] {
+            assert_eq!(library_relative("Lists/x.m3u8", raw, root), None, "{raw}");
+        }
+    }
+
+    #[test]
     fn missing_path_with_hash_is_moved() {
         let e = entry("A/gone.flac", Some("blake3:aa"));
         let got = resolve(
             "x.m3u8",
             &e,
+            Path::new("/lib"),
             |_| false,
             |h| {
                 assert_eq!(h, "blake3:aa");
@@ -302,13 +369,14 @@ mod tests {
         assert_eq!(got, Resolved::Moved("B/1.flac".into()));
         // A hash with no match is missing; an existing path wins over the hash.
         assert_eq!(
-            resolve("x.m3u8", &e, |_| false, |_| vec![]),
+            resolve("x.m3u8", &e, root_dir(), |_| false, |_| vec![]),
             Resolved::Missing
         );
         assert_eq!(
             resolve(
                 "x.m3u8",
                 &e,
+                root_dir(),
                 |p| p == "A/gone.flac",
                 |_| vec!["B/1.flac".into()]
             ),
@@ -317,15 +385,41 @@ mod tests {
     }
 
     #[test]
+    fn absolute_entries_resolve_against_the_root() {
+        let inside = entry("/lib/A/1.flac", None);
+        assert_eq!(
+            resolve(
+                "Lists/x.m3u8",
+                &inside,
+                root_dir(),
+                |p| p == "A/1.flac",
+                |_| vec![]
+            ),
+            Resolved::Found("A/1.flac".into())
+        );
+        let outside = entry("/etc/passwd", None);
+        assert_eq!(
+            resolve("Lists/x.m3u8", &outside, root_dir(), |_| true, |_| vec![]),
+            Resolved::Missing
+        );
+    }
+
+    #[test]
     fn missing_path_without_hash_is_missing() {
         let e = entry("A/gone.flac", None);
         assert_eq!(
-            resolve("x.m3u8", &e, |_| false, |_| vec!["B/1.flac".into()]),
+            resolve(
+                "x.m3u8",
+                &e,
+                root_dir(),
+                |_| false,
+                |_| vec!["B/1.flac".into()]
+            ),
             Resolved::Missing
         );
         let url = entry("http://x/a.mp3", Some("blake3:aa"));
         assert_eq!(
-            resolve("x.m3u8", &url, |_| true, |_| vec![]),
+            resolve("x.m3u8", &url, root_dir(), |_| true, |_| vec![]),
             Resolved::Missing
         );
     }
