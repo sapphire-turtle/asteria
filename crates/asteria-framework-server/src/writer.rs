@@ -1,6 +1,7 @@
 //! The single per-library write queue. Every write to original files (sidecar edits,
-//! orphan relinks and upload commits) goes through one task that runs jobs one at a time on the blocking
-//! pool, then refreshes the cache.
+//! orphan relinks and placing upload commits) goes through one task that runs jobs one at a
+//! time on the blocking pool, then refreshes the cache. An upload commit hashes its files
+//! before it joins the queue (see [`crate::upload_commit`]).
 //!
 //! Shutdown: [`spawn_writer`] returns the [`Writer`] and the task's `JoinHandle`. Once
 //! every `Writer` clone is dropped the task finishes the queued jobs and ends, so
@@ -25,7 +26,7 @@ use crate::error::ServerError;
 use crate::hashing::{RelinkReport, relink_orphans};
 use crate::scan::mtime_ns;
 use crate::upload::{UploadError, UploadStore};
-use crate::upload_commit::commit;
+use crate::upload_commit::{Prepare, Prepared, place, prepare};
 
 const QUEUE: usize = 256;
 
@@ -54,10 +55,10 @@ enum Job {
     Relink {
         reply: oneshot::Sender<Result<RelinkReport, WriteError>>,
     },
-    Commit {
+    /// The second phase of an upload commit; the first ran outside the queue.
+    Place {
         store: Arc<UploadStore>,
-        user: UserId,
-        params: UploadCommitParams,
+        prepared: Prepared,
         reply: oneshot::Sender<Result<UploadCommitResult, UploadError>>,
     },
     /// Refuse new jobs; finish the queued ones and end.
@@ -95,13 +96,12 @@ pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHa
                     .await;
                     let _ = reply.send(r);
                 }
-                Job::Commit {
+                Job::Place {
                     store,
-                    user,
-                    params,
+                    prepared,
                     reply,
                 } => {
-                    let r = run_blocking(move || commit(&lib, &cache, &store, user, params)).await;
+                    let r = run_blocking(move || place(&lib, &cache, &store, prepared)).await;
                     let _ = reply.send(r);
                 }
                 Job::Close => rx.close(),
@@ -179,7 +179,9 @@ impl Writer {
     }
 
     /// Places a group of finished upload sessions under `Inbox/` (see
-    /// [`crate::upload_commit::commit`]). Does not rescan; the caller asks for that.
+    /// [`crate::upload_commit`]). The sessions are checked and hashed first, on the blocking
+    /// pool but outside the queue, so other writes go on meanwhile; only the placement waits
+    /// its turn. Does not rescan; the caller asks for that.
     pub async fn commit_upload(
         &self,
         store: Arc<UploadStore>,
@@ -187,12 +189,17 @@ impl Writer {
         params: UploadCommitParams,
     ) -> Result<UploadCommitResult, UploadError> {
         let upload_stopped = || UploadError::Io("writer stopped".into());
+        let sealing = store.clone();
+        let prepared = run_blocking(move || prepare(&sealing, user, params)).await?;
+        let prepared = match prepared {
+            Prepare::Answered(result) => return Ok(result),
+            Prepare::Ready(p) => p,
+        };
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Job::Commit {
+            .send(Job::Place {
                 store,
-                user,
-                params,
+                prepared,
                 reply,
             })
             .await

@@ -1,11 +1,18 @@
 //! `upload.commit`: places a group of finished upload sessions under `Inbox/` (spec §4.7).
 //!
-//! Runs inside the write queue ([`crate::writer::Writer::commit_upload`]). The caller asks
-//! for a rescan afterwards; this module does not touch the cache.
+//! Two phases, so that hashing a big file never holds up the write queue:
+//! - [`prepare`] seals the sessions, then checks and hashes them (and reads the sidecars),
+//!   outside the queue;
+//! - [`place`] runs in the write queue ([`crate::writer::Writer::commit_upload`]): it checks
+//!   for duplicates again, numbers, places, journals and leaves the tombstones.
+//!
+//! The seals are held from the start of `prepare` to the end of `place`. The caller asks for
+//! a rescan afterwards; this module does not touch the cache.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use asteria_framework::hash::{HashOutcome, HashScope, content_hash, file_hash};
 use asteria_framework::journal::{Actor, Journal, JournalEntry, OpId, OpKind};
@@ -19,7 +26,7 @@ use grain_id::GrainId;
 use crate::cache::Cache;
 use crate::error::ServerError;
 use crate::fsutil::move_no_clobber;
-use crate::upload::{Committed, UploadError, UploadStore};
+use crate::upload::{Committed, SealGuard, UploadError, UploadStore};
 
 /// Library-relative folder that every upload lands in.
 pub const INBOX: &str = "Inbox";
@@ -37,11 +44,35 @@ struct Item {
     content: Option<HashOutcome>,
 }
 
-/// Places the group `params.files` under `Inbox/`. See spec §4.7 for the steps.
+/// A group whose sessions are sealed, complete and hashed, ready for [`place`].
+pub struct Prepared {
+    user: UserId,
+    params: UploadCommitParams,
+    /// The group's folder under `Inbox/` (`""` for `Inbox/` itself).
+    folder: String,
+    /// The files to place: the media and the sidecars that parse.
+    kept: Vec<Item>,
+    /// Sidecars that did not parse, and why.
+    warnings: Vec<UploadWarning>,
+    /// Their sessions.
+    dropped: Vec<String>,
+    /// Held until the group is placed (or not).
+    _seals: Vec<SealGuard>,
+}
+
+/// What [`prepare`] came to.
+pub enum Prepare {
+    /// These sessions were committed before: this is that commit's answer.
+    Answered(UploadCommitResult),
+    Ready(Prepared),
+}
+
+/// Places the group `params.files` under `Inbox/`: [`prepare`], then [`place`]. See spec §4.7
+/// for the steps.
 pub fn commit(
     library: &Library,
     cache: &Cache,
-    store: &UploadStore,
+    store: &Arc<UploadStore>,
     user: UserId,
     params: UploadCommitParams,
 ) -> Result<UploadCommitResult, UploadError> {
@@ -52,27 +83,43 @@ pub fn commit(
 fn commit_with(
     library: &Library,
     cache: &Cache,
-    store: &UploadStore,
+    store: &Arc<UploadStore>,
     user: UserId,
     params: UploadCommitParams,
     before_place: &mut dyn FnMut(&Path),
 ) -> Result<UploadCommitResult, UploadError> {
-    let folder = validate_group(&params)?;
+    match prepare(store, user, params)? {
+        Prepare::Answered(result) => Ok(result),
+        Prepare::Ready(p) => place_with(library, cache, store, p, before_place),
+    }
+}
+
+/// The first phase of a commit, outside the write queue: checks the group, seals its
+/// sessions, answers a repeated commit from the tombstones, and otherwise checks that every
+/// session is complete and matches the hash claimed at `begin`, hashes the payloads and reads
+/// the sidecars. Blocking.
+pub fn prepare(
+    store: &Arc<UploadStore>,
+    user: UserId,
+    params: UploadCommitParams,
+) -> Result<Prepare, UploadError> {
+    let folder = validate_group(&params)?.to_owned();
 
     // No chunk write or abort may touch a session while we hash and move its file.
-    let _seals = params
+    let seals = params
         .files
         .iter()
         .map(|f| store.seal(user, &f.session))
         .collect::<Result<Vec<_>, _>>()?;
 
     if let Some(result) = earlier_commit(store, user, &params)? {
-        return Ok(result);
+        return Ok(Prepare::Answered(result));
     }
 
-    // Every session must be complete and match the hash claimed at `begin`.
     let mut items = Vec::with_capacity(params.files.len());
     for f in &params.files {
+        #[cfg(test)]
+        hold::before_hash(&f.session);
         let done = store.completed(user, &f.session)?;
         let name = file_name(&f.path).to_string();
         let (content, whole) = if is_sidecar_name(&name) {
@@ -97,22 +144,6 @@ fn commit_with(
         });
     }
 
-    if !params.allow_duplicate {
-        let mut existing = BTreeSet::new();
-        for o in items.iter().filter_map(|i| i.content.as_ref()) {
-            existing.extend(
-                cache
-                    .paths_with_hash(&o.hash.to_string(), &o.scope.to_string())
-                    .map_err(server)?,
-            );
-        }
-        if !existing.is_empty() {
-            return Ok(UploadCommitResult::Duplicate {
-                existing: existing.into_iter().collect(),
-            });
-        }
-    }
-
     // A sidecar that does not parse is dropped; the media still goes in.
     let mut warnings = Vec::new();
     let mut dropped = Vec::new();
@@ -134,6 +165,61 @@ fn commit_with(
             }
         }
         kept.push(item);
+    }
+    Ok(Prepare::Ready(Prepared {
+        user,
+        params,
+        folder,
+        kept,
+        warnings,
+        dropped,
+        _seals: seals,
+    }))
+}
+
+/// The second phase of a commit, in the write queue: unless duplicates are allowed, looks
+/// for the payloads in the library (again: it may have changed since the client's check),
+/// then numbers and places the files, journals them and turns their sessions into
+/// tombstones. Blocking; the seals are released when it returns.
+pub fn place(
+    library: &Library,
+    cache: &Cache,
+    store: &UploadStore,
+    prepared: Prepared,
+) -> Result<UploadCommitResult, UploadError> {
+    place_with(library, cache, store, prepared, &mut |_| {})
+}
+
+fn place_with(
+    library: &Library,
+    cache: &Cache,
+    store: &UploadStore,
+    prepared: Prepared,
+    before_place: &mut dyn FnMut(&Path),
+) -> Result<UploadCommitResult, UploadError> {
+    let Prepared {
+        user,
+        params,
+        folder,
+        kept,
+        warnings,
+        dropped,
+        _seals,
+    } = prepared;
+    if !params.allow_duplicate {
+        let mut existing = BTreeSet::new();
+        for o in kept.iter().filter_map(|i| i.content.as_ref()) {
+            existing.extend(
+                cache
+                    .paths_with_hash(&o.hash.to_string(), &o.scope.to_string())
+                    .map_err(server)?,
+            );
+        }
+        if !existing.is_empty() {
+            return Ok(UploadCommitResult::Duplicate {
+                existing: existing.into_iter().collect(),
+            });
+        }
     }
 
     let dir = folder
@@ -368,6 +454,31 @@ fn server(e: ServerError) -> UploadError {
     UploadError::Io(e.to_string())
 }
 
+/// Lets a test stop a commit right before it hashes a given session.
+#[cfg(test)]
+mod hold {
+    use std::sync::mpsc::{Receiver, Sender};
+    use std::sync::{Arc, Mutex};
+
+    pub struct Hold {
+        pub session: String,
+        pub entered: Sender<()>,
+        pub release: Mutex<Receiver<()>>,
+    }
+
+    pub static HOLD: Mutex<Option<Arc<Hold>>> = Mutex::new(None);
+
+    pub fn before_hash(session: &str) {
+        let hold = HOLD.lock().unwrap().clone();
+        if let Some(h) = hold
+            && h.session == session
+        {
+            let _ = h.entered.send(());
+            let _ = h.release.lock().unwrap().recv();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,7 +507,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let lib = Library::init(&root, "owner").unwrap();
         let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
-        let store = UploadStore::open(&root).unwrap();
+        let store = Arc::new(UploadStore::open(&root).unwrap());
         let me = lib.owner();
         let upload = |bytes: &[u8]| {
             let tmp = dir.path().join("hash-me");
@@ -454,7 +565,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let lib = Library::init(&root, "owner").unwrap();
         let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
-        let store = UploadStore::open(&root).unwrap();
+        let store = Arc::new(UploadStore::open(&root).unwrap());
         let me = lib.owner();
         let upload = |bytes: &[u8]| {
             let tmp = dir.path().join("hash-me");
@@ -500,7 +611,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let lib = Library::init(&root, "owner").unwrap();
         let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
-        let store = UploadStore::open(&root).unwrap();
+        let store = Arc::new(UploadStore::open(&root).unwrap());
         let me = lib.owner();
         let upload = |bytes: &[u8]| {
             let tmp = dir.path().join("hash-me");
@@ -550,5 +661,88 @@ mod tests {
                 )
                 .unwrap();
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn other_writes_go_on_while_a_commit_hashes() {
+        use std::sync::{Arc, Mutex, mpsc};
+        use std::time::Duration;
+
+        use asteria_framework::MediaKind;
+        use asteria_framework_api::MediaUpdateParams;
+
+        struct Photos;
+        impl crate::MediaFilter for Photos {
+            fn accepts(&self, kind: MediaKind) -> bool {
+                matches!(kind, MediaKind::Image | MediaKind::Video)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        fs::create_dir(&root).unwrap();
+        let lib = Arc::new(Library::init(&root, "owner").unwrap());
+        let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../asteria-framework/tests/fixtures/red.jpg"),
+            root.join("a.jpg"),
+        )
+        .unwrap();
+        crate::scan(&lib, &cache, &Photos).unwrap();
+        let store = Arc::new(UploadStore::open(&root).unwrap());
+        let me = lib.owner();
+        let tmp = dir.path().join("hash-me");
+        fs::write(&tmp, b"heic bytes").unwrap();
+        let session = store
+            .begin(me, 10, file_hash(&tmp).unwrap())
+            .unwrap()
+            .session;
+        store.put_chunk(me, &session, 0, b"heic bytes").unwrap();
+        let (writer, _h) = crate::spawn_writer(lib.clone(), cache.clone());
+
+        // The commit stops as it starts hashing, as a big file would keep it there.
+        let (entered, entered_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        *hold::HOLD.lock().unwrap() = Some(Arc::new(hold::Hold {
+            session: session.clone(),
+            entered,
+            release: Mutex::new(release_rx),
+        }));
+        let committing = {
+            let (writer, store) = (writer.clone(), store.clone());
+            let params = UploadCommitParams {
+                files: vec![UploadFile {
+                    session: session.clone(),
+                    path: "IMG_0001.HEIC".into(),
+                }],
+                allow_duplicate: false,
+            };
+            tokio::spawn(async move { writer.commit_upload(store, me, params).await })
+        };
+        tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(20)))
+            .await
+            .unwrap()
+            .expect("the commit reached its hashing");
+
+        let id = cache.get_by_path("a.jpg").unwrap().unwrap().id;
+        let update = MediaUpdateParams {
+            id,
+            rating: Some(3),
+            subjects: None,
+            hierarchical_subjects: None,
+            description: None,
+            label: None,
+        };
+        let updated = tokio::time::timeout(Duration::from_secs(5), writer.update(me, update)).await;
+        release.send(()).unwrap();
+        *hold::HOLD.lock().unwrap() = None;
+        let rec = updated
+            .expect("media.update waited for the commit's hashing")
+            .unwrap();
+        assert_eq!(rec.sidecar.owner_rating, Some(3));
+        let r = committing.await.unwrap().unwrap();
+        assert!(matches!(r, UploadCommitResult::Placed { .. }), "{r:?}");
+        assert!(root.join("Inbox/IMG_0001.HEIC").is_file());
     }
 }

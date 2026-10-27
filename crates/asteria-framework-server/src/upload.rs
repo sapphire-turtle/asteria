@@ -110,12 +110,12 @@ pub struct UploadStore {
 }
 
 /// Keeps a session sealed until dropped; see [`UploadStore::seal`].
-pub struct SealGuard<'a> {
-    store: &'a UploadStore,
+pub struct SealGuard {
+    store: Arc<UploadStore>,
     session: String,
 }
 
-impl Drop for SealGuard<'_> {
+impl Drop for SealGuard {
     fn drop(&mut self) {
         lock(&self.store.sealed).remove(&self.session);
     }
@@ -381,7 +381,7 @@ impl UploadStore {
     /// still works on a sealed session.
     ///
     /// [`remove`]: UploadStore::remove
-    pub fn seal(&self, owner: UserId, session: &str) -> Result<SealGuard<'_>, UploadError> {
+    pub fn seal(self: &Arc<Self>, owner: UserId, session: &str) -> Result<SealGuard, UploadError> {
         self.owned(owner, session)?;
         self.locked(session, |_| {
             if !lock(&self.sealed).insert(session.to_owned()) {
@@ -390,7 +390,7 @@ impl UploadStore {
             Ok(())
         })?;
         Ok(SealGuard {
-            store: self,
+            store: self.clone(),
             session: session.to_owned(),
         })
     }

@@ -1,4 +1,5 @@
 use std::fs;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use asteria_framework::UserId;
@@ -18,9 +19,9 @@ fn hash() -> ContentHash {
     ContentHash::from_bytes([7; 32])
 }
 
-fn store() -> (tempfile::TempDir, UploadStore) {
+fn store() -> (tempfile::TempDir, Arc<UploadStore>) {
     let dir = tempfile::tempdir().unwrap();
-    let store = UploadStore::open(dir.path()).unwrap();
+    let store = Arc::new(UploadStore::open(dir.path()).unwrap());
     (dir, store)
 }
 
