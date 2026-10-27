@@ -1,6 +1,7 @@
 //! Album art: a track's embedded picture, else an image file in its folder.
 #![cfg_attr(not(test), expect(dead_code, reason = "used by the music extension"))]
 
+use std::io::Read;
 use std::path::{Component, Path};
 
 use asteria_framework_server::ThumbSource;
@@ -48,9 +49,10 @@ pub fn embedded(abs: &Path) -> Option<(Vec<u8>, &'static str)> {
     Some((pic.data().to_vec(), ext))
 }
 
-/// The folder image for the track at `rel`, from the extras' paths: track folder first, then
-/// the album folder (`index::album_folder`); within a folder, NAMES order then EXTS order.
-pub fn folder_image<'a>(rel: &str, extras: impl IntoIterator<Item = &'a str>) -> Option<String> {
+/// The folder images for the track at `rel`, best first, from the extras' paths: track folder
+/// first, then the album folder (`index::album_folder`); within a folder, NAMES order then
+/// EXTS order.
+fn folder_candidates<'a>(rel: &str, extras: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let track_dir = rel.rsplit_once('/').map_or("", |(d, _)| d);
     let album_dir = album_folder(rel);
     let extras: Vec<&str> = extras.into_iter().collect();
@@ -58,33 +60,43 @@ pub fn folder_image<'a>(rel: &str, extras: impl IntoIterator<Item = &'a str>) ->
     if album_dir != track_dir {
         dirs.push(album_dir);
     }
+    let mut out = Vec::new();
     for dir in dirs {
         for name in NAMES {
             for ext in EXTS {
                 let wanted = format!("{name}.{ext}");
-                let found = extras.iter().find(|e| {
-                    let (d, f) = e.rsplit_once('/').unwrap_or(("", e));
-                    d == dir && f.to_ascii_lowercase() == wanted
-                });
-                if let Some(found) = found {
-                    return Some((*found).to_string());
-                }
+                out.extend(
+                    extras
+                        .iter()
+                        .filter(|e| {
+                            let (d, f) = e.rsplit_once('/').unwrap_or(("", e));
+                            d == dir && f.to_ascii_lowercase() == wanted
+                        })
+                        .map(|e| (*e).to_string()),
+                );
             }
         }
     }
-    None
+    out
+}
+
+/// The best folder image for the track at `rel`, from the extras' paths.
+pub fn folder_image<'a>(rel: &str, extras: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    folder_candidates(rel, extras).into_iter().next()
 }
 
 fn key(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 
-/// Reads `root/img` unless it resolves (through symlinks) outside the library or into a
-/// hidden path.
-fn read_folder_image(root: &Path, img: &str) -> Option<(String, std::path::PathBuf)> {
-    let path = root.join(img);
+/// A folder image larger than this is not used.
+const MAX_FOLDER_IMAGE: u64 = 32 * 1024 * 1024;
+
+/// Reads `root/img` unless it resolves (through symlinks) outside the library, into a hidden
+/// path, or is too big. The bytes come from the canonical path that passed the check.
+fn read_folder_image(root: &Path, img: &str) -> Option<(Vec<u8>, &'static str)> {
     let canon_root = root.canonicalize().ok()?;
-    let canon = path.canonicalize().ok()?;
+    let canon = root.join(img).canonicalize().ok()?;
     let inside = canon.strip_prefix(&canon_root).ok()?;
     let clean = inside
         .components()
@@ -92,25 +104,38 @@ fn read_folder_image(root: &Path, img: &str) -> Option<(String, std::path::PathB
     if !clean {
         return None;
     }
-    let bytes = std::fs::read(&canon).ok()?;
-    Some((key(&bytes), path))
+    let ext = match canon.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "jpg" => "jpg",
+        "jpeg" => "jpeg",
+        "png" => "png",
+        "webp" => "webp",
+        _ => return None,
+    };
+    let mut bytes = Vec::new();
+    std::fs::File::open(&canon)
+        .ok()?
+        .take(MAX_FOLDER_IMAGE + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_FOLDER_IMAGE {
+        return None;
+    }
+    Some((bytes, ext))
 }
 
 pub fn thumb_source(root: &Path, rel: &str, abs: &Path, extras: &[String]) -> ThumbSource {
-    if let Some((bytes, ext)) = embedded(abs) {
-        return ThumbSource::Image {
-            key: key(&bytes),
-            bytes,
-            ext,
-        };
-    }
-    let Some(img) = folder_image(rel, extras.iter().map(String::as_str)) else {
-        return ThumbSource::None;
+    let from_bytes = |bytes: Vec<u8>, ext| ThumbSource::Image {
+        key: key(&bytes),
+        bytes,
+        ext,
     };
-    match read_folder_image(root, &img) {
-        Some((key, path)) => ThumbSource::File { key, path },
-        None => ThumbSource::None,
+    if let Some((bytes, ext)) = embedded(abs) {
+        return from_bytes(bytes, ext);
     }
+    folder_candidates(rel, extras.iter().map(String::as_str))
+        .iter()
+        .find_map(|img| read_folder_image(root, img))
+        .map_or(ThumbSource::None, |(bytes, ext)| from_bytes(bytes, ext))
 }
 
 #[cfg(test)]
@@ -250,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn folder_image_gives_file_source() {
+    fn folder_image_gives_image_source() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("cover.jpg"), b"folder").unwrap();
         plain_track(dir.path(), "a.flac");
@@ -262,9 +287,10 @@ mod tests {
         );
         assert_eq!(
             src,
-            ThumbSource::File {
+            ThumbSource::Image {
                 key: key(b"folder"),
-                path: dir.path().join("cover.jpg")
+                bytes: b"folder".to_vec(),
+                ext: "jpg"
             }
         );
     }
@@ -297,9 +323,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn oversized_folder_image_falls_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = std::fs::File::create(dir.path().join("cover.jpg")).unwrap();
+        big.set_len(33 * 1024 * 1024).unwrap();
+        std::fs::write(dir.path().join("folder.png"), b"small").unwrap();
+        let a = plain_track(dir.path(), "a.flac");
+        let extras = ["cover.jpg".to_string(), "folder.png".to_string()];
+        assert_eq!(
+            thumb_source(dir.path(), "a.flac", &a, &extras),
+            ThumbSource::Image {
+                key: key(b"small"),
+                bytes: b"small".to_vec(),
+                ext: "png"
+            }
+        );
+    }
+
     #[cfg(unix)]
     #[test]
-    fn folder_image_symlink_outside_library_is_ignored() {
+    fn folder_image_symlink_outside_library_falls_through() {
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.jpg"), b"secret").unwrap();
         let root = tempfile::tempdir().unwrap();
@@ -313,6 +357,16 @@ mod tests {
         assert_eq!(
             thumb_source(root.path(), "a.flac", &a, &extras),
             ThumbSource::None
+        );
+        std::fs::write(root.path().join("folder.png"), b"ok").unwrap();
+        let extras = ["cover.jpg".to_string(), "folder.png".to_string()];
+        assert_eq!(
+            thumb_source(root.path(), "a.flac", &a, &extras),
+            ThumbSource::Image {
+                key: key(b"ok"),
+                bytes: b"ok".to_vec(),
+                ext: "png"
+            }
         );
     }
 
