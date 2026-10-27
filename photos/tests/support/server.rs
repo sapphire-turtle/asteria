@@ -8,9 +8,10 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use asteria_framework::{Library, MediaKind};
+use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
-    AppState, Cache, MediaFilter, Processor, ServerConfig, TokenEntry, Tokens, new_token, router,
-    scan, spawn_writer, token_hash,
+    AppState, Cache, MediaFilter, Processor, ServerConfig, TokenEntry, Tokens, hash_pending,
+    new_token, router, scan, spawn_writer, token_hash,
 };
 
 struct Photos;
@@ -38,7 +39,11 @@ impl TestServer {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         std::fs::create_dir(&root).unwrap();
-        let lib = Arc::new(Library::init(&root, "owner").unwrap());
+        let lib = Arc::new(
+            Library::init(&root, "owner")
+                .unwrap()
+                .with_state_dir(dir.path().join("state")),
+        );
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
         let red = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../crates/asteria-framework/tests/fixtures/red.jpg");
@@ -47,6 +52,8 @@ impl TestServer {
         }
         prepare(&root);
         scan(&lib, &cache, &Photos).unwrap();
+        // The duplicate check compares content hashes.
+        hash_pending(&lib, &cache, &AtomicBool::new(false)).unwrap();
         let token = new_token();
         let cfg = ServerConfig {
             library: root.clone(),
@@ -61,6 +68,7 @@ impl TestServer {
             1,
             Duration::from_secs(60),
         ));
+        let uploads = Arc::new(UploadStore::open(lib.state_dir().unwrap()).unwrap());
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -81,6 +89,7 @@ impl TestServer {
                 rescan,
                 Arc::new(Photos),
                 processor,
+                uploads,
             );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();

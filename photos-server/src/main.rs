@@ -6,15 +6,16 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use asteria_framework::fsutil::cleanup_tmp_files;
 use asteria_framework::paths::META_DIR;
 use asteria_framework::{Library, MediaKind, UserId};
+use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::watch::{DEFAULT_DEBOUNCE, DEFAULT_PERIOD};
 use asteria_framework_server::{
     AppState, Cache, MediaFilter, Processor, ScanLoop, ServerConfig, TokenEntry, Tokens,
-    cache_dir_for, new_token, router, spawn_scan_loop, spawn_writer, token_hash,
+    cache_dir_for, data_dir_for, new_token, router, spawn_scan_loop, spawn_writer, token_hash,
 };
 use asteria_photos_api::{APP, APP_API};
 use clap::{Parser, Subcommand};
@@ -28,6 +29,8 @@ const RENDER_JOBS: usize = 2;
 const RENDER_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long open connections get to finish once shutdown starts.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+/// How often stale upload sessions are looked for.
+const PURGE_PERIOD: Duration = Duration::from_secs(60 * 60);
 const LOCK_FILE: &str = "server.lock";
 
 #[derive(Parser)]
@@ -184,10 +187,25 @@ fn serve(config_path: &Path, listen: Option<SocketAddr>) -> AnyResult<()> {
     let cfg = ServerConfig::load(config_path)?;
     let listen = listen.unwrap_or(cfg.listen);
     let root = cfg.library.canonicalize()?;
-    let library = Arc::new(Library::open(&root)?);
-    // Before touching anything: another server may be writing to this library. Held until
-    // the process exits.
-    let _lock = lock_library(&root)?;
+    let library = Library::open(&root)?;
+    // This instance's own state (journal, upload sessions), apart from the workspace, which
+    // instances on other hosts may share.
+    let data_dir = data_dir_for(APP, &library.config().id)?;
+    std::fs::create_dir_all(&data_dir)?;
+    let data_dir = data_dir.canonicalize()?;
+    // Before touching anything: another server on this host may be serving this library
+    // with the same data and cache directories. Held until the process exits.
+    let _lock = lock_instance(&data_dir, &root)?;
+    let legacy = legacy_state(&root);
+    if !legacy.is_empty() {
+        tracing::info!(
+            found = ?legacy,
+            data_dir = %data_dir.display(),
+            "the library's .asteria directory holds state of an older or other server; \
+             it is left as is, and this server keeps its own in its data directory"
+        );
+    }
+    let library = Arc::new(library.with_state_dir(&data_dir));
     let removed = cleanup_tmp_files(library.root())?;
     if removed > 0 {
         tracing::info!(removed, "removed leftover temporary files");
@@ -203,20 +221,22 @@ fn serve(config_path: &Path, listen: Option<SocketAddr>) -> AnyResult<()> {
     let processor = Arc::new(Processor::new(thumbs, RENDER_JOBS, RENDER_TIMEOUT));
     processor.sweep_tmp();
     let tokens = Arc::new(Tokens::from_config(&cfg));
+    let uploads = Arc::new(UploadStore::open(&data_dir)?);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = rt.block_on(run(library, cache, processor, tokens, listen));
+    let result = rt.block_on(run(library, cache, processor, tokens, uploads, listen));
     // Connections cut off after the grace period may still have tasks; do not wait for them.
     rt.shutdown_timeout(Duration::from_secs(1));
     result
 }
 
-/// Takes the exclusive lock `<library>/.asteria/server.lock`, so that one server at a time
-/// serves a library. The lock lasts as long as the returned file is open.
-fn lock_library(root: &Path) -> AnyResult<File> {
-    let path = root.join(META_DIR).join(LOCK_FILE);
+/// Takes the exclusive lock `<data dir>/server.lock`, so that one server at a time on this
+/// host serves the library at `root` (servers on other hosts have their own data directories
+/// and may share the workspace). The lock lasts as long as the returned file is open.
+fn lock_instance(data_dir: &Path, root: &Path) -> AnyResult<File> {
+    let path = data_dir.join(LOCK_FILE);
     let file = File::options()
         .create(true)
         .truncate(false)
@@ -239,6 +259,7 @@ async fn run(
     cache: Arc<Cache>,
     processor: Arc<Processor>,
     tokens: Arc<Tokens>,
+    uploads: Arc<UploadStore>,
     listen: SocketAddr,
 ) -> AnyResult<()> {
     let (writer, writer_handle) = spawn_writer(library.clone(), cache.clone());
@@ -257,6 +278,7 @@ async fn run(
         rescan_tx,
         filter.clone(),
         processor,
+        uploads.clone(),
     );
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "listening");
@@ -268,6 +290,7 @@ async fn run(
             .with_graceful_shutdown(async move { token.cancelled().await })
             .await
     });
+    let purge = tokio::spawn(purge_loop(uploads, shutdown.clone()));
     let mut scan = spawn_scan_loop(ScanLoop {
         library,
         cache: cache.clone(),
@@ -325,6 +348,7 @@ async fn run(
             }
         }
     }
+    purge.abort();
     if !scan_done && let Err(e) = scan.await {
         failure.get_or_insert(e.into());
     }
@@ -343,6 +367,32 @@ async fn run(
         None => {
             tracing::info!("stopped");
             Ok(())
+        }
+    }
+}
+
+/// What `<library>/.asteria/` holds of a server's own state: written there by older
+/// versions, or by a server of another host that still does. Never touched, only reported.
+fn legacy_state(root: &Path) -> Vec<&'static str> {
+    ["journal", "uploads", LOCK_FILE]
+        .into_iter()
+        .filter(|name| root.join(META_DIR).join(name).exists())
+        .collect()
+}
+
+/// Removes stale upload sessions at startup and then every `PURGE_PERIOD`.
+async fn purge_loop(uploads: Arc<UploadStore>, shutdown: CancellationToken) {
+    let mut tick = tokio::time::interval(PURGE_PERIOD);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            () = shutdown.cancelled() => return,
+        }
+        let store = uploads.clone();
+        match tokio::task::spawn_blocking(move || store.purge_expired(SystemTime::now())).await {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(removed, "removed stale upload sessions"),
+            Err(e) => tracing::error!(error = %e, "upload purge failed"),
         }
     }
 }
@@ -371,23 +421,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn library_lock_is_exclusive_until_released() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join(META_DIR)).unwrap();
-        let first = lock_library(dir.path()).unwrap();
-        let err = lock_library(dir.path()).unwrap_err().to_string();
+    fn instance_lock_is_exclusive_until_released() {
+        let (data, root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let first = lock_instance(data.path(), root.path()).unwrap();
+        let err = lock_instance(data.path(), root.path())
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("another asteria server is serving this library"),
             "{err}"
         );
         drop(first);
-        lock_library(dir.path()).unwrap();
+        lock_instance(data.path(), root.path()).unwrap();
+    }
+
+    /// The workspace may be shared with servers on other hosts: the lock is not in it.
+    #[test]
+    fn instance_lock_is_in_the_data_dir() {
+        let (data, root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let _lock = lock_instance(data.path(), root.path()).unwrap();
+        assert!(data.path().join(LOCK_FILE).is_file());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
     #[test]
-    fn library_lock_does_not_create_the_meta_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(lock_library(dir.path()).is_err());
-        assert!(!dir.path().join(META_DIR).exists());
+    fn legacy_state_in_the_workspace_is_found_and_left_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let meta = root.path().join(META_DIR);
+        std::fs::create_dir_all(meta.join("uploads")).unwrap();
+        std::fs::write(meta.join("library.toml"), "").unwrap();
+        assert_eq!(legacy_state(root.path()), ["uploads"]);
+        std::fs::create_dir(meta.join("journal")).unwrap();
+        assert_eq!(legacy_state(root.path()), ["journal", "uploads"]);
+        assert!(meta.join("journal").is_dir() && meta.join("uploads").is_dir());
     }
 }

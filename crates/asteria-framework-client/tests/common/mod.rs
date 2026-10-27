@@ -76,6 +76,8 @@ pub struct StubResponse {
     pub body: Vec<u8>,
     /// Runs once the answer has been written to the socket.
     pub after_write: Option<Box<dyn FnOnce() + Send>>,
+    /// Hang up without answering, as a server that went away mid-request.
+    pub hang_up: bool,
 }
 
 impl StubResponse {
@@ -85,6 +87,15 @@ impl StubResponse {
             headers: Vec::new(),
             body,
             after_write: None,
+            hang_up: false,
+        }
+    }
+
+    /// No answer at all: the connection is closed.
+    pub fn hang_up() -> StubResponse {
+        StubResponse {
+            hang_up: true,
+            ..StubResponse::new(500, Vec::new())
         }
     }
 
@@ -172,6 +183,9 @@ fn serve_connection(stream: TcpStream, handler: &(dyn Fn(&StubRequest) -> StubRe
             return;
         }
         let resp = handler(&StubRequest { method, path, body });
+        if resp.hang_up {
+            return;
+        }
         let mut head = format!(
             "HTTP/1.1 {} Stub\r\ncontent-length: {}\r\n",
             resp.status,

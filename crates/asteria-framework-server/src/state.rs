@@ -11,6 +11,7 @@ use crate::auth::Tokens;
 use crate::cache::Cache;
 use crate::process::Processor;
 use crate::scan::MediaFilter;
+use crate::upload::UploadStore;
 use crate::writer::Writer;
 
 /// Everything the HTTP layer needs. Cheap to clone.
@@ -28,6 +29,7 @@ pub struct AppState {
     rescan: mpsc::Sender<()>,
     filter: Arc<dyn MediaFilter>,
     processor: Arc<Processor>,
+    uploads: Arc<UploadStore>,
 }
 
 impl AppState {
@@ -45,6 +47,7 @@ impl AppState {
         rescan: mpsc::Sender<()>,
         filter: Arc<dyn MediaFilter>,
         processor: Arc<Processor>,
+        uploads: Arc<UploadStore>,
     ) -> AppState {
         let marks = cache.clone();
         processor.set_unprocessable_hook(move |hash, preset, reason| {
@@ -68,6 +71,7 @@ impl AppState {
             rescan,
             filter,
             processor,
+            uploads,
         }
     }
 
@@ -104,5 +108,8 @@ impl AppState {
     }
     pub fn processor(&self) -> &Arc<Processor> {
         &self.processor
+    }
+    pub fn uploads(&self) -> &Arc<UploadStore> {
+        &self.uploads
     }
 }

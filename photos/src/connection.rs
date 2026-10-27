@@ -1,13 +1,12 @@
 //! [`Connection`]: everything tied to the server in use, dropped whole on a switch.
 
-use std::path::PathBuf;
-
 use asteria_framework_client::profiles::ServerProfile;
 use asteria_framework_client::rpc::ClientError;
-use asteria_framework_client::session::{Session, SessionState};
+use asteria_framework_client::session::{Session, SessionDirs, SessionState};
 use corundum_framework::egui;
 
 use crate::browse::BrowseState;
+use crate::uploads::UploadsView;
 
 /// One server in use: its [`Session`] (requests, images, cache) and its [`BrowseState`] (the
 /// folder shown, its pages, the selection, the item opened, the polling). Dropping it drops
@@ -17,6 +16,7 @@ use crate::browse::BrowseState;
 pub struct Connection {
     pub(crate) session: Session,
     pub(crate) browse: BrowseState,
+    pub(crate) uploads: UploadsView,
     /// Opened by the app itself after the server's library changed. Such a connection
     /// is not reopened again by itself, so a server that keeps changing cannot loop.
     reopened: bool,
@@ -27,14 +27,14 @@ impl Connection {
     pub(crate) fn open(
         profile: &ServerProfile,
         ctx: &egui::Context,
-        cache: Option<PathBuf>,
+        dirs: SessionDirs,
         reopened: bool,
     ) -> Connection {
-        let mut session = Session::open_with_cache(
+        let mut session = Session::open_with_dirs(
             profile,
             asteria_photos_api::client_info(),
             ctx.clone(),
-            cache,
+            dirs,
         );
         let mut browse = BrowseState::new();
         // Queued behind the handshake; it fails with the handshake if that fails.
@@ -42,6 +42,7 @@ impl Connection {
         Connection {
             session,
             browse,
+            uploads: UploadsView::default(),
             reopened,
         }
     }

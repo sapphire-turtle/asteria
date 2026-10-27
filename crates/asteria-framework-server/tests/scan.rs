@@ -29,7 +29,9 @@ fn env() -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("lib");
     fs::create_dir(&root).unwrap();
-    let lib = Library::init(&root, "owner").unwrap();
+    let lib = Library::init(&root, "owner")
+        .unwrap()
+        .with_state_dir(dir.path().join("state"));
     let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
     Env {
         _dir: dir,

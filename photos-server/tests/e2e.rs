@@ -1,6 +1,7 @@
 //! Runs the real binary: init, serve, RPC and media requests, restart.
-//! Linux only: the server is stopped with an external `kill -INT`, and the cache is isolated
-//! through `XDG_CACHE_HOME`, which other platforms ignore.
+//! Linux only: the server is stopped with an external `kill -INT`, and the cache and data
+//! directories are isolated through `XDG_CACHE_HOME` and `XDG_DATA_HOME`, which other
+//! platforms ignore.
 
 #[cfg(not(target_os = "linux"))]
 #[test]
@@ -42,6 +43,7 @@ mod linux {
             let mut c = Command::new(BIN);
             c.env("HOME", &self.home)
                 .env("XDG_CACHE_HOME", self.home.join("cache"))
+                .env("XDG_DATA_HOME", self.home.join("data"))
                 .env("RUST_LOG", "info");
             c
         }
@@ -407,6 +409,21 @@ mod linux {
         };
         server.stop();
         assert_eq!(rating(&sidecar), Some(4));
+        // The server's own state (lock, journal, upload sessions) is in its data directory;
+        // the workspace keeps only the library's files.
+        let mut meta: Vec<_> = std::fs::read_dir(lib.join(".asteria"))
+            .unwrap()
+            .map(|d| d.unwrap().file_name().into_string().unwrap())
+            .collect();
+        meta.sort();
+        assert_eq!(meta, ["library.toml", "users.toml"]);
+        let data = std::fs::read_dir(env.home.join("data/asteria-photos"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(data.join("journal").is_dir() && data.join("server.lock").is_file());
         std::fs::remove_dir_all(env.home.join("cache")).unwrap();
         let mut server = Server::start(&env, &config, &listen);
         api.wait_ready(&mut server);

@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-framework-api"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -352,6 +352,7 @@ dependencies = [
  "toml",
  "tracing",
  "url",
+ "walkdir",
 ]
 
 [[package]]
@@ -368,6 +369,7 @@ dependencies = [
  "getrandom 0.4.3",
  "grain-id",
  "http-body-util",
+ "lofty",
  "notify",
  "redb",
  "serde",
@@ -387,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-api"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "asteria-framework-api",
 ]
@@ -414,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-api"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "asteria-framework-api",
  "serde_json",

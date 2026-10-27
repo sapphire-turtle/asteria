@@ -10,6 +10,7 @@ pub mod library;
 pub mod meta;
 pub mod paths;
 pub mod sidecar;
+pub mod upload_path;
 
 pub use asteria_framework_api::MediaKind;
 pub use error::{Error, Result};

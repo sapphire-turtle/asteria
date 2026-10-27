@@ -7,9 +7,9 @@ use grain_id::GrainId;
 use serde_json::json;
 
 use crate::error::{Error, Result};
-use crate::hash::content_hash;
+use crate::hash::{content_hash, file_hash};
 use crate::ids::UserId;
-use crate::journal::{Actor, Journal, JournalEntry, OpId, OpKind};
+use crate::journal::{Actor, JournalEntry, OpId, OpKind};
 use crate::library::Library;
 use crate::paths::{META_DIR, is_sidecar, sidecar_path_for};
 use crate::sidecar::Sidecar;
@@ -71,6 +71,12 @@ impl Library {
     /// Callers that already know the hash can set `sc.content_hash` inside `f` to avoid hashing
     /// large files on the write path.
     ///
+    /// `sc.file_hash` is `None` inside `f` and is always the current file's hash when written:
+    /// the media file is hashed unless `f` sets it. A change to the file hash alone is not written.
+    ///
+    /// The change is journaled in this instance's journal; without a state directory
+    /// (see [`Library::with_state_dir`]) this fails with `NoStateDir` before writing anything.
+    ///
     /// Returns `Ok(true)` when a sidecar was written, `Ok(false)` when nothing needed writing.
     pub fn update_sidecar(
         &self,
@@ -79,6 +85,7 @@ impl Library {
         f: impl FnOnce(&mut Sidecar),
     ) -> Result<bool> {
         checked_rel(media_rel)?;
+        let journal = self.journal()?;
         let media: PathBuf = self.root().join(media_rel);
         if !media.is_file() {
             return Err(Error::MediaNotFound(media_rel.to_path_buf()));
@@ -88,6 +95,8 @@ impl Library {
         let existed = existing.is_some();
         let mut sidecar = existing.unwrap_or_default();
         let original = sidecar.clone();
+        // Cleared so that a stale stored hash is never written back; `f` may set a known one.
+        sidecar.file_hash = None;
         f(&mut sidecar);
 
         let fields = changed_fields(&original, &sidecar);
@@ -98,6 +107,9 @@ impl Library {
             let outcome = content_hash(&media)?;
             sidecar.content_hash = Some((outcome.hash, outcome.scope));
         }
+        if sidecar.file_hash.is_none() {
+            sidecar.file_hash = Some(file_hash(&media)?);
+        }
         sidecar.write(&sidecar_path)?;
 
         let path = media_rel
@@ -106,7 +118,7 @@ impl Library {
             .collect::<Vec<_>>()
             .join("/");
         let detail = json!({"path": path, "fields": fields});
-        Journal::new(self).append(&JournalEntry {
+        journal.append(&JournalEntry {
             op_id: OpId(GrainId::random()),
             plan_id: None,
             actor,

@@ -8,8 +8,8 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use asteria_framework::hash::{HashScope, content_hash, file_hash};
-use asteria_framework::journal::{Actor, Journal, JournalEntry, OpId, OpKind};
+use asteria_framework::hash::{ContentHash, HashScope, content_hash, file_hash};
+use asteria_framework::journal::{Actor, JournalEntry, OpId, OpKind};
 use asteria_framework::paths::{is_sidecar, media_path_for_sidecar, sidecar_path_for};
 use asteria_framework::{Error as FwError, Library, Sidecar};
 use chrono::Utc;
@@ -18,6 +18,7 @@ use walkdir::WalkDir;
 
 use crate::cache::{Cache, SidecarSnapshot, StoredHash};
 use crate::error::ServerError;
+use crate::fsutil::move_no_clobber;
 use crate::scan::{is_hidden, mtime_ns, rel_lossy, rel_string};
 
 const BATCH: usize = 64;
@@ -139,7 +140,7 @@ pub struct RelinkReport {
     pub conflicts: Vec<String>,
 }
 
-/// Moves each orphaned sidecar (its media file is gone) next to the one cached item with
+/// Moves each orphaned sidecar (its media file is gone) next to the one candidate cached item with
 /// the same content hash and scope, provided that item has no sidecar on disk and its file
 /// still matches the stored hash's size/mtime. Orphans are grouped first: several orphans
 /// claiming one target are all `ambiguous` and nothing is moved. A move is journaled and
@@ -193,23 +194,6 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
         return Ok(report);
     }
 
-    // (hash, scope) -> items whose stored hash is still current for their record.
-    let mut index: HashMap<(String, String), Vec<(String, StoredHash)>> = HashMap::new();
-    for path in cache.all_paths()? {
-        let Some(rec) = cache.get_by_path(&path)? else {
-            continue;
-        };
-        if let Some(h) = rec.hash
-            && h.size == rec.size
-            && h.mtime_ns == rec.mtime_ns
-        {
-            index
-                .entry((h.hash.clone(), h.scope.clone()))
-                .or_default()
-                .push((path, h));
-        }
-    }
-
     // Phase 1: classify without moving anything.
     let mut single: Vec<(String, String, StoredHash)> = Vec::new(); // (orphan, target, hash)
     for old in orphans {
@@ -229,13 +213,18 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
             report.unmatched.push(old);
             continue;
         };
-        match index
-            .get(&(hash.to_string(), scope.to_string()))
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-        {
-            [] => report.unmatched.push(old),
-            [(target, h)] => single.push((old, target.clone(), h.clone())),
+        match candidates(
+            library,
+            cache,
+            &old,
+            (&hash.to_string(), &scope.to_string()),
+            sc.file_hash.as_ref(),
+        )? {
+            c if c.is_empty() => report.unmatched.push(old),
+            mut c if c.len() == 1 => {
+                let (target, h) = c.remove(0);
+                single.push((old, target, h));
+            }
             _ => report.ambiguous.push(old),
         }
     }
@@ -257,7 +246,7 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
     }
 
     // Phase 2: move.
-    let journal = Journal::new(library);
+    let journal = library.journal()?;
     for (old, target, stored) in uncontested {
         let target_abs = root.join(&target);
         match std::fs::metadata(&target_abs) {
@@ -315,6 +304,46 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
     Ok(report)
 }
 
+/// Items an orphan sidecar with this hash may be moved to (spec §4.2 item 5): current
+/// (hash, scope) matches that have no sidecar yet. With two or more left and a `FileHash` in
+/// the sidecar, only those whose whole-file hash equals it, unless none does.
+/// An item whose sidecar is a hard link of the orphan (an interrupted relink) stays a
+/// candidate, so that `relink_orphans` can finish the move.
+fn candidates(
+    library: &Library,
+    cache: &Cache,
+    orphan: &str,
+    (hash, scope): (&str, &str),
+    file_hash: Option<&ContentHash>,
+) -> Result<Vec<(String, StoredHash)>, ServerError> {
+    let mut found = Vec::new();
+    for path in cache.paths_with_hash(hash, scope)? {
+        let Some(rec) = cache.get_by_path(&path)? else {
+            continue;
+        };
+        if rec.sidecar.has_sidecar
+            && !same_file(
+                &library.root().join(orphan),
+                &sidecar_path_for(&library.root().join(&path)),
+            )
+        {
+            continue;
+        }
+        if let Some(h) = rec.hash {
+            found.push((path, h));
+        }
+    }
+    if found.len() > 1
+        && let Some(fh) = file_hash
+    {
+        let fh = fh.to_string();
+        if found.iter().any(|(_, h)| h.file_hash == fh) {
+            found.retain(|(_, h)| h.file_hash == fh);
+        }
+    }
+    Ok(found)
+}
+
 fn refresh_snapshot(library: &Library, cache: &Cache, media: &str) -> Result<(), ServerError> {
     let (snap, err) = match library.read_sidecar(Path::new(media)) {
         Ok(Some(sc)) => (SidecarSnapshot::from(&sc), None),
@@ -348,37 +377,6 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Whether a failed `hard_link` should be retried as check-then-rename: every error except
-/// `AlreadyExists`. Some filesystems (vfat, exFAT) report EPERM for hard links; if the
-/// problem is a real permission error the rename fails too and that error is reported.
-fn should_fallback(e: &std::io::Error) -> bool {
-    e.kind() != ErrorKind::AlreadyExists
-}
-
-/// Moves `from` to `to` without ever replacing an existing `to`.
-///
-/// Uses `hard_link` (fails if `to` exists, so a racing creator is never overwritten)
-/// followed by removing `from`. If `hard_link` fails for any other reason it falls back to check-then-`rename`, which is acceptable because all library
-/// writes go through the single write queue.
-fn move_no_clobber(from: &Path, to: &Path) -> std::io::Result<()> {
-    match std::fs::hard_link(from, to) {
-        Ok(()) => {
-            return std::fs::remove_file(from).inspect_err(|_| {
-                if let Err(e) = std::fs::remove_file(to) {
-                    tracing::warn!(from = %from.display(), to = %to.display(), error = %e,
-                        "rollback failed: both link names remain");
-                }
-            });
-        }
-        Err(e) if !should_fallback(&e) => return Err(e),
-        Err(_) => {}
-    }
-    if to.symlink_metadata().is_ok() {
-        return Err(ErrorKind::AlreadyExists.into());
-    }
-    std::fs::rename(from, to)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,7 +395,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         std::fs::create_dir(&root).unwrap();
-        let lib = Library::init(&root, "o").unwrap();
+        let lib = Library::init(&root, "o")
+            .unwrap()
+            .with_state_dir(dir.path().join("state"));
         let cache = Cache::open(&dir.path().join("c"), &lib.config().id).unwrap();
         for (i, n) in names.iter().enumerate() {
             std::fs::write(root.join(n), format!("content {i}")).unwrap();
@@ -476,14 +476,6 @@ mod tests {
         let root = lib.root().to_string_lossy().into_owned();
         assert!(!err.contains(&root), "{err}");
         assert!(!err.contains("a.bin"), "{err}");
-    }
-
-    #[test]
-    fn fallback_decision() {
-        use std::io::{Error, ErrorKind::*};
-        assert!(!should_fallback(&Error::from(AlreadyExists)));
-        assert!(should_fallback(&Error::from(PermissionDenied)));
-        assert!(should_fallback(&Error::from(Unsupported)));
     }
 
     #[test]

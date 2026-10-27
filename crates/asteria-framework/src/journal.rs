@@ -11,10 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::ids::UserId;
-use crate::library::Library;
-use crate::paths::META_DIR;
-
-const JOURNAL_DIR: &str = "journal";
+/// The journal's directory under an instance's state directory.
+pub(crate) const JOURNAL_DIR: &str = "journal";
 const EXT: &str = "jsonl";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -67,6 +65,7 @@ pub enum OpKind {
     WriteEmbeddedTags,
     RelinkSidecar,
     WriteSidecar,
+    Upload,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,10 +85,12 @@ pub struct Journal {
 }
 
 impl Journal {
-    pub fn new(library: &Library) -> Journal {
-        Journal {
-            dir: library.root().join(META_DIR).join(JOURNAL_DIR),
-        }
+    /// The journal kept in `dir`. It belongs to one server instance, so `dir` is in that
+    /// instance's state directory, never in the shared workspace (see [`Library::journal`]).
+    ///
+    /// [`Library::journal`]: crate::Library::journal
+    pub fn new(dir: impl Into<PathBuf>) -> Journal {
+        Journal { dir: dir.into() }
     }
 
     /// Appends one line to the month file (UTC) of the current time and syncs it to disk.

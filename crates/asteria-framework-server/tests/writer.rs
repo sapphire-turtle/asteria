@@ -2,7 +2,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use asteria_framework::journal::Journal;
 use asteria_framework::{Library, MediaKind, UserId};
 use asteria_framework_api::{ItemId, MediaUpdateParams};
 use asteria_framework_server::{
@@ -29,7 +28,11 @@ fn env() -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("lib");
     fs::create_dir(&root).unwrap();
-    let lib = Arc::new(Library::init(&root, "owner").unwrap());
+    let lib = Arc::new(
+        Library::init(&root, "owner")
+            .unwrap()
+            .with_state_dir(dir.path().join("state")),
+    );
     let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
     fs::copy(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../asteria-framework/tests/fixtures/red.jpg"),
@@ -194,7 +197,7 @@ async fn cached_hash_avoids_rehash() {
 }
 
 fn journal_len(e: &Env) -> usize {
-    Journal::new(&e.lib).read_all().unwrap().len()
+    e.lib.journal().unwrap().read_all().unwrap().len()
 }
 
 fn fake_hash(e: &Env) -> String {

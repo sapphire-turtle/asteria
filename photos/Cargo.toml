@@ -14,7 +14,7 @@ name = "asteria-photos"
 path = "src/main.rs"
 
 [dependencies]
-asteria-framework-api = { path = "../crates/asteria-framework-api", version = "2.1.0" }
+asteria-framework-api = { path = "../crates/asteria-framework-api", version = "2.2.0" }
 asteria-framework-client = { path = "../crates/asteria-framework-client" }
 asteria-photos-api = { path = "../crates/asteria-photos-api" }
 corundum-framework = { workspace = true, features = ["gui", "serde", "eframe"] }

@@ -1,6 +1,7 @@
-//! The single per-library write queue. Every write to original files (sidecar edits and
-//! orphan relinks) goes through one task that runs jobs one at a time on the blocking
-//! pool, then refreshes the cache.
+//! The single per-library write queue. Every write to original files (sidecar edits,
+//! orphan relinks and placing upload commits) goes through one task that runs jobs one at a
+//! time on the blocking pool, then refreshes the cache. An upload commit hashes and stages
+//! its files before it joins the queue (see [`crate::upload_commit`]).
 //!
 //! Shutdown: [`spawn_writer`] returns the [`Writer`] and the task's `JoinHandle`. Once
 //! every `Writer` clone is dropped the task finishes the queued jobs and ends, so
@@ -15,17 +16,22 @@ use std::sync::Arc;
 use asteria_framework::hash::{ContentHash, HashScope};
 use asteria_framework::journal::Actor;
 use asteria_framework::{Error as FwError, Library, UserId};
-use asteria_framework_api::{ItemId, MediaUpdateParams};
+use asteria_framework_api::{ItemId, MediaUpdateParams, UploadCommitParams, UploadCommitResult};
 use chrono::Utc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::cache::{Cache, ItemRecord, SidecarSnapshot, StoredHash};
 use crate::error::ServerError;
 use crate::hashing::{RelinkReport, relink_orphans};
 use crate::scan::mtime_ns;
+use crate::upload::{UploadError, UploadStore};
+use crate::upload_commit::{Begun, Prepared, place, prepare_sealed, seal_group};
 
 const QUEUE: usize = 256;
+/// How many upload commits hash and stage their files at once; more wait their turn, so
+/// that big files do not all compete for the disk.
+const COMMIT_PREPARE_JOBS: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WriteError {
@@ -52,6 +58,12 @@ enum Job {
     Relink {
         reply: oneshot::Sender<Result<RelinkReport, WriteError>>,
     },
+    /// The second phase of an upload commit; the first ran outside the queue.
+    Place {
+        store: Arc<UploadStore>,
+        prepared: Prepared,
+        reply: oneshot::Sender<Result<UploadCommitResult, UploadError>>,
+    },
     /// Refuse new jobs; finish the queued ones and end.
     Close,
 }
@@ -59,12 +71,20 @@ enum Job {
 #[derive(Clone)]
 pub struct Writer {
     tx: mpsc::Sender<Job>,
+    library: Arc<Library>,
+    /// Turns for the first phase of upload commits (`COMMIT_PREPARE_JOBS`).
+    prepare_permits: Arc<Semaphore>,
 }
 
 /// Starts the writer task. Must be called inside a Tokio runtime (it uses `tokio::spawn`).
 /// See the module docs for shutdown.
 pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<Job>(QUEUE);
+    let writer = Writer {
+        tx,
+        library: library.clone(),
+        prepare_permits: Arc::new(Semaphore::new(COMMIT_PREPARE_JOBS)),
+    };
     let handle = tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
             let (lib, cache) = (library.clone(), cache.clone());
@@ -87,21 +107,46 @@ pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHa
                     .await;
                     let _ = reply.send(r);
                 }
+                Job::Place {
+                    store,
+                    prepared,
+                    reply,
+                } => {
+                    let r = run_blocking(move || place(&lib, &cache, &store, prepared)).await;
+                    let _ = reply.send(r);
+                }
                 Job::Close => rx.close(),
             }
         }
     });
-    (Writer { tx }, handle)
+    (writer, handle)
 }
 
-async fn run_blocking<T: Send + 'static>(
-    f: impl FnOnce() -> Result<T, WriteError> + Send + 'static,
-) -> Result<T, WriteError> {
+/// The error a job reports when its blocking task panicked.
+trait JobError: Send + 'static {
+    fn job_failed() -> Self;
+}
+
+impl JobError for WriteError {
+    fn job_failed() -> Self {
+        WriteError::Internal("write job failed".into())
+    }
+}
+
+impl JobError for UploadError {
+    fn job_failed() -> Self {
+        UploadError::Io("write job failed".into())
+    }
+}
+
+async fn run_blocking<T: Send + 'static, E: JobError>(
+    f: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> Result<T, E> {
     match tokio::task::spawn_blocking(f).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, "write job panicked");
-            Err(WriteError::Internal("write job failed".into()))
+            Err(E::job_failed())
         }
     }
 }
@@ -142,6 +187,64 @@ impl Writer {
             .await
             .map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?
+    }
+
+    /// Places a group of finished upload sessions under `Inbox/` (see
+    /// [`crate::upload_commit`]). The sessions are checked, hashed and staged first, on the
+    /// blocking pool but outside the queue (at most `COMMIT_PREPARE_JOBS` commits at once),
+    /// so other writes go on meanwhile; only the renames wait their turn. Does not rescan;
+    /// the caller asks for that.
+    ///
+    /// The commit runs in a task of its own: once started it finishes, and leaves its
+    /// tombstones, even when the caller stops waiting (a client that timed out). A repeated
+    /// commit meanwhile is `Busy` (the sessions are sealed), and afterwards gets the stored
+    /// answer.
+    pub async fn commit_upload(
+        &self,
+        store: Arc<UploadStore>,
+        user: UserId,
+        params: UploadCommitParams,
+    ) -> Result<UploadCommitResult, UploadError> {
+        let writer = self.clone();
+        let task = tokio::spawn(async move { writer.run_commit(store, user, params).await });
+        task.await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "upload commit task failed");
+            Err(UploadError::job_failed())
+        })
+    }
+
+    async fn run_commit(
+        &self,
+        store: Arc<UploadStore>,
+        user: UserId,
+        params: UploadCommitParams,
+    ) -> Result<UploadCommitResult, UploadError> {
+        let upload_stopped = || UploadError::Io("writer stopped".into());
+        let sealing = store.clone();
+        let sealed = match run_blocking(move || seal_group(&sealing, user, params)).await? {
+            Begun::Answered(result) => return Ok(result),
+            Begun::Sealed(sealed) => sealed,
+        };
+        let turn = self
+            .prepare_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| upload_stopped())?;
+        let (lib, staging) = (self.library.clone(), store.clone());
+        let prepared: Prepared =
+            run_blocking(move || prepare_sealed(&lib, &staging, sealed)).await?;
+        drop(turn);
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Job::Place {
+                store,
+                prepared,
+                reply,
+            })
+            .await
+            .map_err(|_| upload_stopped())?;
+        rx.await.map_err(|_| upload_stopped())?
     }
 }
 
@@ -212,6 +315,15 @@ fn usable_hash(rec: &ItemRecord, now: Option<Stamp>) -> Option<(ContentHash, Has
     Some((h.hash.parse().ok()?, h.scope.parse().ok()?))
 }
 
+/// The cached whole-file hash, under the same freshness rule as [`usable_hash`].
+fn usable_file_hash(rec: &ItemRecord, now: Option<Stamp>) -> Option<ContentHash> {
+    let h: &StoredHash = rec.hash.as_ref()?;
+    if now != Some((h.size, h.mtime_ns)) {
+        return None;
+    }
+    h.file_hash.parse().ok()
+}
+
 fn do_update(
     library: &Library,
     cache: &Cache,
@@ -228,7 +340,9 @@ fn do_update(
         return Err(WriteError::ReadOnly(e.clone()));
     }
     let rel = Path::new(&rec.path);
-    let hash = usable_hash(&rec, stat(&library.root().join(rel)));
+    let stamp = stat(&library.root().join(rel));
+    let hash = usable_hash(&rec, stamp);
+    let file_hash = usable_file_hash(&rec, stamp);
     let owner = library.owner();
 
     // One closure: one sidecar write, one journal entry, no rehash when `hash` is set.
@@ -236,6 +350,7 @@ fn do_update(
         if sc.content_hash.is_none() {
             sc.content_hash = hash;
         }
+        sc.file_hash = file_hash;
         if let Some(v) = params.subjects {
             sc.subjects = v.into_iter().collect::<BTreeSet<_>>();
         }

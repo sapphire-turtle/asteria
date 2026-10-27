@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::fsutil::atomic_write;
 use crate::ids::{LibraryId, UserId};
+use crate::journal::{JOURNAL_DIR, Journal};
 use crate::paths::META_DIR;
 
 const FORMAT: u32 = 1;
@@ -43,6 +44,9 @@ pub struct Library {
     root: PathBuf,
     config: LibraryConfig,
     users: Users,
+    /// This instance's own state (the journal), outside the workspace: several instances may
+    /// serve one workspace, each with its own. `None` until [`Library::with_state_dir`].
+    state_dir: Option<PathBuf>,
 }
 
 impl Library {
@@ -82,6 +86,7 @@ impl Library {
             root: root.to_path_buf(),
             config,
             users,
+            state_dir: None,
         })
     }
 
@@ -115,6 +120,7 @@ impl Library {
             root: root.to_path_buf(),
             config,
             users,
+            state_dir: None,
         })
     }
 
@@ -132,5 +138,22 @@ impl Library {
 
     pub fn owner(&self) -> UserId {
         self.config.owner
+    }
+
+    /// Sets the directory this instance keeps its own state in. Writes that journal (sidecar
+    /// updates) fail with [`Error::NoStateDir`] until it is set.
+    pub fn with_state_dir(mut self, dir: impl Into<PathBuf>) -> Library {
+        self.state_dir = Some(dir.into());
+        self
+    }
+
+    pub fn state_dir(&self) -> Option<&Path> {
+        self.state_dir.as_deref()
+    }
+
+    /// This instance's journal, `<state dir>/journal/`.
+    pub fn journal(&self) -> Result<Journal> {
+        let dir = self.state_dir.as_ref().ok_or(Error::NoStateDir)?;
+        Ok(Journal::new(dir.join(JOURNAL_DIR)))
     }
 }

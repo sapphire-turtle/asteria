@@ -10,6 +10,7 @@ pub mod desktop;
 pub mod detail;
 pub mod i18n;
 mod saver;
+pub mod uploads;
 mod viewer;
 
 pub use app::PhotosApp;

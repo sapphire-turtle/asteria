@@ -20,8 +20,8 @@ fn entry(lib: &Library, at: chrono::DateTime<Utc>, before: serde_json::Value) ->
 
 fn setup() -> (tempfile::TempDir, Library, Journal) {
     let dir = tempfile::tempdir().unwrap();
-    let lib = Library::init(dir.path(), "fluo10").unwrap();
-    let j = Journal::new(&lib);
+    let lib = Library::init(&dir.path().join("lib"), "fluo10").unwrap();
+    let j = Journal::new(dir.path().join("journal"));
     (dir, lib, j)
 }
 
@@ -35,7 +35,7 @@ fn this_month() -> String {
 }
 
 fn jfile(dir: &tempfile::TempDir, name: &str) -> std::path::PathBuf {
-    dir.path().join(".asteria/journal").join(name)
+    dir.path().join("journal").join(name)
 }
 
 #[test]
@@ -186,4 +186,12 @@ fn append_after_missing_final_newline_keeps_complete_entry() {
     j.append(&es[2]).unwrap();
     assert_eq!(j.read_all().unwrap(), es);
     assert!(!jfile(&d, &format!("{}.torn", this_month())).exists());
+}
+
+#[test]
+fn op_kind_upload_wire() {
+    assert_eq!(
+        serde_json::to_value(OpKind::Upload).unwrap(),
+        json!("upload")
+    );
 }

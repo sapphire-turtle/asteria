@@ -107,6 +107,7 @@ pub fn fixture_with_tokens(
     let paths = AppPaths {
         servers: path,
         cache: Some(dir.path().join("cache")),
+        data: Some(dir.path().join("data")),
     };
     (Fixture { _dir: dir, paths }, ids)
 }

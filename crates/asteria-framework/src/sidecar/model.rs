@@ -40,6 +40,8 @@ pub struct Sidecar {
     pub label: Option<String>,
     /// `asteria:ContentHash` and `asteria:HashScope`.
     pub content_hash: Option<(ContentHash, HashScope)>,
+    /// `asteria:FileHash`: the `file/1` hash of the whole media file, so only the value is kept.
+    pub file_hash: Option<ContentHash>,
     pub(crate) doc: Option<XmpDoc>,
 }
 

@@ -10,7 +10,7 @@ use asteria_framework_api::{HandshakeError, RpcOutcome, RpcRequest, RpcResponse}
 use bytes::Bytes;
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
-use reqwest::header::{AUTHORIZATION, HeaderValue, RETRY_AFTER};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, RETRY_AFTER};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use url::Url;
@@ -21,6 +21,9 @@ use crate::profiles::Token;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a whole request, body included, may take.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long one upload request may take: a whole chunk, or a commit the server hashes first.
+/// Upload requests use their own client, made with [`RpcClient::with_timeout`].
+pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// The wait used for a 503 that has no usable `Retry-After` (the server sends `2`).
 pub const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(2);
 /// The longest `Retry-After` honoured; a longer one is cut to this.
@@ -92,9 +95,19 @@ impl RpcClient {
     /// Building the HTTP client starts a thread and may load the system's root certificates,
     /// so call this off the UI thread too.
     pub fn new(base: &Url, token: Token) -> Result<RpcClient, ClientError> {
+        Self::with_timeout(base, token, REQUEST_TIMEOUT)
+    }
+
+    /// Like [`new`](Self::new), with `timeout` for a whole request instead of
+    /// [`REQUEST_TIMEOUT`].
+    pub fn with_timeout(
+        base: &Url,
+        token: Token,
+        timeout: Duration,
+    ) -> Result<RpcClient, ClientError> {
         let http = Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(timeout)
             .build()
             .map_err(|e| ClientError::Io(describe(e)))?;
         let mut auth =
@@ -163,6 +176,38 @@ impl RpcClient {
             .send()
             .map_err(transport)?;
         check_status(resp)?.bytes().map_err(transport)
+    }
+
+    /// `PUT /upload/{session}/{index}`: stores one chunk of an upload session. 413 (over the
+    /// quota or the chunk size), 400 (a chunk of the wrong length) and 409 (the session is
+    /// being committed) are [`ClientError::Rpc`] with the HTTP status as the code and the
+    /// answer's body (or the status) as the message.
+    pub fn put_chunk(&self, session: &str, index: u64, body: Vec<u8>) -> Result<(), ClientError> {
+        let resp = self
+            .http
+            .put(self.url(&format!("upload/{session}/{index}"))?)
+            .header(AUTHORIZATION, self.auth.clone())
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .body(body)
+            .send()
+            .map_err(transport)?;
+        let status = resp.status();
+        if matches!(
+            status,
+            StatusCode::PAYLOAD_TOO_LARGE | StatusCode::BAD_REQUEST | StatusCode::CONFLICT
+        ) {
+            let text = resp.text().unwrap_or_default();
+            let message = if text.trim().is_empty() {
+                status.to_string()
+            } else {
+                text
+            };
+            return Err(ClientError::Rpc {
+                code: i32::from(status.as_u16()),
+                message,
+            });
+        }
+        check_status(resp).map(drop)
     }
 
     fn url(&self, path: &str) -> Result<Url, ClientError> {

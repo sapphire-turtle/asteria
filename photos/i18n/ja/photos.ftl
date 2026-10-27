@@ -72,3 +72,43 @@ asteria-photos-viewer-previous = 前へ（←）
 asteria-photos-viewer-next = 次へ（→）
 asteria-photos-viewer-details = 詳細
 asteria-photos-viewer-position = { $index } / { $total }
+
+# アップロードの画面
+asteria-photos-screen-uploads = アップロード
+asteria-photos-uploads-unavailable = ファイルを送るには、サーバーにつないでください。
+asteria-photos-uploads-empty = 写真やフォルダをウィンドウにドロップすると、サーバーの Inbox に送ります。
+asteria-photos-uploads-starting = アップロードのキューを開いています…
+asteria-photos-uploads-waiting = サーバーが応答しないため、送信を止めています。あとでもう一度試します：{ $reason }
+asteria-photos-uploads-stopped = 送信を止めました：{ $reason }
+asteria-photos-uploads-unsupported = このサーバーはアップロードに対応していません。送るには、サーバーを更新してください。
+asteria-photos-uploads-queue-unreadable = アップロードのキューを読めないので、何も送りません：{ $reason }
+asteria-photos-uploads-clear-finished = 完了を消す
+asteria-photos-uploads-in-library = { $count } 件がライブラリにあります
+asteria-photos-uploads-keep-all = すべて保存
+asteria-photos-uploads-discard-all = すべて破棄
+asteria-photos-uploads-keep = 保存
+asteria-photos-uploads-discard = 破棄
+asteria-photos-uploads-retry = 再試行
+asteria-photos-uploads-cancel = 取り消し
+asteria-photos-uploads-existing = ライブラリにあるファイル：
+asteria-photos-uploads-excluded = 直近のドロップのうち { $count } 件は対象外でした（隠しファイル、または写真・動画ではないもの）。
+asteria-photos-uploads-warn-sidecar = 複数のファイルに当てはまるため送りません：{ $path }
+asteria-photos-uploads-warn-unreadable = { $path } を読めません：{ $reason }
+asteria-photos-uploads-state-hashing = 読み込み中
+asteria-photos-uploads-state-checking = ライブラリを確認中
+asteria-photos-uploads-state-awaiting = ライブラリにあります
+asteria-photos-uploads-state-uploading = 送信中
+asteria-photos-uploads-state-committing = 保存中
+asteria-photos-uploads-state-done = 完了
+asteria-photos-uploads-state-done-warnings = 完了（警告 { $count } 件）
+asteria-photos-uploads-state-discarded = 破棄しました
+asteria-photos-uploads-state-failed = 失敗：{ $reason }
+
+# ウィンドウへのドロップと、ステータスバーの件数
+asteria-photos-drop-overlay = Inbox に送る
+asteria-photos-drop-refused = サーバーにつながっていないので送れません
+asteria-photos-status-uploads = ↑ { $done } / { $total }
+asteria-photos-status-uploads-awaiting = ↑ { $done } / { $total }・判断待ち { $count }
+asteria-photos-status-uploads-hover = アップロードを開く
+asteria-photos-drop-starting = 接続中です。少し待ってからもう一度送ってください
+asteria-photos-drop-no-data = アップロードは使えません：キューを置く場所がありません

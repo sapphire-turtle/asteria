@@ -202,7 +202,9 @@ async fn errors_map_to_codes() {
 async fn busy_message_has_no_path() {
     let e = env();
     let id = item_id(&e, "a.jpg");
-    fs::write(e.root.join(".a.jpg.xmp.asteria-tmp"), b"x").unwrap();
+    // A temp file of this process's in-flight write to the sidecar.
+    let tmp = asteria_framework::fsutil::tmp_path_for(&e.root.join("a.jpg.xmp"));
+    fs::write(tmp, b"x").unwrap();
     let v = call(
         &e.app,
         &e.owner_token,

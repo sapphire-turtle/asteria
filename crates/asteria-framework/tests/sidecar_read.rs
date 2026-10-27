@@ -334,3 +334,37 @@ fn oversize_file_is_malformed() {
     std::fs::write(&p, &body).unwrap();
     assert!(Sidecar::read(&p).unwrap().is_some());
 }
+
+const FILE_HASH: &str = "blake3:abababababababababababababababababababababababababababababababab";
+
+fn asteria_desc(attrs: &str) -> String {
+    format!(
+        r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:asteria="https://sapphire-turtle.github.io/ns/asteria/1.0/">
+      <rdf:Description {attrs}/></rdf:RDF>"#
+    )
+}
+
+#[test]
+fn file_hash_roundtrips() {
+    let sc = Sidecar::parse(asteria_desc(&format!(r#"asteria:FileHash="{FILE_HASH}""#)).as_bytes())
+        .unwrap();
+    let hash = sc.file_hash.unwrap();
+    assert_eq!(hash.to_string(), FILE_HASH);
+    let back = Sidecar::parse(&sc.to_bytes()).unwrap();
+    assert_eq!(back.file_hash, Some(hash));
+}
+
+#[test]
+fn missing_file_hash_is_none() {
+    let sc = Sidecar::parse(
+        asteria_desc(r#"xmp:Label="x" xmlns:xmp="http://ns.adobe.com/xap/1.0/""#).as_bytes(),
+    )
+    .unwrap();
+    assert!(sc.file_hash.is_none());
+}
+
+#[test]
+fn malformed_file_hash_is_malformed_sidecar() {
+    let r = Sidecar::parse(asteria_desc(r#"asteria:FileHash="blake3:xyz""#).as_bytes());
+    assert!(matches!(r, Err(Error::MalformedSidecar { .. })));
+}

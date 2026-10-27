@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use asteria_framework::{Library, MediaKind, UserId};
+use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
     AppState, Cache, MediaFilter, Processor, ServerConfig, TokenEntry, Tokens, new_token, router,
     scan, spawn_writer, token_hash,
@@ -47,7 +48,11 @@ pub fn env_with(make: impl FnOnce(PathBuf) -> Processor) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("lib");
     fs::create_dir(&root).unwrap();
-    let lib = Arc::new(Library::init(&root, "owner").unwrap());
+    let lib = Arc::new(
+        Library::init(&root, "owner")
+            .unwrap()
+            .with_state_dir(dir.path().join("state")),
+    );
     let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
     let red =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../asteria-framework/tests/fixtures/red.jpg");
@@ -87,6 +92,7 @@ pub fn env_with(make: impl FnOnce(PathBuf) -> Processor) -> Env {
         rescan,
         Arc::new(Photos),
         processor.clone(),
+        Arc::new(UploadStore::open(&dir.path().join("state")).unwrap()),
     );
     Env {
         _dir: dir,

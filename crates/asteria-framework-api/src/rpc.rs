@@ -50,6 +50,9 @@ pub mod codes {
     pub const READ_ONLY: i32 = -32003;
     pub const BUSY: i32 = -32004;
     pub const API_MISMATCH: i32 = -32005;
+    pub const QUOTA: i32 = -32006;
+    pub const UPLOAD_INCOMPLETE: i32 = -32007;
+    pub const HASH_MISMATCH: i32 = -32008;
 }
 
 pub const SERVER_INFO: &str = "server.info";
@@ -58,6 +61,11 @@ pub const LIBRARY_RESCAN: &str = "library.rescan";
 pub const FOLDER_LIST: &str = "folder.list";
 pub const MEDIA_GET: &str = "media.get";
 pub const MEDIA_UPDATE: &str = "media.update";
+pub const UPLOAD_CHECK: &str = "upload.check";
+pub const UPLOAD_BEGIN: &str = "upload.begin";
+pub const UPLOAD_STATUS: &str = "upload.status";
+pub const UPLOAD_COMMIT: &str = "upload.commit";
+pub const UPLOAD_ABORT: &str = "upload.abort";
 
 #[cfg(test)]
 mod tests {

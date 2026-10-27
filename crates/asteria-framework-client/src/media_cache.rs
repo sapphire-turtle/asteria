@@ -179,7 +179,7 @@ impl MediaCache {
 /// starting or ending with a dot (so no `.`, `..` or hidden names, which are also what
 /// temporary files look like), and not a Windows reserved device name. This also rules out
 /// separators, drive prefixes (`C:`), NUL, and trailing spaces.
-fn safe_component(name: &str) -> bool {
+pub(crate) fn safe_component(name: &str) -> bool {
     const RESERVED: [&str; 22] = [
         "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
         "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",

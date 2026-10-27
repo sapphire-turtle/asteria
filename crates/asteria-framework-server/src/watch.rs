@@ -252,6 +252,10 @@ mod tests {
         let c = EventKind::Create(CreateKind::File);
         assert!(!relevant(&meta(), &ev(c, "/lib/.asteria/journal/x.jsonl")));
         assert!(!relevant(&meta(), &ev(c, "/lib/.a.jpg.xmp.asteria-tmp")));
+        assert!(!relevant(
+            &meta(),
+            &ev(c, "/lib/.a.jpg.xmp.5f3e9a01.asteria-tmp")
+        ));
     }
 
     #[test]

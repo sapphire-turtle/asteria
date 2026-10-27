@@ -4,10 +4,13 @@
 use std::sync::atomic::Ordering;
 
 use asteria_framework::UserId;
+use asteria_framework::hash::ContentHash;
 use asteria_framework_api::{
-    FOLDER_LIST, FolderListParams, FolderListing, ItemId, LIBRARY_INFO, LIBRARY_RESCAN,
-    LibraryInfo, MEDIA_GET, MEDIA_UPDATE, MediaGetParams, MediaItem, MediaUpdateParams, RpcError,
-    RpcOutcome, RpcResponse, SERVER_INFO, ServerInfo, codes,
+    ExistingMedia, FOLDER_LIST, FolderListParams, FolderListing, ItemId, LIBRARY_INFO,
+    LIBRARY_RESCAN, LibraryInfo, MEDIA_GET, MEDIA_UPDATE, MediaGetParams, MediaItem,
+    MediaUpdateParams, RpcError, RpcOutcome, RpcResponse, SERVER_INFO, ServerInfo, UPLOAD_ABORT,
+    UPLOAD_BEGIN, UPLOAD_CHECK, UPLOAD_COMMIT, UPLOAD_STATUS, UploadBeginParams, UploadCheckParams,
+    UploadCheckResult, UploadCommitParams, UploadCommitResult, UploadSessionParams, codes,
 };
 use axum::Extension;
 use axum::Json;
@@ -22,10 +25,13 @@ use tokio::sync::mpsc::error::TrySendError;
 use crate::cache::ItemRecord;
 use crate::error::ServerError;
 use crate::state::AppState;
+use crate::upload::UploadError;
 use crate::writer::WriteError;
 
 const DEFAULT_LIMIT: u32 = 200;
 const MAX_LIMIT: u32 = 1000;
+/// Most hashes one `upload.check` may carry.
+const MAX_CHECK_HASHES: usize = 1000;
 
 /// `RpcRequest<Value>` whose `params` may be absent (treated as `{}`).
 #[derive(Deserialize)]
@@ -135,6 +141,28 @@ fn write_err(e: WriteError) -> RpcError {
     }
 }
 
+fn upload_err(e: UploadError) -> RpcError {
+    match e {
+        UploadError::NotFound => err(codes::NOT_FOUND, "no such upload session"),
+        UploadError::Invalid(m) => err(codes::INVALID_PARAMS, m),
+        UploadError::Quota(m) => err(codes::QUOTA, m),
+        UploadError::Incomplete => err(codes::UPLOAD_INCOMPLETE, "upload is incomplete"),
+        UploadError::HashMismatch => err(codes::HASH_MISMATCH, "file hash does not match"),
+        UploadError::Busy(m) => err(codes::BUSY, m),
+        UploadError::Io(m) => internal(m),
+    }
+}
+
+/// Runs blocking upload-store work off the async threads.
+async fn upload_blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, UploadError> + Send + 'static,
+) -> Result<T, RpcError> {
+    match tokio::task::spawn_blocking(f).await {
+        Ok(r) => r.map_err(upload_err),
+        Err(e) => Err(internal(e)),
+    }
+}
+
 async fn dispatch(
     state: &AppState,
     user: UserId,
@@ -205,6 +233,71 @@ async fn dispatch(
             let p: MediaUpdateParams = params(p)?;
             let rec = state.writer().update(user, p).await.map_err(write_err)?;
             to_value(media_item(rec, user, owner))
+        }
+        UPLOAD_CHECK => {
+            let p: UploadCheckParams = params(p)?;
+            if p.hashes.len() > MAX_CHECK_HASHES {
+                return Err(err(
+                    codes::INVALID_PARAMS,
+                    format!("at most {MAX_CHECK_HASHES} hashes per check"),
+                ));
+            }
+            let cache = state.cache().clone();
+            let existing = blocking(move || {
+                let mut out = Vec::new();
+                for h in p.hashes {
+                    let paths = cache.paths_with_hash(&h.hash, &h.scope)?;
+                    if !paths.is_empty() {
+                        out.push(ExistingMedia {
+                            hash: h.hash,
+                            scope: h.scope,
+                            paths,
+                        });
+                    }
+                }
+                Ok(out)
+            })
+            .await?;
+            to_value(UploadCheckResult { existing })
+        }
+        UPLOAD_BEGIN => {
+            let p: UploadBeginParams = params(p)?;
+            let hash: ContentHash = p
+                .file_hash
+                .parse()
+                .map_err(|_| err(codes::INVALID_PARAMS, "file_hash is not a blake3 hash"))?;
+            let store = state.uploads().clone();
+            let begun = upload_blocking(move || store.begin(user, p.size, hash)).await?;
+            to_value(begun)
+        }
+        UPLOAD_STATUS => {
+            let p: UploadSessionParams = params(p)?;
+            let store = state.uploads().clone();
+            let status = upload_blocking(move || store.status(user, &p.session)).await?;
+            to_value(status)
+        }
+        UPLOAD_ABORT => {
+            let p: UploadSessionParams = params(p)?;
+            let store = state.uploads().clone();
+            upload_blocking(move || store.abort(user, &p.session)).await?;
+            Ok(json!({}))
+        }
+        UPLOAD_COMMIT => {
+            let p: UploadCommitParams = params(p)?;
+            let result = state
+                .writer()
+                .commit_upload(state.uploads().clone(), user, p)
+                .await
+                .map_err(upload_err)?;
+            if matches!(result, UploadCommitResult::Placed { .. }) {
+                // Same as `library.rescan`: a full queue means one is already pending. The
+                // files are placed and their sessions gone, so a failure here must not
+                // turn the response into an error (a retry would only get NotFound).
+                if let Err(TrySendError::Closed(())) = state.rescan().try_send(()) {
+                    tracing::warn!("rescan task stopped; the placed files wait for the next scan");
+                }
+            }
+            to_value(result)
         }
         _ => Err(err(codes::METHOD_NOT_FOUND, "method not found")),
     }

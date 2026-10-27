@@ -170,6 +170,7 @@ fn with_no_servers_settings_open_on_the_servers_page() {
     let paths = AppPaths {
         servers: dir.path().join("servers.toml"),
         cache: None,
+        data: Some(dir.path().join("data")),
     };
     let ctx = egui::Context::default();
     let mut app = PhotosApp::new(paths, &ctx);
@@ -246,6 +247,7 @@ fn the_first_server_added_is_used_and_saved() {
     let paths = AppPaths {
         servers: dir.path().join("servers.toml"),
         cache: None,
+        data: Some(dir.path().join("data")),
     };
     let ctx = egui::Context::default();
     let mut app = PhotosApp::new(paths.clone(), &ctx);
