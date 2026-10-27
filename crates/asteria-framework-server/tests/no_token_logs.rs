@@ -48,13 +48,9 @@ async fn token_not_logged() {
     let id = item_id(&e, "a.jpg");
     fs::remove_file(e.root.join("a.jpg")).unwrap();
     call(&e.app, t, "media.update", json!({"id": id, "rating": 3})).await;
-    fs::write(e.root.join(".b.jpg.xmp.asteria-tmp"), b"x").unwrap();
     let id = item_id(&e, "sub/b.jpg");
-    fs::rename(
-        e.root.join(".b.jpg.xmp.asteria-tmp"),
-        e.root.join("sub/.b.jpg.xmp.asteria-tmp"),
-    )
-    .unwrap();
+    let tmp = asteria_framework::fsutil::tmp_path_for(&e.root.join("sub/b.jpg.xmp"));
+    fs::write(tmp, b"x").unwrap();
     call(&e.app, t, "media.update", json!({"id": id, "rating": 3})).await;
     let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
     assert!(!log.is_empty(), "the subscriber captured nothing");
