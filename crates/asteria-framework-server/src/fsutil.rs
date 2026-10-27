@@ -55,7 +55,23 @@ pub(crate) fn is_cross_device(e: &io::Error) -> bool {
 /// place on `tmp`'s filesystem: a hard link where possible, otherwise a copy synced to disk.
 /// `from` is left alone. Fails with `AlreadyExists`, before copying anything, when `tmp` is
 /// taken; on any failure nothing is left at `tmp`.
+///
+/// The staged file's mtime is now (a hard link would otherwise carry the session data's), so
+/// the 24-hour temp sweep of another instance sharing the workspace never takes it mid-commit.
 pub(crate) fn stage(from: &Path, tmp: &Path) -> io::Result<Staged> {
+    let staged = stage_content(from, tmp)?;
+    let touched = File::options()
+        .write(true)
+        .open(tmp)
+        .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    if let Err(e) = touched {
+        let _ = fs::remove_file(tmp);
+        return Err(e);
+    }
+    Ok(staged)
+}
+
+fn stage_content(from: &Path, tmp: &Path) -> io::Result<Staged> {
     let linked = if test_hook::is_cross_device() {
         Err(ErrorKind::CrossesDevices.into())
     } else {
@@ -170,6 +186,33 @@ mod tests {
         assert_eq!(std::fs::read(&tmp).unwrap(), b"payload");
         assert_eq!(std::fs::read(&from).unwrap(), b"payload");
         assert_eq!(names(&dst), [".session.tag.asteria-tmp"]);
+    }
+
+    /// A staged file is fresh even when its session data is old (a hard link shares the
+    /// data's mtime), so the 24-hour temp sweep of another instance leaves it alone.
+    #[test]
+    fn a_staged_file_is_fresh() {
+        use std::time::{Duration, SystemTime};
+        let (_d, from, _dst, tmp) = dirs();
+        let old = SystemTime::now() - Duration::from_secs(3 * 24 * 3600);
+        for cross in [false, true] {
+            File::options()
+                .write(true)
+                .open(&from)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+            if cross {
+                test_hook::cross_device(|| stage(&from, &tmp)).unwrap();
+            } else {
+                stage(&from, &tmp).unwrap();
+            }
+            let age = SystemTime::now()
+                .duration_since(fs::metadata(&tmp).unwrap().modified().unwrap())
+                .unwrap_or_default();
+            assert!(age < Duration::from_secs(3600), "cross {cross}: {age:?}");
+            fs::remove_file(&tmp).unwrap();
+        }
     }
 
     #[test]
