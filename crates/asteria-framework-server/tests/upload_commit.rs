@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
 use asteria_framework::hash::{ContentHash, file_hash};
-use asteria_framework::journal::{Journal, OpKind};
+use asteria_framework::journal::OpKind;
 use asteria_framework::{Library, MediaKind, UserId};
 use asteria_framework_api::{UploadCommitParams, UploadCommitResult, UploadFile, UploadWarning};
 use asteria_framework_server::upload::{UploadError, UploadLimits, UploadStore};
@@ -43,7 +43,11 @@ fn env_with_limits(limits: UploadLimits) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("lib");
     fs::create_dir(&root).unwrap();
-    let lib = Arc::new(Library::init(&root, "owner").unwrap());
+    let lib = Arc::new(
+        Library::init(&root, "owner")
+            .unwrap()
+            .with_state_dir(dir.path().join("state")),
+    );
     let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
     let store = Arc::new(UploadStore::open_with_limits(&root, limits).unwrap());
     Env {
@@ -195,7 +199,10 @@ fn places_a_group_under_inbox() {
     );
     assert!(e.committed(&heic) && e.committed(&mov));
 
-    let entries: Vec<_> = Journal::new(&e.lib)
+    let entries: Vec<_> = e
+        .lib
+        .journal()
+        .unwrap()
         .read_all()
         .unwrap()
         .into_iter()
@@ -538,7 +545,10 @@ fn a_repeated_commit_returns_the_first_result() {
     assert_eq!(e.commit(&again, false).unwrap(), first);
     assert_eq!(e.commit(&files, true).unwrap(), first);
     assert_eq!(e.inbox_files(), ["a/IMG_0001.HEIC", "a/IMG_0001.MOV"]);
-    let journaled = Journal::new(&e.lib)
+    let journaled = e
+        .lib
+        .journal()
+        .unwrap()
         .read_all()
         .unwrap()
         .into_iter()

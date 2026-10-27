@@ -4,14 +4,31 @@ use std::fs;
 use std::path::Path;
 
 use asteria_framework::hash::{HashScope, content_hash, file_hash};
-use asteria_framework::journal::{Actor, Journal, OpKind};
+use asteria_framework::journal::{Actor, OpKind};
 use asteria_framework::{Error, Library, UserId};
 use chrono::{TimeZone, Timelike, Utc};
 use grain_id::GrainId;
 
-fn setup(rel: &str) -> (tempfile::TempDir, Library) {
-    let dir = tempfile::tempdir().unwrap();
-    let lib = Library::init(dir.path(), "fluo10").unwrap();
+/// A library root and, apart from it, the instance's state directory.
+struct Dirs {
+    root: tempfile::TempDir,
+    state: tempfile::TempDir,
+}
+
+impl Dirs {
+    fn path(&self) -> &Path {
+        self.root.path()
+    }
+}
+
+fn setup(rel: &str) -> (Dirs, Library) {
+    let dir = Dirs {
+        root: tempfile::tempdir().unwrap(),
+        state: tempfile::tempdir().unwrap(),
+    };
+    let lib = Library::init(dir.path(), "fluo10")
+        .unwrap()
+        .with_state_dir(dir.state.path());
     let dest = dir.path().join(rel);
     fs::create_dir_all(dest.parent().unwrap()).unwrap();
     fs::copy(common::fixture("red.jpg"), dest).unwrap();
@@ -23,6 +40,37 @@ fn t(s: u32) -> chrono::DateTime<Utc> {
 }
 
 #[test]
+fn journal_goes_to_the_state_dir_not_the_workspace() {
+    let (dir, lib) = setup("red.jpg");
+    let owner = lib.owner();
+    lib.set_rating(Path::new("red.jpg"), owner, 4, t(1), Actor::User(owner))
+        .unwrap();
+    let month = Utc::now().format("%Y-%m.jsonl").to_string();
+    assert!(dir.state.path().join("journal").join(month).is_file());
+    let mut meta: Vec<_> = fs::read_dir(dir.path().join(".asteria"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    meta.sort();
+    assert_eq!(meta, ["library.toml", "users.toml"]);
+}
+
+/// Without a state directory there is nowhere to journal, so nothing is written.
+#[test]
+fn sidecar_update_without_a_state_dir_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::init(dir.path(), "fluo10").unwrap();
+    fs::copy(common::fixture("red.jpg"), dir.path().join("red.jpg")).unwrap();
+    let owner = lib.owner();
+    let err = lib
+        .set_rating(Path::new("red.jpg"), owner, 4, t(1), Actor::User(owner))
+        .unwrap_err();
+    assert!(matches!(err, Error::NoStateDir), "{err}");
+    assert!(!dir.path().join("red.jpg.xmp").exists());
+    assert!(!dir.path().join(".asteria/journal").exists());
+}
+
+#[test]
 fn no_sidecar_is_created_for_noop_update() {
     let (dir, lib) = setup("red.jpg");
     let wrote = lib
@@ -30,7 +78,7 @@ fn no_sidecar_is_created_for_noop_update() {
         .unwrap();
     assert!(!wrote);
     assert!(!dir.path().join("red.jpg.xmp").exists());
-    assert!(Journal::new(&lib).read_all().unwrap().is_empty());
+    assert!(lib.journal().unwrap().read_all().unwrap().is_empty());
 }
 
 #[test]
@@ -46,7 +94,7 @@ fn first_rating_creates_sidecar_with_payload_hash() {
     let (hash, scope) = sc.content_hash.unwrap();
     assert_eq!(hash, expected.hash);
     assert_eq!(scope, HashScope::MediaPayload1);
-    let entries = Journal::new(&lib).read_all().unwrap();
+    let entries = lib.journal().unwrap().read_all().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, OpKind::WriteSidecar);
     assert_eq!(entries[0].after["path"], "red.jpg");
@@ -61,7 +109,7 @@ fn unchanged_update_on_existing_sidecar_writes_nothing() {
     lib.set_rating(Path::new("red.jpg"), owner, 4, t(1), a)
         .unwrap();
     assert!(!lib.update_sidecar(Path::new("red.jpg"), a, |_| {}).unwrap());
-    assert_eq!(Journal::new(&lib).read_all().unwrap().len(), 1);
+    assert_eq!(lib.journal().unwrap().read_all().unwrap().len(), 1);
 }
 
 #[test]
@@ -102,7 +150,7 @@ fn malformed_sidecar_is_not_overwritten() {
         .unwrap_err();
     assert!(matches!(err, Error::MalformedSidecar { .. }));
     assert_eq!(fs::read(&sc).unwrap(), before);
-    assert!(Journal::new(&lib).read_all().unwrap().is_empty());
+    assert!(lib.journal().unwrap().read_all().unwrap().is_empty());
 }
 
 #[test]
@@ -118,7 +166,7 @@ fn japanese_media_path_works() {
     )
     .unwrap();
     assert!(dir.path().join("京都旅行/red.jpg.xmp").exists());
-    let e = &Journal::new(&lib).read_all().unwrap()[0];
+    let e = &lib.journal().unwrap().read_all().unwrap()[0];
     assert_eq!(e.after["path"], "京都旅行/red.jpg");
 }
 
@@ -148,7 +196,9 @@ fn path_escape_is_rejected() {
     let outer = tempfile::tempdir().unwrap();
     let root = outer.path().join("lib");
     fs::create_dir(&root).unwrap();
-    let lib = Library::init(&root, "fluo10").unwrap();
+    let lib = Library::init(&root, "fluo10")
+        .unwrap()
+        .with_state_dir(outer.path().join("state"));
     fs::create_dir(root.join("sub")).unwrap();
     fs::copy(common::fixture("red.jpg"), root.join("sub/red.jpg")).unwrap();
     fs::copy(common::fixture("red.jpg"), outer.path().join("outside.jpg")).unwrap();

@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::error::{Error, Result};
 use crate::hash::{content_hash, file_hash};
 use crate::ids::UserId;
-use crate::journal::{Actor, Journal, JournalEntry, OpId, OpKind};
+use crate::journal::{Actor, JournalEntry, OpId, OpKind};
 use crate::library::Library;
 use crate::paths::{META_DIR, is_sidecar, sidecar_path_for};
 use crate::sidecar::Sidecar;
@@ -74,6 +74,9 @@ impl Library {
     /// `sc.file_hash` is `None` inside `f` and is always the current file's hash when written:
     /// the media file is hashed unless `f` sets it. A change to the file hash alone is not written.
     ///
+    /// The change is journaled in this instance's journal; without a state directory
+    /// (see [`Library::with_state_dir`]) this fails with `NoStateDir` before writing anything.
+    ///
     /// Returns `Ok(true)` when a sidecar was written, `Ok(false)` when nothing needed writing.
     pub fn update_sidecar(
         &self,
@@ -82,6 +85,7 @@ impl Library {
         f: impl FnOnce(&mut Sidecar),
     ) -> Result<bool> {
         checked_rel(media_rel)?;
+        let journal = self.journal()?;
         let media: PathBuf = self.root().join(media_rel);
         if !media.is_file() {
             return Err(Error::MediaNotFound(media_rel.to_path_buf()));
@@ -114,7 +118,7 @@ impl Library {
             .collect::<Vec<_>>()
             .join("/");
         let detail = json!({"path": path, "fields": fields});
-        Journal::new(self).append(&JournalEntry {
+        journal.append(&JournalEntry {
             op_id: OpId(GrainId::random()),
             plan_id: None,
             actor,

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use asteria_framework::hash::{HashOutcome, HashScope, content_hash, file_hash};
-use asteria_framework::journal::{Actor, Journal, JournalEntry, OpId, OpKind};
+use asteria_framework::journal::{Actor, JournalEntry, OpId, OpKind};
 use asteria_framework::paths::{media_path_for_sidecar, sidecar_path_for};
 use asteria_framework::upload_path::validate_inbox_path;
 use asteria_framework::{Error as FwError, Library, Sidecar, UserId};
@@ -206,6 +206,8 @@ fn place_with(
         dropped,
         _seals,
     } = prepared;
+    // Before anything is placed: a commit that cannot be journaled is not made.
+    let journal = library.journal().map_err(fw)?;
     if !params.allow_duplicate {
         let mut existing = BTreeSet::new();
         for o in kept.iter().filter_map(|i| i.content.as_ref()) {
@@ -256,7 +258,6 @@ fn place_with(
         placed.push((item, target, rel));
     }
 
-    let journal = Journal::new(library);
     for (item, _, rel) in &placed {
         let entry = JournalEntry {
             op_id: OpId(GrainId::random()),
@@ -505,7 +506,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         fs::create_dir(&root).unwrap();
-        let lib = Library::init(&root, "owner").unwrap();
+        let lib = Library::init(&root, "owner")
+            .unwrap()
+            .with_state_dir(dir.path().join("state"));
         let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
         let store = Arc::new(UploadStore::open(&root).unwrap());
         let me = lib.owner();
@@ -563,7 +566,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         fs::create_dir(&root).unwrap();
-        let lib = Library::init(&root, "owner").unwrap();
+        let lib = Library::init(&root, "owner")
+            .unwrap()
+            .with_state_dir(dir.path().join("state"));
         let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
         let store = Arc::new(UploadStore::open(&root).unwrap());
         let me = lib.owner();
@@ -609,7 +614,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         fs::create_dir(&root).unwrap();
-        let lib = Library::init(&root, "owner").unwrap();
+        let lib = Library::init(&root, "owner")
+            .unwrap()
+            .with_state_dir(dir.path().join("state"));
         let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
         let store = Arc::new(UploadStore::open(&root).unwrap());
         let me = lib.owner();
@@ -681,7 +688,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         fs::create_dir(&root).unwrap();
-        let lib = Arc::new(Library::init(&root, "owner").unwrap());
+        let lib = Arc::new(
+            Library::init(&root, "owner")
+                .unwrap()
+                .with_state_dir(dir.path().join("state")),
+        );
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
         fs::copy(
             Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -15,7 +15,7 @@ use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::watch::{DEFAULT_DEBOUNCE, DEFAULT_PERIOD};
 use asteria_framework_server::{
     AppState, Cache, MediaFilter, Processor, ScanLoop, ServerConfig, TokenEntry, Tokens,
-    cache_dir_for, new_token, router, spawn_scan_loop, spawn_writer, token_hash,
+    cache_dir_for, data_dir_for, new_token, router, spawn_scan_loop, spawn_writer, token_hash,
 };
 use asteria_photos_api::{APP, APP_API};
 use clap::{Parser, Subcommand};
@@ -187,10 +187,16 @@ fn serve(config_path: &Path, listen: Option<SocketAddr>) -> AnyResult<()> {
     let cfg = ServerConfig::load(config_path)?;
     let listen = listen.unwrap_or(cfg.listen);
     let root = cfg.library.canonicalize()?;
-    let library = Arc::new(Library::open(&root)?);
+    let library = Library::open(&root)?;
     // Before touching anything: another server may be writing to this library. Held until
     // the process exits.
     let _lock = lock_library(&root)?;
+    // This instance's own state (journal, upload sessions), apart from the workspace, which
+    // other instances may share.
+    let data_dir = data_dir_for(APP, &library.config().id)?;
+    std::fs::create_dir_all(&data_dir)?;
+    let data_dir = data_dir.canonicalize()?;
+    let library = Arc::new(library.with_state_dir(&data_dir));
     let removed = cleanup_tmp_files(library.root())?;
     if removed > 0 {
         tracing::info!(removed, "removed leftover temporary files");

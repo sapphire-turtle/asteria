@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
-use asteria_framework::journal::{Actor, Journal, OpKind};
+use asteria_framework::journal::{Actor, OpKind};
 use asteria_framework::{Library, MediaKind};
 use asteria_framework_server::{Cache, MediaFilter, hash_pending, relink_orphans, scan};
 use chrono::Utc;
@@ -32,7 +32,9 @@ fn env() -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("lib");
     fs::create_dir(&root).unwrap();
-    let lib = Library::init(&root, "owner").unwrap();
+    let lib = Library::init(&root, "owner")
+        .unwrap()
+        .with_state_dir(dir.path().join("state"));
     let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
     Env {
         _dir: dir,
@@ -167,7 +169,10 @@ fn relinks_unique_match() {
     assert!(rec.sidecar.has_sidecar);
     assert_eq!(rec.sidecar.owner_rating, Some(4));
 
-    let entries: Vec<_> = Journal::new(&e.lib)
+    let entries: Vec<_> = e
+        .lib
+        .journal()
+        .unwrap()
         .read_all()
         .unwrap()
         .into_iter()
@@ -301,7 +306,10 @@ fn interrupted_relink_is_completed() {
     );
     assert!(!e.root.join("red.jpg.xmp").exists());
     assert!(e.root.join("new.jpg.xmp").exists());
-    let n = Journal::new(&e.lib)
+    let n = e
+        .lib
+        .journal()
+        .unwrap()
         .read_all()
         .unwrap()
         .iter()

@@ -92,7 +92,11 @@ impl TestServer {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         fs::create_dir(&root).unwrap();
-        let lib = Arc::new(Library::init(&root, "owner").unwrap());
+        let lib = Arc::new(
+            Library::init(&root, "owner")
+                .unwrap()
+                .with_state_dir(dir.path().join("state")),
+        );
         let library_id = lib.config().id.0.to_string();
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
         fs::write(root.join("a.jpg"), fixture("red.jpg")).unwrap();

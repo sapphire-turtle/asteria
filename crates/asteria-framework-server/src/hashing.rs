@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use asteria_framework::hash::{ContentHash, HashScope, content_hash, file_hash};
-use asteria_framework::journal::{Actor, Journal, JournalEntry, OpId, OpKind};
+use asteria_framework::journal::{Actor, JournalEntry, OpId, OpKind};
 use asteria_framework::paths::{is_sidecar, media_path_for_sidecar, sidecar_path_for};
 use asteria_framework::{Error as FwError, Library, Sidecar};
 use chrono::Utc;
@@ -246,7 +246,7 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
     }
 
     // Phase 2: move.
-    let journal = Journal::new(library);
+    let journal = library.journal()?;
     for (old, target, stored) in uncontested {
         let target_abs = root.join(&target);
         match std::fs::metadata(&target_abs) {
@@ -395,7 +395,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         std::fs::create_dir(&root).unwrap();
-        let lib = Library::init(&root, "o").unwrap();
+        let lib = Library::init(&root, "o")
+            .unwrap()
+            .with_state_dir(dir.path().join("state"));
         let cache = Cache::open(&dir.path().join("c"), &lib.config().id).unwrap();
         for (i, n) in names.iter().enumerate() {
             std::fs::write(root.join(n), format!("content {i}")).unwrap();

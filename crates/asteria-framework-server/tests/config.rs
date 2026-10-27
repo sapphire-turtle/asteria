@@ -63,6 +63,15 @@ fn cache_dir_is_per_app_and_library() {
 }
 
 #[test]
+fn data_dir_is_per_app_and_library_and_apart_from_the_cache() {
+    let id = asteria_framework::LibraryId(uuid::Uuid::nil());
+    let dir = asteria_framework_server::data_dir_for("asteria-photos", &id).unwrap();
+    assert!(dir.ends_with("asteria-photos/00000000-0000-0000-0000-000000000000"));
+    let cache = asteria_framework_server::cache_dir_for("asteria-photos", &id).unwrap();
+    assert_ne!(dir, cache);
+}
+
+#[test]
 fn bad_hash_fails_load_and_names_user() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("server.toml");

@@ -1,6 +1,7 @@
 //! Runs the real binary: init, serve, RPC and media requests, restart.
-//! Linux only: the server is stopped with an external `kill -INT`, and the cache is isolated
-//! through `XDG_CACHE_HOME`, which other platforms ignore.
+//! Linux only: the server is stopped with an external `kill -INT`, and the cache and data
+//! directories are isolated through `XDG_CACHE_HOME` and `XDG_DATA_HOME`, which other
+//! platforms ignore.
 
 #[cfg(not(target_os = "linux"))]
 #[test]
@@ -42,6 +43,7 @@ mod linux {
             let mut c = Command::new(BIN);
             c.env("HOME", &self.home)
                 .env("XDG_CACHE_HOME", self.home.join("cache"))
+                .env("XDG_DATA_HOME", self.home.join("data"))
                 .env("RUST_LOG", "info");
             c
         }
