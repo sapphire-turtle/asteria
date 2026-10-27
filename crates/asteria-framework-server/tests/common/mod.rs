@@ -45,6 +45,18 @@ pub fn env() -> Env {
 
 /// `make` gets the thumbs directory (inside the cache directory) and builds the processor.
 pub fn env_with(make: impl FnOnce(PathBuf) -> Processor) -> Env {
+    env_full(make, Arc::new(Photos))
+}
+
+/// The same environment served by `ext`.
+pub fn env_ext(ext: Arc<dyn AppExtension>) -> Env {
+    env_full(
+        |thumbs| Processor::new(thumbs, 2, Duration::from_secs(60)),
+        ext,
+    )
+}
+
+fn env_full(make: impl FnOnce(PathBuf) -> Processor, ext: Arc<dyn AppExtension>) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("lib");
     fs::create_dir(&root).unwrap();
@@ -59,7 +71,7 @@ pub fn env_with(make: impl FnOnce(PathBuf) -> Processor) -> Env {
     fs::copy(&red, root.join("a.jpg")).unwrap();
     fs::create_dir(root.join("sub")).unwrap();
     fs::copy(&red, root.join("sub/b.jpg")).unwrap();
-    scan(&lib, &cache, &Photos).unwrap();
+    scan(&lib, &cache, ext.as_ref()).unwrap();
     let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
 
     let owner_token = new_token();
@@ -90,7 +102,7 @@ pub fn env_with(make: impl FnOnce(PathBuf) -> Processor) -> Env {
         1,
         Arc::new(AtomicBool::new(false)),
         rescan,
-        Arc::new(Photos),
+        ext,
         processor.clone(),
         Arc::new(UploadStore::open(&dir.path().join("state")).unwrap()),
     );

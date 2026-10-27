@@ -1,5 +1,7 @@
 //! The app-extension hooks of the scan: per-item app data and extra files.
 
+mod common;
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -8,7 +10,9 @@ use std::time::{Duration, SystemTime};
 
 use asteria_framework::journal::Actor;
 use asteria_framework::{Library, MediaKind};
-use asteria_framework_server::{AppExtension, CACHE_SCHEMA, Cache, scan};
+use asteria_framework_api::{RpcError, codes};
+use asteria_framework_server::{AppExtension, CACHE_SCHEMA, Cache, ExtContext, rpc_error, scan};
+use serde_json::{Value, json};
 
 /// Stores the file length as app data and counts the calls to `extract`.
 #[derive(Default)]
@@ -223,4 +227,71 @@ fn schema_4_rebuilds_an_old_cache() {
     assert_eq!(c.count().unwrap(), 0);
     assert_ne!(c.epoch(), epoch);
     assert_eq!(c.app_generation(), 0);
+}
+
+/// Answers `test.*` methods and tries to answer `folder.list` too.
+struct Echo;
+
+impl AppExtension for Echo {
+    fn accepts(&self, kind: MediaKind) -> bool {
+        matches!(kind, MediaKind::Image)
+    }
+    fn rpc(
+        &self,
+        ctx: &ExtContext,
+        method: &str,
+        params: Value,
+    ) -> Option<Result<Value, RpcError>> {
+        match method {
+            "test.echo" => Some(Ok(json!({
+                "params": params,
+                "user": ctx.user.to_string(),
+                "owner": ctx.owner.to_string(),
+            }))),
+            "test.missing" => Some(Err(rpc_error(codes::NOT_FOUND, "no such thing"))),
+            "folder.list" => Some(Ok(json!({"from": "extension"}))),
+            _ => None,
+        }
+    }
+}
+
+fn echo_env() -> common::Env {
+    common::env_ext(std::sync::Arc::new(Echo))
+}
+
+#[tokio::test]
+async fn unknown_method_reaches_the_extension() {
+    let e = echo_env();
+    let v = common::call(&e.app, &e.owner_token, "test.echo", json!({"n": 1})).await;
+    assert_eq!(v["result"]["params"], json!({"n": 1}));
+    assert_eq!(v["result"]["user"], e.lib.owner().to_string());
+    assert_eq!(v["result"]["owner"], e.lib.owner().to_string());
+    // A guest's token makes the guest the context user.
+    let v = common::call(&e.app, &e.guest_token, "test.echo", json!({})).await;
+    assert_ne!(v["result"]["user"], v["result"]["owner"]);
+    assert_eq!(v["result"]["owner"], e.lib.owner().to_string());
+}
+
+#[tokio::test]
+async fn unhandled_method_is_method_not_found() {
+    let e = echo_env();
+    let v = common::call(&e.app, &e.owner_token, "test.nothing", json!({})).await;
+    assert_eq!(v["error"]["code"], codes::METHOD_NOT_FOUND);
+}
+
+#[tokio::test]
+async fn common_methods_never_reach_the_extension() {
+    let e = echo_env();
+    let v = common::call(&e.app, &e.owner_token, "folder.list", json!({"path": ""})).await;
+    assert!(v.get("error").is_none(), "{v}");
+    assert!(v["result"].get("from").is_none(), "{v}");
+    assert!(v["result"]["items"].is_array(), "{v}");
+}
+
+#[tokio::test]
+async fn extension_errors_pass_through() {
+    let e = echo_env();
+    let v = common::call(&e.app, &e.owner_token, "test.missing", json!({})).await;
+    assert_eq!(v["error"]["code"], codes::NOT_FOUND);
+    assert_eq!(v["error"]["message"], "no such thing");
 }
