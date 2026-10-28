@@ -150,7 +150,14 @@ impl Stream {
         Stream::start_with(req, Timeouts::default())
     }
 
-    pub(crate) fn start_with(req: StreamRequest, timeouts: Timeouts) -> io::Result<Arc<Stream>> {
+    pub(crate) fn start_with(
+        mut req: StreamRequest,
+        timeouts: Timeouts,
+    ) -> io::Result<Arc<Stream>> {
+        req.auth.set_sensitive(true);
+        // Only its shared state is held: a predecessor the engine drops is cancelled by its
+        // `Drop`, which counts as finished.
+        let before = req.after.take().map(|s| s.shared.clone());
         let file = File::options()
             .read(true)
             .write(true)
@@ -170,8 +177,13 @@ impl Stream {
         let spawned = std::thread::Builder::new()
             .name("asteria-stream".into())
             .spawn(move || {
-                if let Err(Stop::Failed(e)) = fetch(&shared, req, timeouts) {
-                    shared.fail(e);
+                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    fetch(&shared, req, before, timeouts)
+                }));
+                match run {
+                    Ok(Err(Stop::Failed(e))) => shared.fail(e),
+                    Ok(_) => {}
+                    Err(_) => shared.fail(TrackError::Network("the fetch thread panicked".into())),
                 }
             });
         // On a spawn failure `stream` is dropped here, which removes the file.
@@ -245,22 +257,25 @@ impl From<TrackError> for Stop {
     }
 }
 
-fn fetch(shared: &Shared, req: StreamRequest, timeouts: Timeouts) -> Result<(), Stop> {
+fn fetch(
+    shared: &Shared,
+    req: StreamRequest,
+    before: Option<Arc<Shared>>,
+    timeouts: Timeouts,
+) -> Result<(), Stop> {
     let StreamRequest {
         url,
         auth,
         first_timeout,
-        after,
         ..
     } = req;
-    if let Some(before) = after {
-        // Held until it is finished, then let go so its file can go.
-        let mut st = before.shared.lock();
+    if let Some(before) = before {
+        let mut st = before.lock();
         while !st.finished() {
             if shared.lock().cancelled {
                 return Err(Stop::Cancelled);
             }
-            st = before.shared.wait_for(st, Duration::from_millis(100));
+            st = before.wait_for(st, Duration::from_millis(100));
         }
     }
     let client = Client::builder()
@@ -275,6 +290,13 @@ fn fetch(shared: &Shared, req: StreamRequest, timeouts: Timeouts) -> Result<(), 
         };
         let first = !shared.lock().first_done;
         let timeout = if first { first_timeout } else { timeouts.chunk };
+        // 503s are waited out for this long all told.
+        let busy_budget = if first {
+            first_timeout
+        } else {
+            timeouts.chunk * 4
+        };
+        let began = Instant::now();
         let resp = loop {
             if shared.lock().cancelled {
                 return Err(Stop::Cancelled);
@@ -288,6 +310,9 @@ fn fetch(shared: &Shared, req: StreamRequest, timeouts: Timeouts) -> Result<(), 
                 .map_err(net_error)?;
             if resp.status() != StatusCode::SERVICE_UNAVAILABLE {
                 break resp;
+            }
+            if began.elapsed() >= busy_budget {
+                return Err(TrackError::Network("the server stayed busy".into()).into());
             }
             sleep_for(shared, retry_after(&resp), first)?;
         };
@@ -382,7 +407,17 @@ fn receive(shared: &Shared, resp: Response, start: u64, end: u64, first: bool) -
             st.first_done = true;
         }
         StatusCode::OK if first => {
-            let body = resp.bytes().map_err(net_error)?;
+            if resp.content_length().is_some_and(|n| n > CHUNK_BYTES) {
+                return Err(unsupported());
+            }
+            let mut body = Vec::new();
+            let mut resp = resp;
+            io::Read::take(&mut resp, CHUNK_BYTES + 1)
+                .read_to_end(&mut body)
+                .map_err(|e| Stop::Failed(TrackError::Network(e.to_string())))?;
+            if body.len() as u64 > CHUNK_BYTES {
+                return Err(unsupported());
+            }
             write_all_at(&shared.file, &body, 0).map_err(write_error)?;
             let mut st = shared.lock();
             set_total(&mut st, body.len() as u64);
@@ -432,7 +467,7 @@ fn net_error(e: reqwest::Error) -> Stop {
 }
 
 fn write_error(e: io::Error) -> Stop {
-    Stop::Failed(TrackError::Unplayable(format!(
+    Stop::Failed(TrackError::Network(format!(
         "cannot write the temporary file: {e}"
     )))
 }
@@ -781,7 +816,7 @@ mod tests {
     fn a_server_that_ignores_ranges_is_accepted_when_it_sends_it_all() {
         let server = TestServer::start(Script {
             ignore_range: true,
-            ..script(2 * MIB + 3)
+            ..script(MIB / 2 + 3)
         });
         let dir = TempDir::new().unwrap();
         let stream = Stream::start_with(request(&server, &dir, "t"), timeouts()).unwrap();
@@ -790,6 +825,65 @@ mod tests {
         assert!(out == server.inner_body());
         wait_until("complete", || stream.status() == StreamStatus::Complete);
         assert_eq!(server.ranges().len(), 1);
+    }
+
+    #[test]
+    fn a_large_200_is_not_buffered() {
+        let server = TestServer::start(Script {
+            ignore_range: true,
+            ..script(2 * MIB)
+        });
+        let dir = TempDir::new().unwrap();
+        let stream = Stream::start_with(request(&server, &dir, "t"), timeouts()).unwrap();
+        let mut buf = [0u8; 4];
+        assert!(stream.reader().read(&mut buf).is_err());
+        assert_eq!(
+            stream.status(),
+            StreamStatus::Failed(TrackError::Unplayable(NO_RANGES.into()))
+        );
+    }
+
+    #[test]
+    fn a_server_that_stays_busy_fails() {
+        let server = TestServer::start(Script {
+            busy: 1000,
+            retry_after: Some("1"),
+            ..script(10)
+        });
+        let dir = TempDir::new().unwrap();
+        let short = Timeouts {
+            chunk: Duration::from_millis(200),
+            prepare: Duration::from_millis(500),
+        };
+        let mut req = request(&server, &dir, "t");
+        req.first_timeout = short.prepare;
+        let stream = Stream::start_with(req, short).unwrap();
+        let mut buf = [0u8; 4];
+        assert!(stream.reader().read(&mut buf).is_err());
+        assert_eq!(
+            stream.status(),
+            StreamStatus::Failed(TrackError::Network("the server stayed busy".into()))
+        );
+        assert!(server.ranges().len() <= 3);
+    }
+
+    #[test]
+    fn a_dropped_predecessor_lets_the_next_start() {
+        let slow = TestServer::start(Script {
+            first_delay: Duration::from_millis(500),
+            ..script(MIB)
+        });
+        let next = TestServer::start(script(MIB / 2));
+        let dir = TempDir::new().unwrap();
+        let first = Stream::start_with(request(&slow, &dir, "a"), timeouts()).unwrap();
+        let mut req = request(&next, &dir, "b");
+        req.after = Some(first.clone());
+        let second = Stream::start_with(req, timeouts()).unwrap();
+        drop(first);
+        assert!(!dir.path().join("a").exists());
+        let mut out = Vec::new();
+        second.reader().read_to_end(&mut out).unwrap();
+        assert_eq!(out.len(), MIB / 2);
     }
 
     #[test]
