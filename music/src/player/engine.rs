@@ -77,6 +77,8 @@ pub trait Opener: Send {
 
 /// How soon `pump` wants to be called again while there is something to follow.
 const TICK: Duration = Duration::from_millis(10);
+/// Feed events one `pump` takes at most, so a fast feed cannot hold the thread.
+const MAX_POLLS_PER_PUMP: usize = 64;
 
 pub struct Engine {
     opener: Box<dyn Opener>,
@@ -100,7 +102,7 @@ pub struct Engine {
     /// The decoder's length of the current track, once it is known.
     known_duration: Option<u64>,
     /// The id the opener was last told to preload.
-    preloaded: Option<ItemId>,
+    preloaded: Option<(usize, ItemId)>,
 }
 
 impl Engine {
@@ -178,6 +180,7 @@ impl Engine {
                 self.state.current = None;
                 self.known_duration = None;
                 self.halt();
+                self.state.error = None;
                 self.opener.clear();
                 self.preloaded = None;
                 self.opener.set_endpoint(endpoint);
@@ -216,35 +219,56 @@ impl Engine {
     // The feed, the device and the position.
 
     fn feed_output(&mut self) {
-        if !self.pending.is_empty() {
-            self.write_pending();
-            return;
-        }
-        let (Some(feed), Some(output)) = (self.feed.as_mut(), self.output.as_ref()) else {
-            return;
-        };
-        if output.writable() == 0 {
-            return;
-        }
-        match feed.poll() {
-            FeedEvent::Pcm(samples) => {
-                if samples.is_empty() {
+        // Chunks are small: take as many as the device has room for, up to a bound.
+        for _ in 0..MAX_POLLS_PER_PUMP {
+            if !self.pending.is_empty() {
+                self.write_pending();
+                if !self.pending.is_empty() {
                     return;
                 }
-                self.skips = 0;
-                self.reopened = false;
-                self.state.status = Status::Playing;
-                let volume = self.state.volume;
-                self.pending = samples.into_iter().map(|s| s * volume).collect();
-                self.write_pending();
             }
-            FeedEvent::Waiting(Wait::Buffering) => self.state.status = Status::Buffering,
-            FeedEvent::Waiting(Wait::Preparing) => self.state.status = Status::Preparing,
-            FeedEvent::End => self.ended = true,
-            FeedEvent::Failed(TrackError::Unplayable(reason)) => self.unplayable(reason),
-            FeedEvent::Failed(TrackError::Network(e)) => self.pause_with(PlayerError::Network(e)),
-            FeedEvent::Failed(TrackError::Unauthorized) => {
-                self.pause_with(PlayerError::Unauthorized)
+            let (Some(feed), Some(output)) = (self.feed.as_mut(), self.output.as_ref()) else {
+                return;
+            };
+            if output.writable() == 0 {
+                return;
+            }
+            match feed.poll() {
+                FeedEvent::Pcm(samples) => {
+                    if samples.is_empty() {
+                        return;
+                    }
+                    self.skips = 0;
+                    self.reopened = false;
+                    self.state.status = Status::Playing;
+                    let volume = self.state.volume;
+                    self.pending = samples.into_iter().map(|s| s * volume).collect();
+                    self.write_pending();
+                }
+                FeedEvent::Waiting(Wait::Buffering) => {
+                    self.state.status = Status::Buffering;
+                    return;
+                }
+                FeedEvent::Waiting(Wait::Preparing) => {
+                    self.state.status = Status::Preparing;
+                    return;
+                }
+                FeedEvent::End => {
+                    self.ended = true;
+                    return;
+                }
+                FeedEvent::Failed(TrackError::Unplayable(reason)) => {
+                    self.unplayable(reason);
+                    return;
+                }
+                FeedEvent::Failed(TrackError::Network(e)) => {
+                    self.pause_with(PlayerError::Network(e));
+                    return;
+                }
+                FeedEvent::Failed(TrackError::Unauthorized) => {
+                    self.pause_with(PlayerError::Unauthorized);
+                    return;
+                }
             }
         }
     }
@@ -358,10 +382,15 @@ impl Engine {
 
     fn sync_preload(&mut self) {
         let next = self.state.current.and_then(|c| self.state.queue.get(c + 1));
-        let id = next.map(|e| e.media.id.clone());
-        if id != self.preloaded {
+        // Keyed on the position too: `[a, b, b]` moving on has the same next id.
+        let key = self
+            .state
+            .current
+            .zip(next)
+            .map(|(c, e)| (c, e.media.id.clone()));
+        if key != self.preloaded {
             self.opener.preload(next);
-            self.preloaded = id;
+            self.preloaded = key;
         }
     }
 
@@ -782,6 +811,7 @@ mod tests {
             "a",
             vec![
                 Step::Pcm(100),
+                Step::Waiting(Wait::Buffering),
                 Step::Fail(TrackError::Network("down".into())),
             ],
         );
@@ -898,7 +928,10 @@ mod tests {
     #[test]
     fn volume_scales_the_samples() {
         let mut r = Rig::new();
-        r.opener.script("a", vec![Step::Pcm(3), Step::Pcm(3)]);
+        r.opener.script(
+            "a",
+            vec![Step::Pcm(3), Step::Waiting(Wait::Buffering), Step::Pcm(3)],
+        );
         r.replace(&["a"], 0);
         r.engine.handle(Command::SetVolume(0.5));
         r.pump(1);
@@ -1012,6 +1045,7 @@ mod tests {
                 Step::Waiting(Wait::Preparing),
                 Step::Waiting(Wait::Buffering),
                 Step::Pcm(10),
+                Step::End,
             ],
         );
         r.replace(&["a"], 0);
@@ -1026,5 +1060,74 @@ mod tests {
         assert_eq!(r.engine.pump(), None);
         r.engine.handle(Command::Toggle);
         assert_eq!(r.status(), Status::Playing);
+    }
+
+    #[test]
+    fn preload_is_asked_again_for_a_repeated_next_entry() {
+        let mut r = Rig::new();
+        r.replace(&["a", "b", "b"], 0);
+        assert_eq!(r.opener.preloads(), [Some("b".to_string())]);
+        r.engine.handle(Command::Next);
+        assert_eq!(
+            r.opener.preloads(),
+            [Some("b".to_string()), Some("b".to_string())]
+        );
+    }
+
+    #[test]
+    fn set_endpoint_clears_a_stale_error() {
+        let mut r = Rig::new();
+        r.opener
+            .script("a", vec![Step::Fail(TrackError::Unauthorized)]);
+        r.replace(&["a"], 0);
+        r.pump(1);
+        assert_eq!(r.engine.state().error, Some(PlayerError::Unauthorized));
+        r.engine.handle(Command::SetEndpoint(None));
+        assert_eq!(r.engine.state().error, None);
+    }
+
+    #[test]
+    fn one_pump_writes_every_small_chunk_the_device_has_room_for() {
+        let mut r = Rig::new();
+        r.opener.script(
+            "a",
+            vec![Step::Pcm(5), Step::Pcm(5), Step::Pcm(5), Step::Pcm(5)],
+        );
+        r.replace(&["a"], 0);
+        r.pump(1);
+        assert_eq!(r.out().written_frames(), 20);
+    }
+
+    #[test]
+    fn jump_plays_the_chosen_track_from_its_head() {
+        let mut r = Rig::new();
+        r.replace(&["a", "b", "c"], 0);
+        r.engine.handle(Command::Jump(2));
+        assert_eq!(r.current(), Some(2));
+        assert_eq!(r.status(), Status::Playing);
+        assert_eq!(r.opened().last(), Some(&o("c", 0)));
+        let n = r.opened().len();
+        r.engine.handle(Command::Jump(9));
+        assert_eq!(r.opened().len(), n, "out of range is ignored");
+        assert_eq!(r.current(), Some(2));
+        // From a stop, it plays.
+        r.engine.handle(Command::Stop);
+        r.engine.handle(Command::Jump(1));
+        assert_eq!(r.status(), Status::Playing);
+        assert_eq!(r.opened().last(), Some(&o("b", 0)));
+    }
+
+    #[test]
+    fn appending_to_an_empty_queue_readies_the_first_track() {
+        let mut r = Rig::new();
+        r.engine
+            .handle(Command::Append(vec![entry("a"), entry("b")]));
+        assert_eq!(r.current(), Some(0));
+        assert_eq!(r.status(), Status::Stopped);
+        assert!(r.opened().is_empty());
+        assert_eq!(r.opener.preloads(), [Some("b".to_string())]);
+        r.engine.handle(Command::Play);
+        assert_eq!(r.status(), Status::Playing);
+        assert_eq!(r.opened(), vec![o("a", 0)]);
     }
 }
