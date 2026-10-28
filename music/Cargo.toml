@@ -1,0 +1,24 @@
+[package]
+name = "asteria-music"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "asteria-music"
+path = "src/main.rs"
+
+[features]
+# The fakes in `player::fakes`, for the integration tests (which enable it on this crate).
+test-support = []
+
+[dependencies]
+asteria-framework-client = { path = "../crates/asteria-framework-client" }
+asteria-music-api = { path = "../crates/asteria-music-api" }
+tracing.workspace = true
+url.workspace = true

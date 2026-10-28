@@ -389,6 +389,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "asteria-music"
+version = "0.1.0"
+dependencies = [
+ "asteria-framework-client",
+ "asteria-music-api",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "asteria-music-api"
 version = "2.3.0"
 dependencies = [
