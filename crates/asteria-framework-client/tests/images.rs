@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use asteria_framework_api::MediaItem;
+use asteria_framework_api::{ItemId, MediaItem};
 use asteria_framework_client::images::{ImageState, Preset};
 use asteria_framework_client::rpc::ClientError;
 use asteria_framework_client::session::{Session, SessionDirs, SessionState};
@@ -573,4 +573,65 @@ fn a_dropped_session_does_not_fill_the_cache() {
         library_cache.get(one.file_hash.as_deref(), Preset::Thumb.as_str()),
         None
     );
+}
+
+/// Requests `id` once per frame until it is no longer loading.
+fn wait_loaded_id(
+    session: &mut Session,
+    ctx: &egui::Context,
+    id: &ItemId,
+    preset: Preset,
+) -> ImageState {
+    let start = Instant::now();
+    loop {
+        session.poll();
+        let state = frame(ctx, || session.images().request_id(id, preset));
+        if !matches!(state, ImageState::Loading) {
+            return state;
+        }
+        assert!(start.elapsed() < DEADLINE, "image never loaded");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn request_id_fetches_the_thumb_of_an_id() {
+    let (addr, log) = media_stub(|_, _| webp_response());
+    let cache = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut session = ready_session(addr, &ctx, cache.path());
+    let id = ItemId("c1".into());
+    assert_ready(&wait_loaded_id(&mut session, &ctx, &id, Preset::Thumb));
+    assert_ready(&frame(&ctx, || {
+        session.images().request_id(&id, Preset::Thumb)
+    }));
+    assert_eq!(paths(&log), vec!["/media/c1/thumb".to_string()]);
+}
+
+#[test]
+fn request_id_does_not_touch_the_disk_cache() {
+    let (addr, _log) = media_stub(|_, _| webp_response());
+    let cache = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut session = ready_session(addr, &ctx, cache.path());
+    let id = ItemId("c1".into());
+    assert_ready(&wait_loaded_id(&mut session, &ctx, &id, Preset::Thumb));
+    // Let a (wrong) write finish.
+    std::thread::sleep(Duration::from_millis(200));
+    let files = walk_files(cache.path());
+    assert!(files.is_empty(), "{files:?}");
+}
+
+/// Every file under `dir`, at any depth.
+fn walk_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(walk_files(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
 }

@@ -323,7 +323,11 @@ fn start_stub(change_library: bool) -> Stub {
                     None => json!({"folders": ["from-prompt"], "items": [], "next_cursor": null}),
                 }
             }
-            other => panic!("stub got unexpected method {other}"),
+            // Any other method is answered with its own params.
+            _ => {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                json!({"echo": body["params"]})
+            }
         };
         let mut resp = StubResponse::rpc_result(id, result);
         if held {
@@ -448,6 +452,53 @@ fn requests_made_while_connecting_do_not_pass_a_failed_handshake() {
         session.state(),
         SessionState::Failed(ClientError::Handshake(_))
     ));
+    assert_eq!(stub.methods(), vec!["server.info".to_string()]);
+}
+
+#[test]
+fn call_passes_any_method_and_returns_its_value() {
+    let stub = start_stub(false);
+    let mut session = Session::open(
+        &profile(stub.addr, "t"),
+        photos_client(),
+        egui::Context::default(),
+    );
+    let id = session.request(Request::Call {
+        method: "album.list".into(),
+        params: json!({"limit": 5}),
+    });
+    let reply = wait_replies(&mut session, &[id]).remove(0);
+    assert_eq!(
+        reply.result,
+        Ok(Response::Value(json!({"echo": {"limit": 5}})))
+    );
+    assert_eq!(
+        stub.methods(),
+        vec!["server.info", "library.info", "album.list"]
+    );
+}
+
+#[test]
+fn call_before_the_handshake_fails_with_it() {
+    let stub = start_stub(false);
+    let music = ClientInfo {
+        app: asteria_music_api::APP.into(),
+        app_api: asteria_music_api::APP_API,
+    };
+    let mut session = Session::open(&profile(stub.addr, "t"), music, egui::Context::default());
+    // Made before the handshake's answer has been polled.
+    let id = session.request(Request::Call {
+        method: "album.list".into(),
+        params: json!({}),
+    });
+    let reply = wait_replies(&mut session, &[id]).remove(0);
+    assert!(
+        matches!(
+            reply.result,
+            Err(ClientError::Handshake(HandshakeError::AppMismatch { .. }))
+        ),
+        "{reply:?}"
+    );
     assert_eq!(stub.methods(), vec!["server.info".to_string()]);
 }
 
