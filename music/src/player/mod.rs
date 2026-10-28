@@ -6,9 +6,11 @@ use asteria_framework_client::profiles::Token;
 use asteria_music_api::{MediaItem, MusicTrack};
 use url::Url;
 
+pub mod decode;
 pub mod engine;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fakes;
+pub mod resample;
 pub mod stream;
 #[cfg(test)]
 mod test_server;
