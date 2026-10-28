@@ -9,6 +9,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -195,6 +196,7 @@ impl Stream {
         StreamReader {
             stream: self.clone(),
             pos: 0,
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -507,9 +509,42 @@ fn write_all_at(file: &File, mut buf: &[u8], mut pos: u64) -> io::Result<()> {
 pub struct StreamReader {
     stream: Arc<Stream>,
     pos: u64,
+    cancelled: Arc<AtomicBool>,
+}
+
+/// Cancels one [`StreamReader`] (not the stream): its reads and seeks fail from then on,
+/// and one that is waiting wakes at once.
+#[derive(Clone)]
+pub struct ReaderCancel {
+    flag: Arc<AtomicBool>,
+    shared: Arc<Shared>,
+}
+
+impl ReaderCancel {
+    pub fn cancel(&self) {
+        self.flag.store(true, Ordering::Release);
+        // Under the lock, so a reader between its check and its wait does not miss it.
+        drop(self.shared.lock());
+        self.shared.changed.notify_all();
+    }
 }
 
 impl StreamReader {
+    pub fn canceller(&self) -> ReaderCancel {
+        ReaderCancel {
+            flag: self.cancelled.clone(),
+            shared: self.stream.shared.clone(),
+        }
+    }
+
+    fn check_cancelled(&self) -> io::Result<()> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err(io::Error::other("the reader was cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+
     fn failure(st: &State) -> Option<io::Error> {
         if st.cancelled {
             return Some(io::Error::other("the stream was cancelled"));
@@ -527,10 +562,12 @@ impl Read for StreamReader {
         if buf.is_empty() {
             return Ok(0);
         }
+        self.check_cancelled()?;
         let sh = &self.stream.shared;
         let mut st = sh.lock();
         self.want(&mut st);
         let n = loop {
+            self.check_cancelled()?;
             if st.cancelled {
                 return Err(Self::failure(&st).unwrap());
             }
@@ -561,6 +598,7 @@ impl Read for StreamReader {
 
 impl Seek for StreamReader {
     fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        self.check_cancelled()?;
         let sh = &self.stream.shared;
         let target = match to {
             SeekFrom::Start(n) => Some(n),
@@ -568,6 +606,7 @@ impl Seek for StreamReader {
             SeekFrom::End(d) => {
                 let mut st = sh.lock();
                 let total = loop {
+                    self.check_cancelled()?;
                     if let Some(t) = st.total {
                         break t;
                     }

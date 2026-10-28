@@ -16,13 +16,15 @@ use symphonia::core::io::MediaSource;
 use super::decode::{self, DecodeError};
 use super::engine::{Feed, FeedEvent, Opener, OutputConfig, TrackError, Wait};
 use super::resample::Converter;
-use super::stream::{Stream, StreamReader, StreamRequest, StreamStatus, Timeouts};
+use super::stream::{ReaderCancel, Stream, StreamReader, StreamRequest, StreamStatus, Timeouts};
 use super::{Endpoint, Quality, QueueEntry};
 
 /// Messages the decoder thread can hold before it waits for the player.
 const CHANNEL_CAPACITY: usize = 32;
 /// A per-process stream directory this long unmodified belongs to a dead process.
 const STALE_STREAM_DIR: Duration = Duration::from_secs(24 * 60 * 60);
+/// A file in the stream directory whose mtime is refreshed whenever a stream starts.
+const ALIVE_MARKER: &str = ".alive";
 /// No duration known yet.
 const NO_DURATION: u64 = u64::MAX;
 
@@ -39,7 +41,12 @@ pub fn stream_dir(cache_root: &Path, library_id: &str) -> io::Result<PathBuf> {
                 .metadata()
                 .ok()
                 .filter(|m| m.is_dir())
-                .and_then(|m| m.modified().ok())
+                .and_then(|m| {
+                    let marker = std::fs::metadata(sibling.path().join(ALIVE_MARKER))
+                        .and_then(|m| m.modified())
+                        .ok();
+                    m.modified().ok().max(marker)
+                })
                 .and_then(|t| now.duration_since(t).ok())
                 .is_some_and(|age| age > STALE_STREAM_DIR);
             if stale {
@@ -67,8 +74,12 @@ struct Slot {
 }
 
 impl Slot {
+    /// Whether this is the track, and its stream can still deliver it: one that failed
+    /// (or was cancelled) is started afresh, which is what a retry needs.
     fn is(&self, id: &ItemId, quality: Quality) -> bool {
-        self.id == *id && self.quality == quality
+        self.id == *id
+            && self.quality == quality
+            && !matches!(self.stream.status(), StreamStatus::Failed(_))
     }
 }
 
@@ -126,6 +137,8 @@ impl HttpOpener {
         let mut auth = HeaderValue::from_str(&format!("Bearer {}", endpoint.token.expose()))
             .map_err(|_| TrackError::Unauthorized)?;
         auth.set_sensitive(true);
+        // Tells other instances' sweeps that this directory is alive.
+        let _ = std::fs::write(endpoint.stream_dir.join(ALIVE_MARKER), b"");
         let n = FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let stream = Stream::start_with(
             StreamRequest {
@@ -236,6 +249,7 @@ struct TrackFeed {
     rx: Receiver<Message>,
     stream: Arc<Stream>,
     stop: Arc<AtomicBool>,
+    reader: ReaderCancel,
     duration: Arc<AtomicU64>,
     /// How the feed ended, repeated by any later poll.
     finished: Option<FeedEvent>,
@@ -251,7 +265,10 @@ impl TrackFeed {
         let (tx, rx) = sync_channel(CHANNEL_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
         let duration = Arc::new(AtomicU64::new(NO_DURATION));
+        let reader = stream.reader();
+        let canceller = reader.canceller();
         let job = Job {
+            reader: Some(reader),
             stream: stream.clone(),
             ext,
             at_ms,
@@ -275,6 +292,7 @@ impl TrackFeed {
             rx,
             stream,
             stop,
+            reader: canceller,
             duration,
             finished: None,
         })
@@ -283,9 +301,10 @@ impl TrackFeed {
 
 impl Drop for TrackFeed {
     fn drop(&mut self) {
-        // The thread leaves at its next read or send. The stream is the opener's and may be
-        // opened again (a seek), so it is not cancelled here.
+        // The thread leaves at once, even from a wait for bytes. The stream is the opener's
+        // and may be opened again (a seek), so only this feed's reader is cancelled.
         self.stop.store(true, Ordering::Release);
+        self.reader.cancel();
     }
 }
 
@@ -322,6 +341,7 @@ impl Feed for TrackFeed {
 
 /// Everything the decoder thread needs.
 struct Job {
+    reader: Option<StreamReader>,
     stream: Arc<Stream>,
     ext: Option<String>,
     at_ms: u64,
@@ -332,7 +352,7 @@ struct Job {
 }
 
 impl Job {
-    fn run(self) {
+    fn run(mut self) {
         let message = match self.decode() {
             Ok(()) => Message::End,
             Err(Some(e)) => Message::Failed(e),
@@ -343,9 +363,9 @@ impl Job {
     }
 
     /// `Err(None)` when the feed was dropped.
-    fn decode(&self) -> Result<(), Option<TrackError>> {
+    fn decode(&mut self) -> Result<(), Option<TrackError>> {
         let reader = Cancellable {
-            inner: self.stream.reader(),
+            inner: self.reader.take().expect("decoded once"),
             stop: self.stop.clone(),
         };
         let mut decoder =
@@ -506,7 +526,11 @@ mod tests {
     }
 
     fn files(dir: &TempDir) -> usize {
-        std::fs::read_dir(dir.path()).unwrap().count()
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .count()
     }
 
     #[test]
@@ -689,6 +713,80 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn a_failed_track_is_fetched_afresh_when_opened_again() {
+        // The first request is refused with 401, later ones are served.
+        let server = TestServer::start(Script {
+            body: tone(),
+            fail_first: 1,
+            ..Script::default()
+        });
+        let dir = TempDir::new().unwrap();
+        let mut o = opener(&server, &dir);
+        let e = entry("track");
+        let (_, last) = drain(o.open(&e, 0, TARGET).as_mut());
+        assert!(matches!(last, FeedEvent::Failed(_)), "{last:?}");
+        let (pcm, last) = drain(o.open(&e, 0, TARGET).as_mut());
+        assert_eq!(last, FeedEvent::End);
+        assert!(!pcm.is_empty());
+        assert_eq!(files(&dir), 1);
+    }
+
+    #[test]
+    fn a_preload_that_failed_is_fetched_afresh() {
+        let server = TestServer::start(Script {
+            body: tone(),
+            fail_first: 1,
+            ..Script::default()
+        });
+        let dir = TempDir::new().unwrap();
+        let mut o = opener(&server, &dir);
+        o.preload(Some(&entry("b")));
+        wait_until("the failed request", || server.paths().len() == 1);
+        std::thread::sleep(Duration::from_millis(100));
+        let (_, last) = drain(o.open(&entry("b"), 0, TARGET).as_mut());
+        assert_eq!(last, FeedEvent::End);
+    }
+
+    #[test]
+    fn a_dropped_feed_stops_waiting_for_bytes() {
+        let server = TestServer::start(Script {
+            body: tone(),
+            first_delay: Duration::from_secs(2),
+            ..Script::default()
+        });
+        let dir = TempDir::new().unwrap();
+        let mut o = opener(&server, &dir);
+        let mut feed = o.open(&entry("track"), 0, TARGET);
+        let stream = o.current.as_ref().unwrap().stream.clone();
+        wait_until("the reader to wait", || {
+            matches!(feed.poll(), FeedEvent::Waiting(Wait::Buffering))
+                && stream.status() == StreamStatus::Waiting(Wait::Buffering)
+        });
+        drop(feed);
+        wait_until("the reader to stop waiting", || {
+            stream.status() == StreamStatus::Fetching
+        });
+        // Only the opener and this test hold the stream once the thread has gone.
+        wait_until("the decoder thread to go", || {
+            Arc::strong_count(&stream) <= 3
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_live_marker_keeps_an_old_directory() {
+        let root = TempDir::new().unwrap();
+        let base = root.path().join("lib").join("stream");
+        let d = base.join("live");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(ALIVE_MARKER), b"").unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(25 * 3600);
+        std::fs::File::open(&d).unwrap().set_modified(old).unwrap();
+        stream_dir(root.path(), "lib").unwrap();
+        assert!(d.exists());
     }
 
     #[test]

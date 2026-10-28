@@ -32,6 +32,8 @@ pub struct Script {
     pub token: Option<&'static str>,
     /// Answer 200 with the whole body whatever the `Range`.
     pub ignore_range: bool,
+    /// The first this many requests get 401.
+    pub fail_first: usize,
 }
 
 pub struct Recorded {
@@ -174,6 +176,9 @@ async fn serve(
     }
     if s.stall_on == Some(n) {
         tokio::time::sleep(Duration::from_secs(3600)).await;
+    }
+    if n <= s.fail_first {
+        return StatusCode::UNAUTHORIZED.into_response();
     }
     if let Some(token) = s.token {
         let want = format!("Bearer {token}");
