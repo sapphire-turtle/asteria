@@ -1,0 +1,24 @@
+[package]
+name = "asteria-music-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+asteria-framework = { path = "../crates/asteria-framework" }
+asteria-framework-server = { path = "../crates/asteria-framework-server" }
+asteria-music-api = { path = "../crates/asteria-music-api" }
+blake3.workspace = true
+lofty.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+unicode-normalization.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+tempfile.workspace = true
+reqwest.workspace = true

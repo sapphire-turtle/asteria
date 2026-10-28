@@ -478,3 +478,37 @@ fn set_hash_many_and_put_many_replace_changed_hash() {
     assert!(c.paths_with_hash("blake3:bb", "file/1").unwrap().is_empty());
     assert_eq!(c.paths_with_hash("blake3:cc", "file/1").unwrap(), ["a.jpg"]);
 }
+
+#[test]
+fn put_many_with_app_data_commits_records_and_app_data_together() {
+    let d = tempfile::tempdir().unwrap();
+    let l = lib();
+    let recs: Vec<_> = ["a.jpg", "b.jpg"].iter().map(|p| rec(&l, p)).collect();
+    {
+        let c = Cache::open(d.path(), &l).unwrap();
+        c.put_many_with_app_data(
+            &[rec(&l, "b.jpg")],
+            &[("b.jpg".into(), Some(b"old".to_vec()))],
+        )
+        .unwrap();
+        let g = c.app_generation();
+        c.put_many_with_app_data(
+            &recs,
+            &[
+                ("a.jpg".into(), Some(b"tags".to_vec())),
+                ("b.jpg".into(), None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(c.app_generation(), g + 1, "one batch, one generation step");
+        // A batch that changes no app data leaves the generation alone.
+        c.put_many_with_app_data(&recs, &[("b.jpg".into(), None)])
+            .unwrap();
+        assert_eq!(c.app_generation(), g + 1);
+        c.flush().unwrap();
+    }
+    let c = Cache::open(d.path(), &l).unwrap();
+    assert_eq!(c.count().unwrap(), 2);
+    assert_eq!(c.app_data("a.jpg").unwrap().as_deref(), Some(&b"tags"[..]));
+    assert_eq!(c.app_data("b.jpg").unwrap(), None);
+}

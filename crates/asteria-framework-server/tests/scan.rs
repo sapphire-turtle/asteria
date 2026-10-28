@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use asteria_framework::{Library, MediaKind};
-use asteria_framework_server::{Cache, MediaFilter, ScanReport, scan};
+use asteria_framework_server::{AppExtension, Cache, ScanReport, scan};
 
 struct Photos;
-impl MediaFilter for Photos {
+impl AppExtension for Photos {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }

@@ -24,6 +24,7 @@ use tokio::sync::mpsc::error::TrySendError;
 
 use crate::cache::ItemRecord;
 use crate::error::ServerError;
+use crate::ext::ExtContext;
 use crate::state::AppState;
 use crate::upload::UploadError;
 use crate::writer::WriteError;
@@ -49,7 +50,8 @@ fn empty_params() -> Value {
     json!({})
 }
 
-fn err(code: i32, message: impl Into<String>) -> RpcError {
+/// An RPC error with `code` and `message`.
+pub fn rpc_error(code: i32, message: impl Into<String>) -> RpcError {
     RpcError {
         code,
         message: message.into(),
@@ -58,7 +60,7 @@ fn err(code: i32, message: impl Into<String>) -> RpcError {
 
 fn internal(detail: impl std::fmt::Display) -> RpcError {
     tracing::error!(error = %detail, "rpc internal error");
-    err(codes::INTERNAL_ERROR, "internal error")
+    rpc_error(codes::INTERNAL_ERROR, "internal error")
 }
 
 fn respond(id: u64, outcome: Result<Value, RpcError>) -> Json<RpcResponse<Value>> {
@@ -81,17 +83,22 @@ pub(crate) async fn rpc(
     // this API's ids are plain u64).
     let value: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(_) => return respond(0, Err(err(codes::PARSE_ERROR, "parse error"))),
+        Err(_) => return respond(0, Err(rpc_error(codes::PARSE_ERROR, "parse error"))),
     };
     let id = value.get("id").and_then(Value::as_u64).unwrap_or(0);
     let req: Request = match serde_json::from_value(value) {
         Ok(r) => r,
-        Err(_) => return respond(id, Err(err(codes::INVALID_REQUEST, "invalid request"))),
+        Err(_) => {
+            return respond(
+                id,
+                Err(rpc_error(codes::INVALID_REQUEST, "invalid request")),
+            );
+        }
     };
     if req.jsonrpc != "2.0" {
         return respond(
             id,
-            Err(err(codes::INVALID_REQUEST, "jsonrpc must be \"2.0\"")),
+            Err(rpc_error(codes::INVALID_REQUEST, "jsonrpc must be \"2.0\"")),
         );
     }
     respond(id, dispatch(&state, user, &req.method, req.params).await)
@@ -99,7 +106,7 @@ pub(crate) async fn rpc(
 
 fn params<P: DeserializeOwned>(v: Value) -> Result<P, RpcError> {
     serde_json::from_value(v)
-        .map_err(|e| err(codes::INVALID_PARAMS, format!("invalid params: {e}")))
+        .map_err(|e| rpc_error(codes::INVALID_PARAMS, format!("invalid params: {e}")))
 }
 
 fn to_value<R: serde::Serialize>(r: R) -> Result<Value, RpcError> {
@@ -113,7 +120,7 @@ async fn blocking<T: Send + 'static>(
     match tokio::task::spawn_blocking(f).await {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(ServerError::InvalidPath(p))) => {
-            Err(err(codes::INVALID_PATH, format!("invalid path: {p}")))
+            Err(rpc_error(codes::INVALID_PATH, format!("invalid path: {p}")))
         }
         Ok(Err(e)) => Err(internal(e)),
         Err(e) => Err(internal(e)),
@@ -122,33 +129,33 @@ async fn blocking<T: Send + 'static>(
 
 fn write_err(e: WriteError) -> RpcError {
     match e {
-        WriteError::NotFound => err(codes::NOT_FOUND, "not found"),
-        WriteError::InvalidPath(p) => err(codes::INVALID_PATH, format!("invalid path: {p}")),
+        WriteError::NotFound => rpc_error(codes::NOT_FOUND, "not found"),
+        WriteError::InvalidPath(p) => rpc_error(codes::INVALID_PATH, format!("invalid path: {p}")),
         // Details can carry server paths, so they are logged, never sent.
         WriteError::ReadOnly(m) => {
             tracing::warn!(detail = %m, "write refused: read-only");
-            err(
+            rpc_error(
                 codes::READ_ONLY,
                 "sidecar is malformed; fix or remove it to edit",
             )
         }
         WriteError::Busy(m) => {
             tracing::warn!(detail = %m, "write refused: busy");
-            err(codes::BUSY, "another write is in progress; retry")
+            rpc_error(codes::BUSY, "another write is in progress; retry")
         }
-        WriteError::Invalid(m) => err(codes::INVALID_PARAMS, m),
+        WriteError::Invalid(m) => rpc_error(codes::INVALID_PARAMS, m),
         WriteError::Internal(m) => internal(m),
     }
 }
 
 fn upload_err(e: UploadError) -> RpcError {
     match e {
-        UploadError::NotFound => err(codes::NOT_FOUND, "no such upload session"),
-        UploadError::Invalid(m) => err(codes::INVALID_PARAMS, m),
-        UploadError::Quota(m) => err(codes::QUOTA, m),
-        UploadError::Incomplete => err(codes::UPLOAD_INCOMPLETE, "upload is incomplete"),
-        UploadError::HashMismatch => err(codes::HASH_MISMATCH, "file hash does not match"),
-        UploadError::Busy(m) => err(codes::BUSY, m),
+        UploadError::NotFound => rpc_error(codes::NOT_FOUND, "no such upload session"),
+        UploadError::Invalid(m) => rpc_error(codes::INVALID_PARAMS, m),
+        UploadError::Quota(m) => rpc_error(codes::QUOTA, m),
+        UploadError::Incomplete => rpc_error(codes::UPLOAD_INCOMPLETE, "upload is incomplete"),
+        UploadError::HashMismatch => rpc_error(codes::HASH_MISMATCH, "file hash does not match"),
+        UploadError::Busy(m) => rpc_error(codes::BUSY, m),
         UploadError::Io(m) => internal(m),
     }
 }
@@ -226,7 +233,7 @@ async fn dispatch(
             let p: MediaGetParams = params(p)?;
             let cache = state.cache().clone();
             let rec = blocking(move || cache.get_by_id(&p.id)).await?;
-            let rec = rec.ok_or_else(|| err(codes::NOT_FOUND, "not found"))?;
+            let rec = rec.ok_or_else(|| rpc_error(codes::NOT_FOUND, "not found"))?;
             to_value(media_item(rec, user, owner))
         }
         MEDIA_UPDATE => {
@@ -237,7 +244,7 @@ async fn dispatch(
         UPLOAD_CHECK => {
             let p: UploadCheckParams = params(p)?;
             if p.hashes.len() > MAX_CHECK_HASHES {
-                return Err(err(
+                return Err(rpc_error(
                     codes::INVALID_PARAMS,
                     format!("at most {MAX_CHECK_HASHES} hashes per check"),
                 ));
@@ -265,7 +272,7 @@ async fn dispatch(
             let hash: ContentHash = p
                 .file_hash
                 .parse()
-                .map_err(|_| err(codes::INVALID_PARAMS, "file_hash is not a blake3 hash"))?;
+                .map_err(|_| rpc_error(codes::INVALID_PARAMS, "file_hash is not a blake3 hash"))?;
             let store = state.uploads().clone();
             let begun = upload_blocking(move || store.begin(user, p.size, hash)).await?;
             to_value(begun)
@@ -299,12 +306,27 @@ async fn dispatch(
             }
             to_value(result)
         }
-        _ => Err(err(codes::METHOD_NOT_FOUND, "method not found")),
+        _ => {
+            // Not a common method: the app may know it. The extension is synchronous and
+            // may read the cache or files, so it runs off the async threads.
+            let ctx = ExtContext {
+                library: state.library().clone(),
+                cache: state.cache().clone(),
+                user,
+                owner,
+            };
+            let ext = state.extension().clone();
+            let method = method.to_owned();
+            let answer = tokio::task::spawn_blocking(move || ext.rpc(&ctx, &method, p))
+                .await
+                .map_err(internal)?;
+            answer.unwrap_or_else(|| Err(rpc_error(codes::METHOD_NOT_FOUND, "method not found")))
+        }
     }
 }
 
 /// The record as `user` sees it.
-fn media_item(rec: ItemRecord, user: UserId, owner: UserId) -> MediaItem {
+pub fn media_item(rec: ItemRecord, user: UserId, owner: UserId) -> MediaItem {
     let rating = if user == owner {
         rec.sidecar.owner_rating
     } else {

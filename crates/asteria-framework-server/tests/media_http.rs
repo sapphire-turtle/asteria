@@ -468,3 +468,201 @@ async fn symlink_inside_the_library_is_served() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(b, std::fs::read(e.root.join("a.jpg")).unwrap());
 }
+
+/// Accepts audio too; the cover of every track is `cover`, if any.
+struct Music {
+    cover: Option<(String, Vec<u8>)>,
+    none: bool,
+}
+
+impl asteria_framework_server::AppExtension for Music {
+    fn accepts(&self, kind: asteria_framework::MediaKind) -> bool {
+        matches!(
+            kind,
+            asteria_framework::MediaKind::Image | asteria_framework::MediaKind::Audio
+        )
+    }
+    fn thumb_source(
+        &self,
+        _ctx: &asteria_framework_server::ExtContext,
+        rec: &asteria_framework_server::ItemRecord,
+        _abs: &std::path::Path,
+    ) -> asteria_framework_server::ThumbSource {
+        use asteria_framework_server::ThumbSource;
+        if self.none {
+            return ThumbSource::None;
+        }
+        match (&self.cover, rec.kind) {
+            (Some((key, bytes)), asteria_framework::MediaKind::Audio) => ThumbSource::Image {
+                key: key.clone(),
+                bytes: bytes.clone(),
+                ext: "jpg",
+            },
+            _ => ThumbSource::Original,
+        }
+    }
+}
+
+/// A one-second tone of `freq` Hz in FLAC, so each frequency is different content.
+fn flac(e: &Env, name: &str, freq: u32) {
+    let st = std::process::Command::new("ffmpeg")
+        .args(["-nostdin", "-v", "error", "-f", "lavfi", "-i"])
+        .arg(format!("sine=frequency={freq}:duration=1"))
+        .arg("-y")
+        .arg(e.root.join(name))
+        .status()
+        .unwrap();
+    assert!(st.success());
+}
+
+fn rescan(e: &Env, ext: &Music) {
+    asteria_framework_server::scan(&e.lib, &e.cache, ext).unwrap();
+    hash_all(e);
+}
+
+fn has_libopus() -> bool {
+    std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libopus"))
+}
+
+#[tokio::test]
+async fn offline_audio_is_404_for_images() {
+    let e = env();
+    hash_all(&e);
+    let id = item_id(&e, "a.jpg");
+    let (s, _, _) = get(
+        &e.app,
+        Some(&e.owner_token),
+        &format!("/media/{id}/offline-audio"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn offline_audio_is_ogg_with_ranges() {
+    if !have_tool("ffmpeg") || !has_libopus() {
+        return;
+    }
+    let music = || Music {
+        cover: None,
+        none: false,
+    };
+    let e = env_ext(Arc::new(music()));
+    flac(&e, "t.flac", 440);
+    rescan(&e, &music());
+    let id = item_id(&e, "t.flac");
+    let uri = format!("/media/{id}/offline-audio");
+    let (s, h, b) = get(&e.app, Some(&e.owner_token), &uri, None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(h["content-type"], "audio/ogg");
+    assert_eq!(&b[..4], b"OggS");
+    let (s, h, part) = get(&e.app, Some(&e.owner_token), &uri, Some("bytes=0-3")).await;
+    assert_eq!(s, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(h["content-type"], "audio/ogg");
+    assert_eq!(part, b"OggS");
+}
+
+#[tokio::test]
+async fn thumb_source_image_bytes_are_rendered_once_per_key() {
+    if !have_tool("vipsthumbnail") || !have_tool("ffmpeg") {
+        return;
+    }
+    let red = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../asteria-framework/tests/fixtures/red.jpg"),
+    )
+    .unwrap();
+    let music = || Music {
+        cover: Some(("blake3:c0ffee00".into(), red.clone())),
+        none: false,
+    };
+    let e = env_ext(Arc::new(music()));
+    flac(&e, "one.flac", 440);
+    flac(&e, "two.flac", 660);
+    rescan(&e, &music());
+    let (a, b) = (item_id(&e, "one.flac"), item_id(&e, "two.flac"));
+    let (ua, ub) = (format!("/media/{a}/thumb"), format!("/media/{b}/thumb"));
+    let ((s1, h1, b1), (s2, _, b2)) = tokio::join!(
+        get(&e.app, Some(&e.owner_token), &ua, None),
+        get(&e.app, Some(&e.owner_token), &ub, None),
+    );
+    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+    assert_eq!(h1["content-type"], "image/webp");
+    assert!(webp(&b1) && b1 == b2);
+    assert_eq!(e.processor.renders_started(), 1);
+}
+
+#[tokio::test]
+async fn thumb_source_none_is_404_not_422() {
+    let music = || Music {
+        cover: None,
+        none: true,
+    };
+    let e = env_ext(Arc::new(music()));
+    let id = item_id(&e, "a.jpg");
+    let hash = {
+        hash_all(&e);
+        e.cache
+            .get_by_path("a.jpg")
+            .unwrap()
+            .unwrap()
+            .hash
+            .unwrap()
+            .file_hash
+    };
+    let (s, _, _) = get(
+        &e.app,
+        Some(&e.owner_token),
+        &format!("/media/{id}/thumb"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(e.cache.unprocessable(&hash, "thumb").unwrap(), None);
+    assert_eq!(e.processor.renders_started(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn libopus_missing_is_not_unprocessable() {
+    if !have_tool("ffmpeg") {
+        return;
+    }
+    let tools = tempfile::tempdir().unwrap();
+    let fake = script(
+        tools.path(),
+        "ffmpeg.sh",
+        "echo \"Unknown encoder 'libopus'\" >&2\nexit 1",
+    );
+    let music = || Music {
+        cover: None,
+        none: false,
+    };
+    let e =
+        env_with(|t| Processor::with_tools(t, 1, Duration::from_secs(30), "vipsthumbnail", &fake));
+    flac(&e, "t.flac", 440);
+    rescan(&e, &music());
+    let id = item_id(&e, "t.flac");
+    let hash = e
+        .cache
+        .get_by_path("t.flac")
+        .unwrap()
+        .unwrap()
+        .hash
+        .unwrap()
+        .file_hash;
+    let (s, h, _) = get(
+        &e.app,
+        Some(&e.owner_token),
+        &format!("/media/{id}/offline-audio"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(h["retry-after"], "2");
+    assert_eq!(e.cache.unprocessable(&hash, "offline-audio").unwrap(), None);
+}

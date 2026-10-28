@@ -21,6 +21,24 @@ asteria-photos-server serve --config ~/.config/asteria/photos.toml
 - Servers on different hosts may share one library (over NFS, say), such as a production server and a test server. Each has its own journal, cache and unfinished uploads. File watching does not see changes made from another NFS host; they appear after the periodic rescan (every 15 minutes) or `library.rescan`. The duplicate check on upload knows only what this server has scanned. Two servers of the same library on one host are not supported, since they would share the cache and data directories.
 - Thumbnails need `vipsthumbnail` (libvips-tools) and, for videos, `ffmpeg`. Set `RUST_LOG` to change log verbosity (default `info`).
 
+## Running the music server
+
+```sh
+# Create the library (or adopt an existing one) and a config; prints the owner's token once.
+asteria-music-server init --library ~/Music --owner me --config ~/.config/asteria/music.toml
+# Add a token for another user listed in <library>/.asteria/users.toml.
+asteria-music-server token add --config ~/.config/asteria/music.toml --user <USER_ID>
+# Serve (Ctrl-C stops it cleanly).
+asteria-music-server serve --config ~/.config/asteria/music.toml
+```
+
+- The commands, the config, the token handling, the cache and data directories (`asteria-music` in place of `asteria-photos`), the lock and the plain-HTTP warning are the same as for the photos server above. The default address is `127.0.0.1:7811`.
+- It shows the audio files of the library (FLAC, MP3 and the like) along three axes: albums, artists and playlists. Albums and artists are built from the files' tags; a file without tags is still listed, under its file name.
+- Playlists are the `.m3u8` and `.m3u` files in the library. An entry whose file has moved is found again by its content hash when the playlist carries one; an entry that cannot be found is reported as missing.
+- The tags and the playlists are only read. The server never writes to your music files or playlists.
+- The cover of an album is the picture embedded in a track, else an image named `cover`, `folder`, `front` or `album` (`.jpg`, `.jpeg`, `.png` or `.webp`) in the track's folder or, failing that, in the album folder above it (for a disc folder such as `CD1`).
+- Covers need `vipsthumbnail` (libvips-tools). The offline copy of a track (Ogg Opus, for listening where the original is too large) needs `ffmpeg` built with libopus. Without them those requests answer 503 and everything else works.
+
 ## Running the photos client
 
 ```sh

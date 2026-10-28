@@ -937,7 +937,7 @@ mod tests {
         use asteria_framework_api::MediaUpdateParams;
 
         struct Photos;
-        impl crate::MediaFilter for Photos {
+        impl crate::AppExtension for Photos {
             fn accepts(&self, kind: MediaKind) -> bool {
                 matches!(kind, MediaKind::Image | MediaKind::Video)
             }
@@ -1165,7 +1165,7 @@ mod tests {
     }
 
     struct AllMedia;
-    impl crate::MediaFilter for AllMedia {
+    impl crate::AppExtension for AllMedia {
         fn accepts(&self, _: asteria_framework::MediaKind) -> bool {
             true
         }

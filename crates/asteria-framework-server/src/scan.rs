@@ -1,23 +1,21 @@
 //! Incremental library scanner: walks the library, diffs against the cache by
 //! (size, mtime), refreshes sidecar snapshots and removes vanished items.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 
 use asteria_framework::paths::is_sidecar;
-use asteria_framework::{Error as FrameworkError, Library, MediaKind, classify};
+use asteria_framework::{Error as FrameworkError, Library, classify};
 use walkdir::WalkDir;
 
-use crate::cache::{Cache, ItemRecord, SidecarSnapshot, item_id_for};
+use crate::cache::{Cache, ExtraRecord, ItemRecord, SidecarSnapshot, item_id_for};
 use crate::error::ServerError;
+use crate::ext::AppExtension;
 
 const BATCH: usize = 512;
-
-/// Decides which kinds of media an app turns into items.
-pub trait MediaFilter: Send + Sync + 'static {
-    fn accepts(&self, kind: MediaKind) -> bool;
-}
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ScanReport {
@@ -71,7 +69,18 @@ fn target_allowed(canonical_root: &Path, target: &Path) -> bool {
 pub fn scan(
     library: &Library,
     cache: &Cache,
-    filter: &dyn MediaFilter,
+    ext: &dyn AppExtension,
+) -> Result<ScanReport, ServerError> {
+    scan_cancellable(library, cache, ext, &AtomicBool::new(false))
+}
+
+/// [`scan`] that stops between entries once `cancel` is set. A cancelled scan keeps what
+/// it has written but skips the removal pass: unvisited paths are not known to be gone.
+pub fn scan_cancellable(
+    library: &Library,
+    cache: &Cache,
+    ext: &dyn AppExtension,
+    cancel: &AtomicBool,
 ) -> Result<ScanReport, ServerError> {
     let root = library.root();
     // Failing to read the root aborts the scan.
@@ -85,12 +94,21 @@ pub fn scan(
     // Subtrees we could not read: their cached records must not be treated as vanished.
     let mut unreadable: Vec<String> = Vec::new();
     let mut pending: Vec<ItemRecord> = Vec::new();
+    let mut pending_app: Vec<(String, Option<Vec<u8>>)> = Vec::new();
+    let known_extras: HashMap<String, ExtraRecord> = cache.extras()?.into_iter().collect();
+    let mut seen_extras: HashSet<String> = HashSet::new();
+    let mut pending_extras: Vec<(String, ExtraRecord)> = Vec::new();
 
     let mut it = WalkDir::new(root)
         .follow_links(false)
         .sort_by_file_name()
         .into_iter();
+    let mut cancelled = false;
     while let Some(next) = it.next() {
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
         let entry = match next {
             Ok(e) => e,
             Err(e) => {
@@ -130,6 +148,28 @@ pub fn scan(
             continue;
         }
         if is_sidecar(entry.path()) {
+            continue;
+        }
+        if ext.wants_extra(&rel) {
+            if !ft.is_file() {
+                continue;
+            }
+            // Keep a file we cannot stat out of the removal pass.
+            seen_extras.insert(rel.clone());
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    report.skipped.push((rel, e.to_string()));
+                    continue;
+                }
+            };
+            let rec = ExtraRecord {
+                size: meta.len(),
+                mtime_ns: mtime_ns(&meta),
+            };
+            if known_extras.get(&rel) != Some(&rec) {
+                pending_extras.push((rel, rec));
+            }
             continue;
         }
         let meta = if ft.is_symlink() {
@@ -173,7 +213,7 @@ pub fn scan(
                 }
             },
         };
-        if !filter.accepts(kind) {
+        if !ext.accepts(kind) {
             continue;
         }
         let hash = existing
@@ -195,6 +235,10 @@ pub fn scan(
                 continue;
             }
         };
+        // Only a new or (size, mtime)-changed file is extracted; a sidecar edit is not.
+        let extracted = unchanged
+            .is_none()
+            .then(|| extract_guarded(ext, &rel, entry.path()));
         let rec = ItemRecord {
             id: item_id_for(&lib_id, &rel),
             path: rel.clone(),
@@ -211,15 +255,30 @@ pub fn scan(
             Some(old) if old != rec => report.updated += 1,
             Some(_) => continue,
         }
+        if let Some(data) = extracted {
+            pending_app.push((rec.path.clone(), data));
+        }
         pending.push(rec);
         if pending.len() >= BATCH {
-            cache.put_many(&pending)?;
+            cache.put_many_with_app_data(&pending, &pending_app)?;
             pending.clear();
+            pending_app.clear();
         }
     }
     if !pending.is_empty() {
-        cache.put_many(&pending)?;
+        cache.put_many_with_app_data(&pending, &pending_app)?;
     }
+    cache.put_extras(&pending_extras)?;
+    if cancelled {
+        tracing::info!("scan cancelled; skipping the removal pass");
+        cache.flush()?;
+        return Ok(report);
+    }
+    let gone_extras: Vec<String> = known_extras
+        .into_keys()
+        .filter(|p| !seen_extras.contains(p) && !under_any(p, &unreadable))
+        .collect();
+    cache.remove_extras(&gone_extras)?;
 
     let mut gone: Vec<String> = cache
         .all_paths()?
@@ -234,6 +293,15 @@ pub fn scan(
     report.removed = gone.len();
     cache.flush()?;
     Ok(report)
+}
+
+/// A panicking extension must not wedge every later scan at the same file: the panic
+/// counts as "no app data" and the scan goes on.
+fn extract_guarded(ext: &dyn AppExtension, rel: &str, abs: &Path) -> Option<Vec<u8>> {
+    catch_unwind(AssertUnwindSafe(|| ext.extract(rel, abs))).unwrap_or_else(|_| {
+        tracing::warn!(path = %rel, "app extension panicked while extracting; storing no app data");
+        None
+    })
 }
 
 /// The library's `.asteria/library.toml` must still be there and name the same library.

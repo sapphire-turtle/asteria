@@ -1,10 +1,14 @@
-//! Thumbnail rendering with `vipsthumbnail` (images) and `ffmpeg` (videos).
+//! Rendering with `vipsthumbnail` (image thumbnails) and `ffmpeg` (video thumbnails and
+//! offline audio).
 //!
 //! Renders are limited to `max_jobs` at a time, bounded by a timeout (the child is killed),
 //! and shared: concurrent requests for the same `(hash, preset)` wait for one render.
 //! At most `max_jobs * 32` renders are queued or running; beyond that a request gets
 //! [`ProcessError::Busy`]. A queued render whose requests have all gone away is dropped
 //! right away, freeing its queue place without waiting for a slot.
+//!
+//! Offline-audio encodes run in a pool of their own (one at a time, 32 queued), so a long
+//! encode never holds up a thumbnail.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -26,11 +30,15 @@ pub const FFMPEG_ENV: &str = "ASTERIA_FFMPEG";
 
 /// Queued or running renders allowed per render slot.
 const QUEUE_PER_JOB: usize = 32;
+/// Offline-audio encodes that run at once.
+const AUDIO_JOBS: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Preset {
     Thumb,
     Preview,
+    /// Ogg Opus for listening offline; made from audio by ffmpeg.
+    OfflineAudio,
 }
 
 impl Preset {
@@ -39,6 +47,7 @@ impl Preset {
         match name {
             "thumb" => Some(Preset::Thumb),
             "preview" => Some(Preset::Preview),
+            "offline-audio" => Some(Preset::OfflineAudio),
             _ => None,
         }
     }
@@ -47,14 +56,40 @@ impl Preset {
         match self {
             Preset::Thumb => "thumb",
             Preset::Preview => "preview",
+            Preset::OfflineAudio => "offline-audio",
         }
     }
 
-    /// Longest side in pixels.
+    /// Longest side in pixels; 0 for a preset that is not an image.
     pub fn size(self) -> u32 {
         match self {
             Preset::Thumb => 256,
             Preset::Preview => 1920,
+            Preset::OfflineAudio => 0,
+        }
+    }
+
+    /// File extension of the rendered file.
+    pub fn ext(self) -> &'static str {
+        match self {
+            Preset::Thumb | Preset::Preview => "webp",
+            Preset::OfflineAudio => "ogg",
+        }
+    }
+
+    pub fn mime(self) -> &'static str {
+        match self {
+            Preset::Thumb | Preset::Preview => "image/webp",
+            Preset::OfflineAudio => "audio/ogg",
+        }
+    }
+
+    /// How long one render may take: encoding a whole track takes far longer than scaling
+    /// an image, so audio gets ten minutes whatever `default` is.
+    pub fn timeout(self, default: Duration) -> Duration {
+        match self {
+            Preset::OfflineAudio => Duration::from_secs(600),
+            _ => default,
         }
     }
 }
@@ -67,6 +102,10 @@ pub enum ProcessError {
     /// The external tool is not installed.
     #[error("{0} is not installed")]
     ToolMissing(&'static str),
+    /// An offline-audio encode ran out of time. It is not recorded as unprocessable: a long
+    /// file on a busy or slow machine may well finish another time.
+    #[error("the render timed out")]
+    TimedOut,
     #[error("i/o error: {0}")]
     Io(String),
     /// Too many renders are queued; try again shortly.
@@ -78,6 +117,14 @@ type Outcome = Result<PathBuf, ProcessError>;
 /// The sending side of one render's result; waiters `subscribe` to it, so its
 /// `receiver_count` is the number of requests still waiting.
 type Pending = Arc<watch::Sender<Option<Outcome>>>;
+/// What a render reads.
+enum Source {
+    /// A file; `render` checked that the path is absolute.
+    File(PathBuf),
+    /// Image bytes, written to a staged file only if a render actually runs.
+    Bytes { bytes: Vec<u8>, ext: String },
+}
+
 /// Called with `(hash, preset, reason)` when a render fails as unprocessable.
 type Hook = Box<dyn Fn(&str, Preset, &str) + Send + Sync>;
 
@@ -91,9 +138,13 @@ struct Inner {
     thumbs_dir: PathBuf,
     /// Set when the thumbs directory cannot be used; every render then fails with it.
     config_error: Option<String>,
+    /// Slots for thumbnails and previews.
     permits: Semaphore,
+    /// Slots for offline-audio encodes, kept apart so thumbnails never wait for audio.
+    audio_permits: Semaphore,
     queue_limit: usize,
     timeout: Duration,
+    audio_timeout: Duration,
     vips: OsString,
     ffmpeg: OsString,
     /// Renders queued or running, by key. Its length is the queue size.
@@ -171,8 +222,10 @@ impl Processor {
                 thumbs_dir,
                 config_error,
                 permits: Semaphore::new(jobs),
+                audio_permits: Semaphore::new(AUDIO_JOBS),
                 queue_limit: jobs * QUEUE_PER_JOB,
                 timeout,
+                audio_timeout: Preset::OfflineAudio.timeout(timeout),
                 vips: vipsthumbnail.into(),
                 ffmpeg: ffmpeg.into(),
                 inflight: Mutex::new(HashMap::new()),
@@ -181,6 +234,15 @@ impl Processor {
                 tmp_counter: AtomicUsize::new(0),
             }),
         }
+    }
+
+    /// Replaces the time an offline-audio encode may take (by default
+    /// [`Preset::timeout`] of [`Preset::OfflineAudio`]).
+    pub fn with_audio_timeout(mut self, timeout: Duration) -> Processor {
+        Arc::get_mut(&mut self.inner)
+            .expect("a new processor is not shared yet")
+            .audio_timeout = timeout;
+        self
     }
 
     /// Removes stale `.tmp-*` and `.src-*` files that an earlier run left under the thumbs
@@ -214,7 +276,8 @@ impl Processor {
         }
     }
 
-    /// How many renders may be queued or running at once.
+    /// How many thumbnail and preview renders may be queued or running at once. Offline
+    /// audio has a queue of its own.
     pub fn queue_limit(&self) -> usize {
         self.inner.queue_limit
     }
@@ -241,7 +304,7 @@ impl Processor {
                 .thumbs_dir
                 .join(preset.name())
                 .join(&hex[..2])
-                .join(format!("{hex}.webp")),
+                .join(format!("{hex}.{}", preset.ext())),
         )
     }
 
@@ -255,11 +318,44 @@ impl Processor {
         hash: &str,
         preset: Preset,
     ) -> Result<PathBuf, ProcessError> {
-        if let Some(e) = &self.inner.config_error {
-            return Err(ProcessError::Io(e.clone()));
-        }
         if !src.is_absolute() {
             return Err(ProcessError::Io("source path is not absolute".into()));
+        }
+        self.render_source(Source::File(src.to_path_buf()), kind, hash, preset)
+            .await
+    }
+
+    /// Like [`Processor::render`] for an image given as bytes (for example cover art
+    /// embedded in a track). `key` is `blake3:<hex>`, names the result and is what
+    /// single-flight and the render queue count; `ext` is the extension the decoder needs.
+    pub async fn render_image_bytes(
+        &self,
+        bytes: &[u8],
+        ext: &str,
+        key: &str,
+        preset: Preset,
+    ) -> Result<PathBuf, ProcessError> {
+        let ext: String = ext
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(8)
+            .collect();
+        let src = Source::Bytes {
+            bytes: bytes.to_vec(),
+            ext: if ext.is_empty() { "bin".into() } else { ext },
+        };
+        self.render_source(src, MediaKind::Image, key, preset).await
+    }
+
+    async fn render_source(
+        &self,
+        src: Source,
+        kind: MediaKind,
+        hash: &str,
+        preset: Preset,
+    ) -> Result<PathBuf, ProcessError> {
+        if let Some(e) = &self.inner.config_error {
+            return Err(ProcessError::Io(e.clone()));
         }
         let out = self
             .thumb_path(hash, preset)
@@ -273,20 +369,19 @@ impl Processor {
             match map.get(&key) {
                 Some(tx) => tx.subscribe(),
                 None => {
-                    if map.len() >= self.inner.queue_limit {
+                    let audio = is_audio(preset);
+                    let limit = if audio {
+                        AUDIO_JOBS * QUEUE_PER_JOB
+                    } else {
+                        self.inner.queue_limit
+                    };
+                    if map.keys().filter(|k| is_audio(k.1) == audio).count() >= limit {
                         return Err(ProcessError::Busy);
                     }
                     let (tx, rx) = watch::channel(None);
                     let tx = Arc::new(tx);
                     map.insert(key.clone(), tx.clone());
-                    tokio::spawn(render_task(
-                        self.inner.clone(),
-                        key,
-                        tx,
-                        src.to_path_buf(),
-                        kind,
-                        out,
-                    ));
+                    tokio::spawn(render_task(self.inner.clone(), key, tx, src, kind, out));
                     rx
                 }
             }
@@ -309,7 +404,7 @@ async fn render_task(
     inner: Arc<Inner>,
     key: (String, Preset),
     tx: Pending,
-    src: PathBuf,
+    src: Source,
     kind: MediaKind,
     out: PathBuf,
 ) {
@@ -320,10 +415,15 @@ async fn render_task(
     };
     // Wait for a slot, but give up as soon as nobody waits for the result, so an abandoned
     // render does not hold its queue place until a slot frees up.
+    let permits = if is_audio(key.1) {
+        &inner.audio_permits
+    } else {
+        &inner.permits
+    };
     let permit = loop {
         tokio::select! {
             biased;
-            permit = inner.permits.acquire() => match permit {
+            permit = permits.acquire() => match permit {
                 Ok(p) => break p,
                 Err(e) => {
                     tx.send_replace(Some(Err(ProcessError::Io(e.to_string()))));
@@ -342,7 +442,7 @@ async fn render_task(
     if abandon_if_unwatched(&inner, &key, &tx) {
         return;
     }
-    let result = inner.render_once(&src, kind, &out, key.1).await;
+    let result = inner.render_once(src, kind, &out, key.1).await;
     drop(permit);
     if let Err(ProcessError::Unprocessable(reason)) = &result
         && inner.on_unprocessable.get().is_some()
@@ -361,6 +461,11 @@ async fn render_task(
     // `send_replace` stores the result even with no receiver: a request may subscribe after
     // the last one left but before `Unregister` removes the entry, and must still see it.
     tx.send_replace(Some(result));
+}
+
+/// Whether `preset` renders in the offline-audio pool.
+fn is_audio(preset: Preset) -> bool {
+    preset == Preset::OfflineAudio
 }
 
 /// Removes the render's entry and returns `true` if no request waits for it any more.
@@ -411,7 +516,7 @@ async fn link_or_copy(src: &Path, dest: &Path) -> std::io::Result<()> {
 impl Inner {
     async fn render_once(
         &self,
-        src: &Path,
+        src: Source,
         kind: MediaKind,
         out: &Path,
         preset: Preset,
@@ -427,22 +532,38 @@ impl Inner {
             .map_err(|e| ProcessError::Io(e.to_string()))?;
         let n = self.tmp_counter.fetch_add(1, Ordering::SeqCst);
         let pid = std::process::id();
-        // The tool picks the format from the extension, so the temporary name ends in `.webp`.
-        let tmp = dir.join(format!(".tmp-{pid}-{n}.webp"));
+        // The tool picks the format from the extension, so the temporary name ends in the
+        // preset's.
+        let tmp = dir.join(format!(".tmp-{pid}-{n}.{}", preset.ext()));
         let mut cleanup = Cleanup(vec![tmp.clone()]);
-        let result = match kind {
-            MediaKind::Image => {
+        let result = match (kind, preset, &src) {
+            (MediaKind::Image, Preset::Thumb | Preset::Preview, _) => {
                 // libvips reads a trailing `[...]` of a file name as loader options, so it
                 // gets the image under a name we chose.
-                let link = dir.join(format!(".src-{pid}-{n}.{}", safe_ext(src)));
-                cleanup.0.push(link.clone());
-                match link_or_copy(src, &link).await {
-                    Ok(()) => self.run_vips(&link, &tmp, preset).await,
+                let ext = match &src {
+                    Source::File(path) => safe_ext(path),
+                    Source::Bytes { ext, .. } => ext.clone(),
+                };
+                let staged = dir.join(format!(".src-{pid}-{n}.{ext}"));
+                cleanup.0.push(staged.clone());
+                let put = match &src {
+                    Source::File(path) => link_or_copy(path, &staged).await,
+                    Source::Bytes { bytes, .. } => tokio::fs::write(&staged, bytes).await,
+                };
+                match put {
+                    Ok(()) => self.run_vips(&staged, &tmp, preset).await,
                     Err(e) => Err(ProcessError::Io(format!("cannot stage the source: {e}"))),
                 }
             }
-            MediaKind::Video => self.run_ffmpeg(src, &tmp, preset).await,
-            _ => Err(ProcessError::Unprocessable("not an image or video".into())),
+            (MediaKind::Video, Preset::Thumb | Preset::Preview, Source::File(path)) => {
+                self.run_ffmpeg(path, &tmp, preset).await
+            }
+            (MediaKind::Audio, Preset::OfflineAudio, Source::File(path)) => {
+                self.run_ffmpeg_audio(path, &tmp).await
+            }
+            _ => Err(ProcessError::Unprocessable(
+                "cannot render this kind of media with this preset".into(),
+            )),
         };
         match result {
             Ok(()) => tokio::fs::rename(&tmp, out)
@@ -466,7 +587,7 @@ impl Inner {
             .arg("srgb")
             .arg("-o")
             .arg(dest);
-        run_tool(cmd, "vipsthumbnail", self.timeout, tmp).await
+        run_tool(cmd, "vipsthumbnail", preset.timeout(self.timeout), tmp).await
     }
 
     async fn run_ffmpeg(&self, src: &Path, tmp: &Path, preset: Preset) -> Result<(), ProcessError> {
@@ -492,12 +613,34 @@ impl Inner {
             cmd
         };
         // Both attempts share one timeout budget.
-        let deadline = Instant::now() + self.timeout;
-        match run_tool(attempt("1"), "ffmpeg", self.timeout, tmp).await {
+        let timeout = preset.timeout(self.timeout);
+        let deadline = Instant::now() + timeout;
+        match run_tool(attempt("1"), "ffmpeg", timeout, tmp).await {
             Err(ProcessError::Unprocessable(reason)) if reason != "timeout" => {
                 // Shorter than one second: seeking past the end yields no frame.
                 let left = deadline.saturating_duration_since(Instant::now());
                 run_tool(attempt("0"), "ffmpeg", left, tmp).await
+            }
+            other => other,
+        }
+    }
+
+    /// Transcodes the first audio stream to Ogg Opus without tags or cover art.
+    async fn run_ffmpeg_audio(&self, src: &Path, tmp: &Path) -> Result<(), ProcessError> {
+        let mut cmd = Command::new(&self.ffmpeg);
+        cmd.args(["-nostdin", "-v", "error", "-y"])
+            // As for video: plain files in ordinary audio containers only.
+            .args(["-protocol_whitelist", "file"])
+            .args(["-format_whitelist", "flac,mp3,mov,mp4,m4a,ogg,wav,aac"])
+            .arg("-i")
+            .arg(src)
+            .args(["-map", "0:a:0", "-map_metadata", "-1", "-vn"])
+            .args(["-c:a", "libopus", "-b:a", "96k", "-vbr", "on", "-f", "ogg"])
+            .arg(tmp);
+        match run_tool(cmd, "ffmpeg", self.audio_timeout, tmp).await {
+            Err(ProcessError::Unprocessable(reason)) if reason == "timeout" => {
+                tracing::warn!("an offline-audio encode timed out; not recording it");
+                Err(ProcessError::TimedOut)
             }
             other => other,
         }
@@ -577,6 +720,13 @@ async fn run_tool(
             .map(str::trim)
             .find(|l| !l.is_empty() && !l.contains("VIPS-WARNING"))
             .unwrap_or("no error output");
+        if name == "ffmpeg"
+            && (stderr.contains("Unknown encoder 'libopus'")
+                || stderr.contains("Encoder libopus not found"))
+        {
+            tracing::error!("this ffmpeg was built without libopus");
+            return Err(ProcessError::ToolMissing("ffmpeg with libopus"));
+        }
         if is_io_failure(&stderr) {
             return Err(ProcessError::Io(format!(
                 "{name} failed ({status}): {detail}"

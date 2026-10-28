@@ -21,6 +21,24 @@ asteria-photos-server serve --config ~/.config/asteria/photos.toml
 - 別々のホストのサーバーが、1つのライブラリを（NFS などで）共有してよい（本番と試験用のサーバーなど）。ジャーナル、キャッシュ、未完了のアップロードはサーバーごとに持つ。ファイルの監視はほかの NFS ホストからの変更に気づかないので、そうした変更は定期的な再スキャン（15分ごと）か `library.rescan` で反映される。アップロードの重複の確認は、そのサーバーがスキャンしたものしか知らない。同じホストで同じライブラリのサーバーを2つ動かすことはできない（キャッシュとデータディレクトリを共有してしまう）。
 - サムネイルには `vipsthumbnail`（libvips-tools）、動画には `ffmpeg` が必要。ログは `RUST_LOG` で調整（既定 `info`）。
 
+## music サーバーの起動
+
+```sh
+# ライブラリ（既存でも可）と設定ファイルを作り、所有者のトークンを一度だけ表示する。
+asteria-music-server init --library ~/Music --owner me --config ~/.config/asteria/music.toml
+# <library>/.asteria/users.toml にいる別のユーザーのトークンを追加する。
+asteria-music-server token add --config ~/.config/asteria/music.toml --user <USER_ID>
+# 起動する（Ctrl-C で安全に停止）。
+asteria-music-server serve --config ~/.config/asteria/music.toml
+```
+
+- コマンド、設定ファイル、トークンの扱い、キャッシュとデータのディレクトリ（`asteria-photos` の代わりに `asteria-music`）、ロック、素の HTTP についての注意は、上の photos サーバーと同じ。既定の待ち受けは `127.0.0.1:7811`。
+- ライブラリの音声ファイル（FLAC、MP3 など）を、アルバム、アーティスト、プレイリストの3つの軸で見られる。アルバムとアーティストはファイルのタグから作る。タグのないファイルも、ファイル名で一覧に出る。
+- プレイリストは、ライブラリ内の `.m3u8` と `.m3u` のファイル。ファイルが移動したエントリは、プレイリストにコンテンツハッシュがあればそれで見つけ直す。見つからないエントリは「見つからない」として返す。
+- タグとプレイリストは読むだけ。サーバーが音楽ファイルやプレイリストに書き込むことはない。
+- アルバムのジャケットは、トラックに埋め込まれた画像、なければトラックのフォルダ、そこになければその上のアルバムのフォルダ（`CD1` のようなディスクのフォルダの場合）にある `cover`、`folder`、`front`、`album` という名前の画像（`.jpg`、`.jpeg`、`.png`、`.webp`）。
+- ジャケットには `vipsthumbnail`（libvips-tools）が必要。トラックのオフライン用の音声（Ogg Opus。原本が大きすぎる場所で聴くためのもの）には、libopus 付きでビルドされた `ffmpeg` が必要。どちらもなければ、その要求は 503 を返し、ほかは普通に動く。
+
 ## photos クライアントの起動
 
 ```sh

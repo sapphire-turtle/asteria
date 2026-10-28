@@ -2,7 +2,8 @@
 //! events, `library.rescan` triggers and a periodic timer.
 //!
 //! Shutdown: cancel the [`CancellationToken`] in [`ScanLoop::shutdown`]. The loop then sets the
-//! `hash_pending` cancel flag (so a long hashing pass stops promptly) and exits.
+//! cancel flag shared by `scan_cancellable` and `hash_pending` (so a long pass stops
+//! promptly between files) and exits.
 //!
 //! Coalescing: the trigger channel is drained just before a pass starts, so any number of
 //! triggers arriving while a pass runs cause exactly one more pass.
@@ -20,7 +21,8 @@ use tokio::time::{Instant, sleep, sleep_until};
 use tokio_util::sync::CancellationToken;
 
 use crate::cache::Cache;
-use crate::scan::{MediaFilter, scan};
+use crate::ext::AppExtension;
+use crate::scan::scan_cancellable;
 use crate::writer::Writer;
 
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -29,7 +31,7 @@ pub const DEFAULT_PERIOD: Duration = Duration::from_secs(15 * 60);
 pub struct ScanLoop {
     pub library: Arc<Library>,
     pub cache: Arc<Cache>,
-    pub filter: Arc<dyn MediaFilter>,
+    pub extension: Arc<dyn AppExtension>,
     pub writer: Writer,
     pub scanning: Arc<AtomicBool>,
     pub trigger: mpsc::Receiver<()>,
@@ -171,14 +173,14 @@ async fn run(mut s: ScanLoop) {
 
 async fn pass(s: &ScanLoop, cancel: &Arc<AtomicBool>) {
     s.scanning.store(true, Ordering::SeqCst);
-    let (library, cache, filter, flag) = (
+    let (library, cache, extension, flag) = (
         s.library.clone(),
         s.cache.clone(),
-        s.filter.clone(),
+        s.extension.clone(),
         cancel.clone(),
     );
     let res = tokio::task::spawn_blocking(move || {
-        let report = scan(&library, &cache, filter.as_ref())?;
+        let report = scan_cancellable(&library, &cache, extension.as_ref(), &flag)?;
         let hashed = crate::hashing::hash_pending(&library, &cache, &flag)?;
         Ok::<_, crate::error::ServerError>((report, hashed))
     })

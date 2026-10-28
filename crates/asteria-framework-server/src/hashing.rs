@@ -380,12 +380,13 @@ fn same_file(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scan::{MediaFilter, scan};
+    use crate::ext::AppExtension;
+    use crate::scan::scan;
     use asteria_framework::MediaKind;
     use std::time::{Duration, SystemTime};
 
     struct All;
-    impl MediaFilter for All {
+    impl AppExtension for All {
         fn accepts(&self, _: MediaKind) -> bool {
             true
         }

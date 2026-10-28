@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use asteria_framework::{Library, MediaKind};
 use asteria_framework_api::MediaUpdateParams;
-use asteria_framework_server::{Cache, MediaFilter, ScanLoop, spawn_scan_loop, spawn_writer};
+use asteria_framework_server::{AppExtension, Cache, ScanLoop, spawn_scan_loop, spawn_writer};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -18,7 +18,7 @@ struct Gate {
     release: Mutex<bool>,
     cv: std::sync::Condvar,
 }
-impl MediaFilter for Gate {
+impl AppExtension for Gate {
     fn accepts(&self, kind: MediaKind) -> bool {
         if self.armed.load(Ordering::SeqCst) {
             self.entered.store(true, Ordering::SeqCst);
@@ -79,7 +79,7 @@ fn start_with(setup: impl FnOnce(&Path), trigger_cap: usize) -> Env {
     let handle = spawn_scan_loop(ScanLoop {
         library: lib.clone(),
         cache: cache.clone(),
-        filter: gate.clone(),
+        extension: gate.clone(),
         writer: writer.clone(),
         scanning: scanning.clone(),
         trigger: rx,

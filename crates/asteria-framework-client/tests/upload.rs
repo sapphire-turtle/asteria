@@ -20,7 +20,7 @@ use asteria_framework_client::upload::queue::{GroupState, QueuedGroup, UploadQue
 use asteria_framework_client::upload::{UploadSnapshot, UploadsState, set_retry_backoff};
 use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
-    AppState, Cache, MediaFilter, Processor, ServerConfig, TokenEntry, Tokens, hash_pending,
+    AppExtension, AppState, Cache, Processor, ServerConfig, TokenEntry, Tokens, hash_pending,
     new_token, router, scan, spawn_writer, token_hash,
 };
 use axum::http::{Method, StatusCode};
@@ -34,7 +34,7 @@ use common::{
 const CHUNK: usize = 8 * 1024 * 1024;
 
 struct Photos;
-impl MediaFilter for Photos {
+impl AppExtension for Photos {
     fn accepts(&self, kind: MediaKind) -> bool {
         matches!(kind, MediaKind::Image | MediaKind::Video)
     }
