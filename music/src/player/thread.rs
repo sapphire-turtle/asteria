@@ -96,35 +96,57 @@ fn run(
                 Err(_) => return,
             },
         };
+        let handled = matches!(message, Some(Message::Command(_)));
         match message {
             Some(Message::Quit) => return,
             Some(Message::Command(c)) => engine.handle(c),
             None => {}
         }
         wait = engine.pump();
-        publish(&engine, &shared, &ctx, &mut last_repaint);
+        publish(&engine, &shared, &ctx, &mut last_repaint, handled);
     }
 }
 
-/// Copies the engine's state to `shared` when it changed, and repaints.
+/// Copies the engine's state to `shared` when it changed, and repaints. The queue only
+/// changes when a command is handled, so after a plain pump (`handled` false) it is neither
+/// compared nor cloned: the other fields are copied one by one.
 fn publish(
     engine: &Engine,
     shared: &Mutex<PlayerState>,
     ctx: &egui::Context,
     last_repaint: &mut Instant,
+    handled: bool,
 ) {
     let now = engine.state();
     let mut s = lock(shared);
-    if *s == *now {
-        return;
+    let only_position;
+    if handled {
+        if *s == *now {
+            return;
+        }
+        only_position = s.queue == now.queue
+            && s.current == now.current
+            && s.status == now.status
+            && s.duration_ms == now.duration_ms
+            && s.volume == now.volume
+            && s.error == now.error;
+        *s = now.clone();
+    } else {
+        only_position = s.current == now.current
+            && s.status == now.status
+            && s.duration_ms == now.duration_ms
+            && s.volume == now.volume
+            && s.error == now.error;
+        if only_position && s.position_ms == now.position_ms {
+            return;
+        }
+        s.current = now.current;
+        s.status = now.status;
+        s.position_ms = now.position_ms;
+        s.duration_ms = now.duration_ms;
+        s.volume = now.volume;
+        s.error.clone_from(&now.error);
     }
-    let only_position = s.queue == now.queue
-        && s.current == now.current
-        && s.status == now.status
-        && s.duration_ms == now.duration_ms
-        && s.volume == now.volume
-        && s.error == now.error;
-    *s = now.clone();
     drop(s);
     if !only_position || last_repaint.elapsed() >= POSITION_REPAINT {
         *last_repaint = Instant::now();
@@ -171,6 +193,9 @@ mod tests {
         });
         let s = wait_for(&p, |s| s.status == Status::Playing);
         assert_eq!(s.queue.len(), 2);
+        p.send(Command::Append(vec![entry("c")]));
+        let s = wait_for(&p, |s| s.queue.len() == 3);
+        assert_eq!(s.queue.len(), 3);
         assert_eq!(s.current, Some(1));
         assert!(outs.current().is_some());
         p.send(Command::SetVolume(0.5));

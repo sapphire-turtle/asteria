@@ -106,6 +106,7 @@ impl RingWriter {
         self.shared.played.load(Ordering::Acquire)
     }
 
+    // A callback already in flight may still play up to one device period of pre-clear audio (accepted).
     /// Drops what is buffered: the callback skips everything written so far.
     pub fn clear(&mut self) {
         self.shared.flush_to.store(self.written, Ordering::Release);
@@ -113,6 +114,7 @@ impl RingWriter {
 }
 
 impl RingReader {
+    // NaN is played as silence; a clear() racing a running callback is accepted (see `RingWriter::clear`).
     /// Fills `out` from the ring, converting from f32. Silence when paused or dry.
     pub fn fill<T: Sample + FromSample<f32>>(&mut self, out: &mut [T], playing: bool) {
         let flush_to = self.shared.flush_to.load(Ordering::Acquire);
@@ -132,7 +134,7 @@ impl RingReader {
             {
                 let (a, b) = chunk.as_slices();
                 for (d, s) in out.iter_mut().zip(a.iter().chain(b)) {
-                    *d = T::from_sample(s.clamp(-1.0, 1.0));
+                    *d = T::from_sample(if s.is_nan() { 0.0 } else { s.clamp(-1.0, 1.0) });
                 }
                 chunk.commit_all();
                 self.read += n as u64;
