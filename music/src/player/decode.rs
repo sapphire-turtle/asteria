@@ -119,7 +119,7 @@ impl SeekStart for Box<dyn MediaSource> {
 
 // ---------------------------------------------------------------- symphonia
 
-/// Decode errors in a row that are skipped before the track counts as damaged.
+/// Decode errors in a row that are skipped before the track counts as damaged (both paths).
 const MAX_BAD_PACKETS: u32 = 10;
 
 struct SymphoniaTrack {
@@ -432,19 +432,32 @@ fn last_granule(
     io::Seek::seek(src, SeekFrom::Start(from))?;
     let mut tail = Vec::new();
     src.take(TAIL as u64).read_to_end(&mut tail)?;
-    let granule = tail
-        .windows(14)
-        .enumerate()
-        .rev()
-        .filter(|(_, w)| &w[..4] == b"OggS")
-        .map(|(_, w)| u64::from_le_bytes(w[6..14].try_into().expect("8 bytes")))
-        .find(|g| *g != u64::MAX);
+    let granule = scan_last_granule(&tail);
     reader.seek_bytes(SeekFrom::Start(0))?;
     // Past the two header packets again.
     for _ in 0..2 {
         reader.read_packet()?;
     }
     Ok(granule)
+}
+
+/// The granule position of the last complete, valid Ogg page in `tail` (a header that
+/// checks out and a body that fits), so a chance `OggS` in compressed data is not taken.
+fn scan_last_granule(tail: &[u8]) -> Option<u64> {
+    (0..tail.len().saturating_sub(26)).rev().find_map(|i| {
+        let h = &tail[i..];
+        if &h[..4] != b"OggS" || h[4] != 0 || h[5] & !0x07 != 0 {
+            return None;
+        }
+        let segs = usize::from(h[26]);
+        let table = h.get(27..27 + segs)?;
+        let body: usize = table.iter().map(|b| usize::from(*b)).sum();
+        if h.len() < 27 + segs + body {
+            return None;
+        }
+        let granule = u64::from_le_bytes(h[6..14].try_into().expect("8 bytes"));
+        (granule != u64::MAX).then_some(granule)
+    })
 }
 
 impl TrackDecoder for OpusTrack {
@@ -463,6 +476,7 @@ impl TrackDecoder for OpusTrack {
 
     fn next_block(&mut self) -> Result<Option<Vec<f32>>, DecodeError> {
         let mut buf = vec![0f32; MAX_PACKET_SAMPLES * self.channels];
+        let mut bad = 0;
         loop {
             if self.ended || self.final_granule.is_some_and(|g| self.cursor >= g) {
                 return Ok(None);
@@ -477,10 +491,21 @@ impl TrackDecoder for OpusTrack {
                     }
                 },
             };
-            let n = self
-                .decoder
-                .decode(&data, MAX_PACKET_SAMPLES, &mut buf)
-                .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
+            let n = match self.decoder.decode(&data, MAX_PACKET_SAMPLES, &mut buf) {
+                Ok(n) => {
+                    bad = 0;
+                    n
+                }
+                Err(e) => {
+                    bad += 1;
+                    if bad >= MAX_BAD_PACKETS {
+                        return Err(DecodeError::Corrupt(e.to_string()));
+                    }
+                    // Skipped, but its time still passes.
+                    self.cursor += opus_pure::packet::samples_48k(&data).unwrap_or(0) as u64;
+                    continue;
+                }
+            };
             let first = self.cursor;
             self.cursor += n as u64;
             let end = self
@@ -546,5 +571,34 @@ impl TrackDecoder for OpusTrack {
             }
         }
         Ok(ms)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scan_last_granule;
+
+    fn page(granule: u64, body: &[u8]) -> Vec<u8> {
+        let mut p = b"OggS".to_vec();
+        p.extend([0, 0]);
+        p.extend(granule.to_le_bytes());
+        p.extend([0; 12]);
+        p.push(1);
+        p.push(body.len() as u8);
+        p.extend(body);
+        p
+    }
+
+    #[test]
+    fn a_fake_page_marker_in_the_payload_is_not_a_page() {
+        let mut fake = b"OggS".to_vec();
+        fake.extend([7; 40]); // version byte 7, and no room for its body
+        let mut tail = page(1000, &[1; 20]);
+        tail.extend(page(2000, &fake));
+        assert_eq!(scan_last_granule(&tail), Some(2000));
+        // The marker after the last page's end, at the tail of the data, is skipped too.
+        tail.extend(b"OggS\0\0");
+        tail.extend([9; 30]);
+        assert_eq!(scan_last_granule(&tail), Some(2000));
     }
 }

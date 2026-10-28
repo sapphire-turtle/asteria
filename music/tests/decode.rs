@@ -134,3 +134,31 @@ fn same_rate_passes_through() {
     assert_eq!(c.process(&block), block);
     assert!(c.flush().is_empty());
 }
+
+#[test]
+fn flush_makes_the_output_exactly_as_long_as_the_ratio_says() {
+    for (from, to, frames) in [
+        (44_100u32, 48_000u32, 10_000usize),
+        (48_000, 44_100, 10_007),
+    ] {
+        let mut c = Converter::new(
+            from,
+            2,
+            OutputConfig {
+                sample_rate: to,
+                channels: 2,
+            },
+        )
+        .unwrap();
+        let block: Vec<f32> = (0..frames * 2)
+            .map(|i| ((i / 2) as f32 * 0.05).sin())
+            .collect();
+        let mut out = Vec::new();
+        for part in block.chunks(2 * 777) {
+            out.extend(c.process(part));
+        }
+        out.extend(c.flush());
+        let want = (frames as f64 * f64::from(to) / f64::from(from)).round() as usize;
+        assert_eq!(out.len() / 2, want, "{from} -> {to}");
+    }
+}
