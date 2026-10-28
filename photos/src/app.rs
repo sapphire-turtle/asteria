@@ -593,7 +593,6 @@ impl State {
 /// How long the status bar keeps a notice.
 const NOTICE_FOR: Duration = Duration::from_secs(8);
 
-/// What a connection depends on: the server, its address and its token (not its name).
 /// A saver that writes `servers.toml` on the thread `photos-servers-save`.
 fn spawn_saver(path: PathBuf, ctx: egui::Context) -> std::io::Result<Saver<Profiles>> {
     Saver::spawn("photos-servers-save", ctx, move |profiles: &Profiles| {
@@ -605,6 +604,7 @@ fn spawn_saver(path: PathBuf, ctx: egui::Context) -> std::io::Result<Saver<Profi
     })
 }
 
+/// What a connection depends on: the server, its address and its token (not its name).
 fn endpoint(p: Option<&ServerProfile>) -> Option<(ProfileId, String, Token)> {
     p.map(|p| (p.id, p.url.as_str().to_string(), p.token.clone()))
 }

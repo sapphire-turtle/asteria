@@ -84,8 +84,7 @@ impl ServerSwitcher<'_> {
             egui::Button::image_and_text(dot, name.as_str())
         };
         let active = profiles.active().map(|p| p.id);
-        let servers: Vec<(ProfileId, String)> = self
-            .profiles
+        let servers: Vec<(ProfileId, String)> = profiles
             .servers
             .iter()
             .map(|p| (p.id, p.name.clone()))
