@@ -42,3 +42,12 @@ asteria-client-servers-error-library-changed = サーバーのライブラリが
 asteria-client-servers-error-server = サーバーがエラーを返しました
 asteria-client-servers-error-protocol = サーバーの応答を読み取れません
 asteria-client-servers-error-local = この端末で問題が起きました
+
+# The server switcher in the status bar.
+asteria-client-status-none = サーバーなし
+asteria-client-status-connected = 接続済み
+asteria-client-status-connecting = 接続中
+asteria-client-status-failed = 接続できません：{ $reason }
+asteria-client-status-degraded = 応答がありません：{ $reason }
+asteria-client-status-manage = サーバーを管理…
+asteria-client-status-hover = { $name }：{ $status }
