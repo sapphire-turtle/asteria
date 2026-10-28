@@ -10,6 +10,7 @@ pub mod decode;
 pub mod engine;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fakes;
+pub mod feed;
 pub mod resample;
 pub mod stream;
 #[cfg(test)]

@@ -35,6 +35,8 @@ pub struct Script {
 }
 
 pub struct Recorded {
+    /// The request path.
+    pub path: String,
     /// The `Range` header's value.
     pub range: Option<String>,
     pub at: Instant,
@@ -105,6 +107,16 @@ impl TestServer {
             .collect()
     }
 
+    pub fn paths(&self) -> Vec<String> {
+        self.inner
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.path.clone())
+            .collect()
+    }
+
     pub fn times(&self) -> Vec<Instant> {
         self.inner
             .log
@@ -138,7 +150,11 @@ pub fn pseudo_random(len: usize, seed: u64) -> Vec<u8> {
         .collect()
 }
 
-async fn serve(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Response {
+async fn serve(
+    State(inner): State<Arc<Inner>>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
     let s = &inner.script;
     let range = headers
         .get(header::RANGE)
@@ -147,6 +163,7 @@ async fn serve(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Response 
     let n = {
         let mut log = inner.log.lock().unwrap();
         log.push(Recorded {
+            path: uri.path().to_owned(),
             range: range.clone(),
             at: Instant::now(),
         });

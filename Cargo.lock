@@ -395,6 +395,7 @@ dependencies = [
  "asteria-framework-client",
  "asteria-music-api",
  "axum",
+ "getrandom 0.4.3",
  "ogg",
  "opus-pure",
  "reqwest",

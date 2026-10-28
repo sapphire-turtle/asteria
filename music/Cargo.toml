@@ -27,6 +27,7 @@ symphonia.workspace = true
 ogg.workspace = true
 opus-pure.workspace = true
 rubato.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
