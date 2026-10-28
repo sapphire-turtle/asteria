@@ -9,6 +9,9 @@ use url::Url;
 pub mod engine;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fakes;
+pub mod stream;
+#[cfg(test)]
+mod test_server;
 
 /// A track gets this many ms of play before "previous" restarts it rather than going back.
 pub const RESTART_AFTER_MS: u64 = 3_000;

@@ -22,3 +22,10 @@ asteria-framework-client = { path = "../crates/asteria-framework-client" }
 asteria-music-api = { path = "../crates/asteria-music-api" }
 tracing.workspace = true
 url.workspace = true
+reqwest.workspace = true
+symphonia.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tempfile.workspace = true
