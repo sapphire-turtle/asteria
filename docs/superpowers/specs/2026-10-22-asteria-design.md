@@ -88,7 +88,7 @@ project-asteria/
 | EXIF | nom-exif 系 |
 | 画像・動画・音声の変換 | ffmpeg、libvips（`vips` コマンド）を子プロセスとして呼ぶ |
 | 音声デコードと出力（クライアント） | symphonia、opus-pure（Opus）、cpal、rubato（サンプルレートの変換） |
-| OS のメディアキーと再生中の表示（デスクトップ） | souvlaki（Linux は zbus で MPRIS） |
+| OS のメディアキーと再生中の表示 | corundum-framework のメディアセッション（sapphire-turtle/corundum-framework#50） |
 | iOS の OS 機能 | objc2-photos、objc2-avf-audio、objc2-media-player、block2 |
 | ハッシュ | BLAKE3 |
 
@@ -568,11 +568,11 @@ music-server は photos-server と同じ形のバイナリで、`AppExtension` �
 | トークンが通らない（401） | 一時停止し、セッションの「認証されていない」表示に任せる |
 
 **OS との連携**
-- デスクトップでは souvlaki で、メディアキー、Linux の MPRIS（zbus を使い、D-Bus の C ライブラリは要らない）、Windows の SMTC、macOS の Now Playing に対応する。押されたキーはエンジンへのコマンドにし、いまの曲と状態を OS に渡す。
-- iOS
-  - AVAudioSession：再生用のカテゴリに設定し、着信などによる中断と、イヤホンを抜いたときの出力先の変化に対応する。
-  - MPNowPlayingInfoCenter と MPRemoteCommandCenter：ロック画面とコントロールセンターに対応する。
-  - Info.plist に `UIBackgroundModes = audio` を設定する。
+- OS ごとの API を直接使う機能は corundum-framework に置き、まとめて実装とテストをする（2026-10-28 決定）。
+- メディアキー、OS の「再生中」の表示（Linux の MPRIS、Windows の SMTC、macOS と iOS の Now Playing とリモートコマンド）、iOS の AVAudioSession（再生用のカテゴリ、中断、出力先の変化）は、corundum のメディアセッション（sapphire-turtle/corundum-framework#50）を使う。それができるまで、music はアプリの中のボタンだけで操作する。
+- エンジンには、いまの曲と状態を外に渡す口と、外からのコマンドを受ける口（UI と同じコマンド）を持たせておき、メディアセッションはそこにつなぐ。
+- iOS のバックグラウンド再生には、Info.plist に `UIBackgroundModes = audio` を設定する。
+- 音声の出力（cpal）は、OS ごとのコードを書かずに使えるので、asteria から直接使う。
 
 ### 5.5 プラットフォーム差
 
@@ -636,7 +636,7 @@ music-server は photos-server と同じ形のバイナリで、`AppExtension` �
   - 取得は、同じプロセスで動かす Range 対応のテスト用サーバー（遅らせる、途中で切る、503 を返す）で、読んだバイト列が原本と一致すること、未取得の位置へのシークで取り直すこと、止まった取得が失敗になること、一時ファイルが消えることを確かめる。
   - デコードは、リポジトリのテスト用ファイル（FLAC、MP3、M4A、Ogg Vorbis/Opus）で、長さ、サンプルレート、チャンネル数、シークを確かめる。サンプルの完全一致は求めない（デコーダーで最後の数ビットが違うことがあるため）。
   - エンジンは偽の出力と進めた時刻で、キューの操作、次の曲への移行と最後での停止、前の曲の規則、再生できない曲の飛ばし方、通信エラーでの一時停止と再開、サーバーの切り替えを確かめる。
-  - 実際の出力デバイスと OS のメディアキーは、PR のチェックリストで手動で確かめる。CI では偽の出力だけを使い、Linux のジョブには ALSA の開発用パッケージを入れる。
+  - 実際の出力デバイスは、PR のチェックリストで手動で確かめる。CI では偽の出力だけを使い、Linux のジョブには ALSA の開発用パッケージを入れる。
 - **iOS 実機**：検証用の試作とチェックリストで、手動で確認する。
 
 ## 8. リスクと早期検証
