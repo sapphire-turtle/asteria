@@ -27,6 +27,9 @@ symphonia.workspace = true
 ogg.workspace = true
 opus-pure.workspace = true
 rubato.workspace = true
+cpal.workspace = true
+rtrb.workspace = true
+corundum-framework = { workspace = true, features = ["gui"] }
 getrandom.workspace = true
 
 [dev-dependencies]
