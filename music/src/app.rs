@@ -10,7 +10,7 @@
 //! The servers are kept in `servers.toml`. It is read once, before the first frame; every
 //! change is written by a background thread, so the UI thread does no disk I/O.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use asteria_framework_client::errors::{error_detail, error_text};
@@ -730,6 +730,8 @@ fn spawn_playback_saver(
 #[derive(Default)]
 struct StreamDirs {
     dirs: HashMap<String, PathBuf>,
+    /// Library ids whose directory could not be made: warned about once, not retried.
+    failed: HashSet<String>,
 }
 
 impl StreamDirs {
@@ -738,6 +740,9 @@ impl StreamDirs {
     fn get(&mut self, root: Option<&std::path::Path>, library_id: &str) -> Option<PathBuf> {
         if let Some(dir) = self.dirs.get(library_id) {
             return Some(dir.clone());
+        }
+        if self.failed.contains(library_id) {
+            return None;
         }
         let fallback = std::env::temp_dir().join("asteria-music");
         let made = root
@@ -754,7 +759,11 @@ impl StreamDirs {
                         tracing::warn!(error = %e, "making the stream directory failed");
                     })
                     .ok()
-            })?;
+            });
+        let Some(made) = made else {
+            self.failed.insert(library_id.to_string());
+            return None;
+        };
         self.dirs.insert(library_id.to_string(), made.clone());
         Some(made)
     }
@@ -833,5 +842,25 @@ impl ShellApp<Screen> for State {
 impl corundum_framework::eframe::App for MusicApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut corundum_framework::eframe::Frame) {
         self.show(ui);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn an_unsafe_library_id_gets_no_stream_dir_and_is_not_retried() {
+        let root = TempDir::new().unwrap();
+        let mut dirs = StreamDirs::default();
+        assert!(dirs.get(Some(root.path()), "../x").is_none());
+        assert!(dirs.failed.contains("../x"));
+        assert!(dirs.get(Some(root.path()), "../x").is_none());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        // Another library is still tried.
+        let dir = dirs.get(Some(root.path()), "lib").unwrap();
+        assert!(dir.starts_with(root.path()));
     }
 }

@@ -428,6 +428,10 @@ fn receive(shared: &Shared, resp: Response, start: u64, end: u64, first: bool) -
         }
         StatusCode::OK => return Err(unsupported()),
         StatusCode::UNAUTHORIZED => return Err(TrackError::Unauthorized.into()),
+        // An empty file has no byte to start at.
+        StatusCode::RANGE_NOT_SATISFIABLE if first => {
+            return Err(TrackError::Unplayable("the track is empty".into()).into());
+        }
         StatusCode::NOT_FOUND | StatusCode::UNPROCESSABLE_ENTITY => {
             return Err(TrackError::Unplayable(format!(
                 "the server cannot serve the track ({status})"
@@ -849,6 +853,23 @@ mod tests {
             stream.status(),
             StreamStatus::Failed(TrackError::Unauthorized)
         );
+    }
+
+    #[test]
+    fn range_not_satisfiable_on_the_first_request_is_unplayable() {
+        // An empty file: the server answers 416 to any Range request.
+        let dir = TempDir::new().unwrap();
+        let server = TestServer::start(Script {
+            status: Some(416),
+            ..script(0)
+        });
+        let stream = Stream::start_with(request(&server, &dir, "t"), timeouts()).unwrap();
+        let mut buf = [0u8; 8];
+        assert!(stream.reader().read(&mut buf).is_err());
+        assert!(matches!(
+            stream.status(),
+            StreamStatus::Failed(TrackError::Unplayable(_))
+        ));
     }
 
     #[test]

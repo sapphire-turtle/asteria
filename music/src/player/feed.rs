@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::time::{Duration, SystemTime};
 
+use asteria_framework_client::media_cache::safe_component;
 use asteria_music_api::ItemId;
 use reqwest::header::HeaderValue;
 use symphonia::core::io::MediaSource;
@@ -31,7 +32,15 @@ const NO_DURATION: u64 = u64::MAX;
 /// Makes `<cache root>/<library id>/stream/<process tag>/` and removes, beside it, the
 /// directories last modified more than STALE_STREAM_DIR ago. The process tag is the pid and
 /// 8 random hex digits. Returns the directory; the caller removes it at exit.
+/// A `library_id` that is not one ordinary path component is `InvalidInput`: the server
+/// chose it, and it must not lead the directory (or the sweep) outside `cache_root`.
 pub fn stream_dir(cache_root: &Path, library_id: &str) -> io::Result<PathBuf> {
+    if !safe_component(library_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the library id is not usable as a directory name",
+        ));
+    }
     let base = cache_root.join(library_id).join("stream");
     std::fs::create_dir_all(&base)?;
     let now = SystemTime::now();
@@ -626,7 +635,7 @@ mod tests {
     fn preload_waits_for_the_current_track() {
         let server = TestServer::start(Script {
             body: tone(),
-            first_delay: Duration::from_millis(400),
+            first_delay: Duration::from_secs(2),
             ..Script::default()
         });
         let dir = TempDir::new().unwrap();
@@ -698,7 +707,7 @@ mod tests {
     fn waiting_reports_preparing_for_a_slow_first_response() {
         let server = TestServer::start(Script {
             body: tone(),
-            first_delay: Duration::from_millis(500),
+            first_delay: Duration::from_secs(2),
             ..Script::default()
         });
         let dir = TempDir::new().unwrap();
@@ -815,5 +824,31 @@ mod tests {
         assert_eq!(pid, std::process::id().to_string());
         assert_eq!(hex.len(), 8);
         assert!(hex.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn stream_dir_rejects_an_unsafe_library_id() {
+        let outer = TempDir::new().unwrap();
+        let root = outer.path().join("cache");
+        std::fs::create_dir(&root).unwrap();
+        let victim = outer.path().join("victim");
+        std::fs::create_dir_all(victim.join("stream").join("old")).unwrap();
+        let absolute = outer.path().join("abs").to_str().unwrap().to_owned();
+        for id in [
+            "..",
+            "../x",
+            "a/b",
+            "a\\b",
+            "",
+            ".hidden",
+            absolute.as_str(),
+        ] {
+            let err = stream_dir(&root, id).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{id:?}");
+        }
+        assert!(victim.join("stream").join("old").exists());
+        assert!(!outer.path().join("abs").exists());
+        assert!(!outer.path().join("x").exists());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     }
 }
