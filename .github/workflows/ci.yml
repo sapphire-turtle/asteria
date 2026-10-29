@@ -5,7 +5,7 @@ on:
 
 jobs:
   ci:
-    uses: sapphire-turtle/sapphire-framework/.github/workflows/shared-rust-ci.yml@main
+    uses: sapphire-turtle/.github/.github/workflows/rust-ci.yml@v1
     with:
       # libvips-tools and ffmpeg: the server's tests. The rest: the window system
       # libraries eframe (winit, wgpu) builds against.
