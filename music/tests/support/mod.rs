@@ -245,6 +245,28 @@ pub fn player(ctx: &egui::Context) -> Player {
     .unwrap()
 }
 
+/// Like [`player`], with the fakes the test can look at.
+pub fn player_with_fakes(ctx: &egui::Context) -> (Player, FakeOpener, FakeOutputs) {
+    let opener = FakeOpener::new();
+    let outputs = FakeOutputs::new();
+    let player = Player::spawn(
+        Box::new(opener.clone()),
+        Box::new(outputs.clone()),
+        ctx.clone(),
+    )
+    .unwrap();
+    (player, opener, outputs)
+}
+
+/// Waits (a few seconds) for `ok` to hold.
+pub fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !ok() {
+        assert!(start.elapsed() < DEADLINE, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 pub fn start(addr: SocketAddr) -> (Fixture, egui::Context, MusicApp) {
     let (fx, _) = fixture(&[("A", addr)], 0);
     let ctx = egui::Context::default();

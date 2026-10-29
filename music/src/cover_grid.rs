@@ -104,7 +104,14 @@ pub fn paint_cover(ui: &egui::Ui, rect: Rect, album: &AlbumSummary, images: &mut
         .cover_item
         .as_ref()
         .map(|id| images.request_id(id, Preset::Thumb));
-    if let Some(ImageState::Ready(tex)) = &ready {
+    paint_picture(ui, rect, ready.as_ref());
+}
+
+/// `picture` drawn to fit `rect` if it is ready, else a music note (`rect` is already filled).
+pub fn paint_picture(ui: &egui::Ui, rect: Rect, picture: Option<&ImageState>) {
+    let visuals = ui.visuals();
+    let painter = ui.painter_at(rect);
+    if let Some(ImageState::Ready(tex)) = picture {
         let size = tex.size_vec2();
         let scale = (rect.width() / size.x.max(1.0)).min(rect.height() / size.y.max(1.0));
         painter.image(

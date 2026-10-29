@@ -51,3 +51,29 @@ asteria-music-tracks-moved-hover = This file was moved; it was found at its new 
 asteria-music-tracks-missing-hover = No file was found for { $path }.
 asteria-music-tracks-play-next = Play next
 asteria-music-tracks-append = Add to queue
+
+# The playback bar.
+asteria-music-bar-previous = Previous
+asteria-music-bar-next = Next
+asteria-music-bar-play = Play
+asteria-music-bar-pause = Pause
+asteria-music-bar-volume = Volume
+asteria-music-bar-buffering = Buffering...
+asteria-music-bar-preparing = Preparing...
+asteria-music-bar-error-unplayable = "{ $title }" could not be played and was skipped: { $reason }
+asteria-music-bar-error-network = The server could not be reached, so playback paused: { $reason }
+asteria-music-bar-error-unauthorized = The server did not accept the token, so playback paused.
+asteria-music-bar-error-output = The audio device failed, so playback paused: { $reason }
+asteria-music-bar-error-too-many = Several tracks in a row could not be played, so playback stopped.
+
+# The queue.
+asteria-music-queue-empty = The queue is empty. Play an album or add tracks to it.
+asteria-music-queue-up = Move up
+asteria-music-queue-down = Move down
+asteria-music-queue-remove = Remove from the queue
+
+# The playback settings.
+asteria-music-playback-title = Playback
+asteria-music-playback-low-quality = Play in low quality
+asteria-music-playback-low-quality-hint = Takes effect from the next track. For a slow connection, tracks are streamed from the server's offline rendition, which is smaller.
+asteria-music-playback-save-failed = The playback settings could not be saved: { $reason }

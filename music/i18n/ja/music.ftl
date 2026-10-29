@@ -45,3 +45,29 @@ asteria-music-tracks-moved-hover = このファイルは移動されていまし
 asteria-music-tracks-missing-hover = { $path } のファイルが見つかりません。
 asteria-music-tracks-play-next = 次に再生
 asteria-music-tracks-append = キューに追加
+
+# 再生バー。
+asteria-music-bar-previous = 前へ
+asteria-music-bar-next = 次へ
+asteria-music-bar-play = 再生
+asteria-music-bar-pause = 一時停止
+asteria-music-bar-volume = 音量
+asteria-music-bar-buffering = バッファリング中...
+asteria-music-bar-preparing = 準備中...
+asteria-music-bar-error-unplayable = 「{ $title }」を再生できなかったので、飛ばしました: { $reason }
+asteria-music-bar-error-network = サーバーに接続できないため、再生を一時停止しました: { $reason }
+asteria-music-bar-error-unauthorized = サーバーがトークンを受け付けないため、再生を一時停止しました。
+asteria-music-bar-error-output = オーディオデバイスで問題が起きたため、再生を一時停止しました: { $reason }
+asteria-music-bar-error-too-many = 続けて何曲も再生できなかったため、再生を止めました。
+
+# 再生キュー。
+asteria-music-queue-empty = キューは空です。アルバムを再生するか、曲を追加してください。
+asteria-music-queue-up = 上へ
+asteria-music-queue-down = 下へ
+asteria-music-queue-remove = キューから外す
+
+# 再生の設定。
+asteria-music-playback-title = 再生
+asteria-music-playback-low-quality = 低音質で再生する
+asteria-music-playback-low-quality-hint = 次の曲から効きます。回線が細いときに、サーバーのオフライン用の小さな音声で再生します。
+asteria-music-playback-save-failed = 再生の設定を保存できませんでした: { $reason }

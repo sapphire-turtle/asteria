@@ -434,7 +434,9 @@ dependencies = [
  "symphonia",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 

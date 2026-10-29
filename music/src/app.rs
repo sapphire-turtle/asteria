@@ -10,6 +10,7 @@
 //! The servers are kept in `servers.toml`. It is read once, before the first frame; every
 //! change is written by a background thread, so the UI thread does no disk I/O.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use asteria_framework_client::errors::{error_detail, error_text};
@@ -24,7 +25,10 @@ use corundum_framework::gui::settings::{ListItem, SettingsLayout, SettingsSectio
 use corundum_framework::gui::{COMPACT_WIDTH, Destination, Shell, ShellApp, Side, icons, tr};
 
 pub use crate::connection::Connection;
-use crate::player::{Command, Player};
+use crate::now_playing::{self, BarAction};
+use crate::player::{Command, Endpoint, Player, Quality, feed};
+use crate::queue::{self, QueueAction};
+use crate::settings::{PlaybackPage, PlaybackSettings};
 
 /// The screens: the browse screens and the queue on the rail, Settings at its foot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +44,7 @@ pub enum Screen {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Servers,
+    Playback,
 }
 
 /// Where the app keeps its files.
@@ -65,9 +70,17 @@ struct State {
     ctx: egui::Context,
     paths: AppPaths,
     player: Player,
+    /// After `player`: the directories are removed once the player has stopped using them.
+    stream_dirs: StreamDirs,
     profiles: Profiles,
     connection: Option<Connection>,
     servers_page: ServersPage,
+    playback_page: PlaybackPage,
+    playback_saver: Option<Saver<PlaybackSettings>>,
+    /// Whether the player was handed the connection's endpoint.
+    endpoint_sent: bool,
+    /// Where the seek bar is dragged to (seconds), until the drag ends.
+    seeking: Option<f64>,
     settings: SettingsLayout<Page>,
     /// `None` when `servers.toml` could not be read (saving would overwrite it) or the save
     /// thread could not start; `save_blocked` says why.
@@ -114,6 +127,16 @@ impl MusicApp {
         if let Some(why) = &save_blocked {
             servers_page.show_error(why.clone());
         }
+        let playback = PlaybackSettings::load(&paths.playback);
+        player.send(Command::SetQuality(quality_of(&playback)));
+        player.send(Command::SetVolume(playback.volume));
+        let playback_saver = match spawn_playback_saver(paths.playback.clone(), ctx.clone()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(error = %e, "starting the playback settings saver failed");
+                None
+            }
+        };
         let shell = Shell::new(vec![
             Destination::new(
                 Screen::Albums,
@@ -146,9 +169,14 @@ impl MusicApp {
             ctx: ctx.clone(),
             paths,
             player,
+            stream_dirs: StreamDirs::default(),
             profiles,
             connection: None,
             servers_page,
+            playback_page: PlaybackPage::new(playback),
+            playback_saver,
+            endpoint_sent: false,
+            seeking: None,
             settings: SettingsLayout::new(),
             saver,
             save_blocked,
@@ -275,6 +303,57 @@ impl MusicApp {
         }
     }
 
+    /// The playback settings as they stand.
+    pub fn playback_settings(&self) -> &PlaybackSettings {
+        &self.state.playback_page.settings
+    }
+
+    /// Play or pause (the bar's button).
+    pub fn toggle(&mut self) {
+        self.state.apply_bar(BarAction::Toggle);
+    }
+
+    /// The next track.
+    pub fn next(&mut self) {
+        self.state.apply_bar(BarAction::Next);
+    }
+
+    /// The previous track, or the start of this one.
+    pub fn previous(&mut self) {
+        self.state.apply_bar(BarAction::Previous);
+    }
+
+    /// To `ms` into the track.
+    pub fn seek(&mut self, ms: u64) {
+        self.state.apply_bar(BarAction::Seek(ms));
+    }
+
+    /// Set the volume (0.0..=1.0); kept in `playback.toml`.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.state.apply_bar(BarAction::SetVolume(volume));
+    }
+
+    /// Stream the low-quality rendition from the next track on; kept in `playback.toml`.
+    pub fn set_low_quality(&mut self, low: bool) {
+        self.state.playback_page.settings.low_quality = low;
+        self.state.apply_playback_change();
+    }
+
+    /// Play the queue's entry `index`.
+    pub fn jump(&mut self, index: usize) {
+        self.state.apply_queue(QueueAction::Jump(index));
+    }
+
+    /// Move the queue's entry `from` to `to`.
+    pub fn move_queue_entry(&mut self, from: usize, to: usize) {
+        self.state.apply_queue(QueueAction::Move { from, to });
+    }
+
+    /// Remove the queue's entry `index`.
+    pub fn remove_queue_entry(&mut self, index: usize) {
+        self.state.apply_queue(QueueAction::Remove(index));
+    }
+
     /// The Settings page of the servers, as the user works it.
     pub fn servers_page_mut(&mut self) -> &mut ServersPage {
         &mut self.state.servers_page
@@ -284,8 +363,13 @@ impl MusicApp {
 impl State {
     /// Opens a connection to the active server, dropping the one there was.
     fn connect(&mut self, reopened: bool) {
-        // The old session goes first: its pending results die with it.
+        // The old session goes first: its pending results die with it. So does what the
+        // player holds of its server: the queue, the streams.
         self.connection = None;
+        if self.endpoint_sent {
+            self.endpoint_sent = false;
+            self.player.send(Command::SetEndpoint(None));
+        }
         self.connection = self.profiles.active().map(|profile| {
             let dirs = SessionDirs {
                 cache: self.paths.cache.clone(),
@@ -333,9 +417,16 @@ impl State {
                 self.servers_page.show_error(why);
             }
         }
+        if let Some(saver) = &self.playback_saver {
+            while let Some(e) = saver.take_error() {
+                let why = tr!(self.ctx, "asteria-music-playback-save-failed", reason = e);
+                self.playback_page.show_error(why);
+            }
+        }
         if let Some(c) = &mut self.connection {
             c.poll(&self.ctx);
         }
+        self.send_endpoint();
         // The server now serves another library: start again with it.
         if self
             .connection
@@ -491,16 +582,106 @@ impl State {
         self.player.send(command);
     }
 
+    /// Once the session is ready, tells the player which server to stream from.
+    fn send_endpoint(&mut self) {
+        if self.endpoint_sent {
+            return;
+        }
+        let Some(c) = &self.connection else {
+            return;
+        };
+        let SessionState::Ready { library } = c.session.state() else {
+            return;
+        };
+        let Some(profile) = self.profiles.active() else {
+            return;
+        };
+        let library_id = library.library_id.clone();
+        let (url, token) = (profile.url.clone(), profile.token.clone());
+        let Some(stream_dir) = self
+            .stream_dirs
+            .get(self.paths.cache.as_deref(), &library_id)
+        else {
+            return;
+        };
+        self.endpoint_sent = true;
+        self.player.send(Command::SetEndpoint(Some(Endpoint {
+            url,
+            token,
+            library_id,
+            stream_dir,
+        })));
+    }
+
+    fn apply_bar(&mut self, action: BarAction) {
+        match action {
+            BarAction::Toggle => self.send(Command::Toggle),
+            BarAction::Next => self.send(Command::Next),
+            BarAction::Previous => self.send(Command::Previous),
+            BarAction::Seek(ms) => self.send(Command::Seek(ms)),
+            BarAction::SetVolume(v) => {
+                let v = if v.is_nan() { 1.0 } else { v.clamp(0.0, 1.0) };
+                self.send(Command::SetVolume(v));
+                self.playback_page.settings.volume = v;
+                self.apply_playback_change();
+            }
+        }
+    }
+
+    fn apply_queue(&mut self, action: QueueAction) {
+        self.send(match action {
+            QueueAction::Jump(i) => Command::Jump(i),
+            QueueAction::Move { from, to } => Command::Move { from, to },
+            QueueAction::Remove(i) => Command::Remove(i),
+        });
+    }
+
+    /// Sends the quality and volume the page holds to the player, and writes them.
+    fn apply_playback_change(&mut self) {
+        let settings = self.playback_page.settings.clone();
+        self.send(Command::SetQuality(quality_of(&settings)));
+        match &self.playback_saver {
+            Some(saver) => saver.save(settings),
+            None => self.playback_page.show_error(tr!(
+                self.ctx,
+                "asteria-music-playback-save-failed",
+                reason = "no save thread"
+            )),
+        }
+    }
+
+    /// The playback bar, a panel at the foot of the screen.
+    fn bar_ui(&mut self, ui: &mut egui::Ui) {
+        let state = self.player.state();
+        let images = self.connection.as_mut().map(|c| c.session.images());
+        let action = now_playing::show(ui, &state, images, self.compact, &mut self.seeking);
+        if let Some(action) = action {
+            self.apply_bar(action);
+        }
+    }
+
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        let items = [ListItem::Entry {
-            page: Page::Servers,
-            label: self.servers_page.label(ui.ctx()),
-            dirty: self.servers_page.dirty(),
-        }];
+        let items = [
+            ListItem::Entry {
+                page: Page::Servers,
+                label: self.servers_page.label(ui.ctx()),
+                dirty: self.servers_page.dirty(),
+            },
+            ListItem::Entry {
+                page: Page::Playback,
+                label: self.playback_page.label(ui.ctx()),
+                dirty: false,
+            },
+        ];
         let page = &mut self.servers_page;
+        let playback = &mut self.playback_page;
         self.settings.ui(ui, &items, |ui, open| match open {
             Page::Servers => page.ui(ui),
+            Page::Playback => playback.ui(ui),
         });
+        if self.playback_page.take_change().is_some() {
+            self.apply_playback_change();
+        }
     }
 
     /// The server in use and its state, with a menu of the servers to switch to. `compact`
@@ -516,6 +697,76 @@ impl State {
             Some(SwitcherAction::Switch(id)) => self.switch_to(id),
             Some(SwitcherAction::Manage) => self.open_servers_settings(),
             None => {}
+        }
+    }
+}
+
+fn quality_of(settings: &PlaybackSettings) -> Quality {
+    if settings.low_quality {
+        Quality::Low
+    } else {
+        Quality::Original
+    }
+}
+
+/// A saver that writes `playback.toml` on the thread `music-playback-save`.
+fn spawn_playback_saver(
+    path: PathBuf,
+    ctx: egui::Context,
+) -> std::io::Result<Saver<PlaybackSettings>> {
+    Saver::spawn(
+        "music-playback-save",
+        ctx,
+        move |settings: &PlaybackSettings| {
+            settings.save(&path).map_err(|e| {
+                tracing::warn!(path = %path.display(), error = %e, "saving playback.toml failed");
+                e.to_string()
+            })
+        },
+    )
+}
+
+/// The directories this process streams tracks into, one per library, removed when dropped.
+#[derive(Default)]
+struct StreamDirs {
+    dirs: HashMap<String, PathBuf>,
+}
+
+impl StreamDirs {
+    /// The directory for `library_id`: under the cache `root`, or if there is none or it
+    /// cannot be made, under the system's temporary directory.
+    fn get(&mut self, root: Option<&std::path::Path>, library_id: &str) -> Option<PathBuf> {
+        if let Some(dir) = self.dirs.get(library_id) {
+            return Some(dir.clone());
+        }
+        let fallback = std::env::temp_dir().join("asteria-music");
+        let made = root
+            .and_then(|r| {
+                feed::stream_dir(r, library_id)
+                    .inspect_err(|e| {
+                        tracing::warn!(error = %e, "making the stream directory in the cache failed");
+                    })
+                    .ok()
+            })
+            .or_else(|| {
+                feed::stream_dir(&fallback, library_id)
+                    .inspect_err(|e| {
+                        tracing::warn!(error = %e, "making the stream directory failed");
+                    })
+                    .ok()
+            })?;
+        self.dirs.insert(library_id.to_string(), made.clone());
+        Some(made)
+    }
+}
+
+impl Drop for StreamDirs {
+    fn drop(&mut self) {
+        for dir in self.dirs.values() {
+            // `remove_dir` would fail on the `.alive` marker inside.
+            if let Err(e) = std::fs::remove_dir_all(dir) {
+                tracing::warn!(path = %dir.display(), error = %e, "removing the stream directory failed");
+            }
         }
     }
 }
@@ -548,11 +799,18 @@ fn is_compact(ui: &egui::Ui) -> bool {
 
 impl ShellApp<Screen> for State {
     fn screen_ui(&mut self, ui: &mut egui::Ui, screen: Screen, _side: &mut Side) {
+        self.bar_ui(ui);
         match screen {
             Screen::Albums | Screen::Artists | Screen::Playlists => self.library_ui(ui, screen),
-            // Task 9 fills the queue.
             Screen::Queue => {
-                egui::CentralPanel::default().show(ui, |_ui| {});
+                let state = self.player.state();
+                let mut action = None;
+                egui::CentralPanel::default().show(ui, |ui| {
+                    action = queue::ui(ui, &state);
+                });
+                if let Some(action) = action {
+                    self.apply_queue(action);
+                }
             }
             Screen::Settings => self.settings_ui(ui),
         }
@@ -569,5 +827,11 @@ impl ShellApp<Screen> for State {
 
     fn status_ui(&mut self, ui: &mut egui::Ui) {
         self.switcher_ui(ui, false);
+    }
+}
+
+impl corundum_framework::eframe::App for MusicApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut corundum_framework::eframe::Frame) {
+        self.show(ui);
     }
 }
