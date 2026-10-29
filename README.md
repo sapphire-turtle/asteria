@@ -55,6 +55,20 @@ cargo run -p asteria-photos --release
 - Select a photo (click) to see its preview and details on the right. In the grid the arrow keys move the selection, and Enter opens the selected photo full screen (as a double-click does): there Left/Right step through the folder and Esc closes the viewer.
 - In the details pane you can set the rating (click a star; click the same star again to clear it), the colour label, the keywords and hierarchical tags, and the description (saved when the field loses focus). Edits are written to the library's sidecar files by the server. A photo whose sidecar the server cannot read is shown read-only, with the reason.
 
+## Running the music client
+
+```sh
+# On Linux, eframe needs a few system packages, and the sound output needs ALSA (Debian/Ubuntu names):
+sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev libasound2-dev
+cargo run -p asteria-music --release
+```
+
+- The client plays a library served by `asteria-music-server`; it does not need libvips or ffmpeg (the server makes the covers and the low-quality copies).
+- On first start there is no server yet and Settings opens on the Servers page with the add form. Enter a name, the address (such as `http://192.168.1.10:7811`) and the access token that `init` (or `token add`) printed, press "Test connection" to check them, then Save. Servers are registered, switched and stored as in the photos client (in `servers.toml`, under `asteria-music` in place of `asteria-photos`).
+- Pick an album, an artist or a playlist to see its tracks and play them. Playback starts before the file has been fully downloaded, and seeking to a position that has not arrived yet waits for that part.
+- "Play at low quality" is one setting for the whole app, saved in `playback.toml` in the app's config directory along with the volume. When it is on, the server converts each track to low-bitrate Ogg Opus (the offline copy, which needs `ffmpeg` with libopus on the server) and the client plays that; it is meant for slow connections. The first play of a track can show "Preparing" while the server converts it. A change takes effect from the next track you open.
+- Not there yet: showing the library by folder (#20), ratings (#19), shuffle and repeat (#17), gapless playback (#18), and the media keys (`sapphire-turtle/corundum-framework#50`).
+
 ## Uploading from the photos client
 
 - Drag files or folders onto the desktop photos window ("Send to Inbox" appears while you hold them over it). Nothing is sent unless a server is connected. Progress is in the Uploads screen and as a count in the status bar.
