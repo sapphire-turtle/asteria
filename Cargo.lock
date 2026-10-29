@@ -414,17 +414,23 @@ dependencies = [
 name = "asteria-music"
 version = "0.1.0"
 dependencies = [
+ "asteria-framework-api",
  "asteria-framework-client",
+ "asteria-music",
  "asteria-music-api",
+ "asteria-photos-api",
  "axum",
  "corundum-framework",
  "cpal",
  "getrandom 0.4.3",
+ "grain-id",
  "ogg",
  "opus-pure",
  "reqwest",
  "rtrb",
  "rubato",
+ "serde",
+ "serde_json",
  "symphonia",
  "tempfile",
  "tokio",
