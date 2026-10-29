@@ -336,6 +336,11 @@ impl LibraryState {
         self.albums.load_more(session);
     }
 
+    /// Try the albums again after a page failed: the same page again.
+    pub fn retry_albums(&mut self, session: &mut Session) {
+        self.albums.retry(session);
+    }
+
     pub fn load_more_artists(&mut self, session: &mut Session) {
         self.artists.load_more(session);
     }
@@ -490,6 +495,11 @@ impl LibraryState {
             }
             return None;
         }
+        if let Some((e, _)) = &self.albums.error
+            && problem_ui(ui, false, Some(e))
+        {
+            self.albums.retry(session);
+        }
         let r = CoverGrid::new(&self.albums.items)
             .id_salt(("asteria_music_albums", session.generation()))
             .show(ui, session.images());
@@ -571,6 +581,11 @@ impl LibraryState {
             }
             return None;
         }
+        if let Some((e, _)) = &self.artists.error
+            && problem_ui(ui, false, Some(e))
+        {
+            self.artists.retry(session);
+        }
         let mut opened = None;
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 8.0;
         let total = self.artists.items.len();
@@ -644,6 +659,11 @@ impl LibraryState {
             }
             return None;
         }
+        if let Some((e, _)) = &self.playlists.error
+            && problem_ui(ui, false, Some(e))
+        {
+            self.playlists.retry(session);
+        }
         let mut opened = None;
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 8.0;
         let total = self.playlists.items.len();
@@ -704,7 +724,8 @@ fn album_page_ui(
     };
     let summary = &album.summary;
     ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(96.0, 96.0), egui::Sense::hover());
+        let side = (ui.available_width() * 0.4).clamp(96.0, 200.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
         paint_cover(ui, rect, summary, images);
         ui.vertical(|ui| {
             ui.heading(summary.title.as_str());
@@ -763,4 +784,32 @@ fn list_problem_ui<L: Listing>(ui: &mut egui::Ui, list: &Paged<L>, empty: &'stat
         return false;
     }
     problem_ui(ui, list.listing.is_some(), error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reply(id: u64) -> Reply {
+        Reply {
+            id: RequestId(id),
+            result: Ok(Response::Value(
+                serde_json::json!({"albums": [], "next_cursor": "c"}),
+            )),
+        }
+    }
+
+    #[test]
+    fn a_reply_with_another_request_id_is_ignored() {
+        let mut list = Paged::<AlbumListing>::new(ALBUM_LIST);
+        list.listing = Some((RequestId(2), PageKind::First));
+        assert!(!list.handle(&reply(1)));
+        assert!(list.listing.is_some());
+        assert!(list.next_cursor.is_none());
+        assert!(list.handle(&reply(2)));
+        assert!(list.listing.is_none());
+        assert_eq!(list.next_cursor.as_deref(), Some("c"));
+        // Nothing is waited for now: any reply is foreign.
+        assert!(!list.handle(&reply(2)));
+    }
 }

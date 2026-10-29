@@ -246,3 +246,33 @@ fn every_frame_draws_without_panicking_on_each_screen() {
         }
     }
 }
+
+#[test]
+fn a_failed_next_page_is_reported_and_retried() {
+    let music = Music {
+        albums: 250,
+        ..Default::default()
+    };
+    music
+        .fail_later_pages
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let (addr, seen) = music.serve();
+    let (_fx, ctx, mut app) = start(addr);
+    run_until(&ctx, &mut app, "the first page", |a| {
+        album_ids(a).len() == 200
+    });
+    app.load_more_albums();
+    run_until(&ctx, &mut app, "the error", |a| {
+        a.connection().unwrap().library().error().is_some()
+    });
+    assert_eq!(album_ids(&app).len(), 200);
+    // The error stays (and the grid still draws) until the user retries.
+    app.load_more_albums();
+    frame(&ctx, &mut app);
+    assert_eq!(calls(&seen, "album.list").len(), 2);
+    app.retry_albums();
+    run_until(&ctx, &mut app, "the second page", |a| {
+        album_ids(a).len() == 250
+    });
+    assert!(app.connection().unwrap().library().error().is_none());
+}

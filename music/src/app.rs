@@ -268,6 +268,13 @@ impl MusicApp {
         }
     }
 
+    /// Try the albums again after a page failed, as the "try again" button does.
+    pub fn retry_albums(&mut self) {
+        if let Some(c) = &mut self.state.connection {
+            c.library.retry_albums(&mut c.session);
+        }
+    }
+
     /// The Settings page of the servers, as the user works it.
     pub fn servers_page_mut(&mut self) -> &mut ServersPage {
         &mut self.state.servers_page

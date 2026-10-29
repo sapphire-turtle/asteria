@@ -92,6 +92,8 @@ pub struct Music {
     pub album_delay: Duration,
     /// `album.list` answers with something that is not an album listing.
     pub bad_albums: bool,
+    /// The next this many `album.list` calls for a page after the first fail.
+    pub fail_later_pages: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl Default for Music {
@@ -101,6 +103,7 @@ impl Default for Music {
             prefix: "al",
             album_delay: Duration::ZERO,
             bad_albums: false,
+            fail_later_pages: Arc::default(),
         }
     }
 }
@@ -131,6 +134,15 @@ impl Music {
                 "library.info" => library_info("lib"),
                 "album.list" => {
                     std::thread::sleep(self.album_delay);
+                    use std::sync::atomic::Ordering::SeqCst;
+                    if !params["cursor"].is_null()
+                        && self
+                            .fail_later_pages
+                            .try_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                            .is_ok()
+                    {
+                        return StubResponse::new(500, Vec::new());
+                    }
                     if self.bad_albums {
                         json!({"albums": 5})
                     } else {
