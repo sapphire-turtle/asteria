@@ -2,7 +2,7 @@
 # Reference: https://embarkstudios.github.io/cargo-deny/
 #
 # The shared starting point for sapphire-turtle repositories
-# (sapphire-framework/ci/templates/deny.toml). Keep repository-specific entries
+# (sapphire-turtle/.github, templates/deny.toml). Keep repository-specific entries
 # under `ignore` and `exceptions`, each with its reason.
 
 [graph]
