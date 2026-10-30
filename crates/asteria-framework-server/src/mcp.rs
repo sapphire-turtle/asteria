@@ -6,12 +6,14 @@ use std::sync::Arc;
 
 use asteria_framework::UserId;
 use asteria_framework::journal::Actor;
+use asteria_framework_api::ItemId;
 use asteria_framework_api::{
     FOLDER_LIST, LIBRARY_INFO, LIBRARY_RESCAN, MAX_LABEL_CHARS, MEDIA_GET, MEDIA_UPDATE,
     ORGANIZE_APPLY, ORGANIZE_HISTORY, ORGANIZE_STATUS, ORGANIZE_UNDO, SERVER_INFO, UPLOAD_ABORT,
     UPLOAD_BEGIN, UPLOAD_CHECK, UPLOAD_COMMIT, UPLOAD_STATUS,
 };
 use axum::http::request::Parts;
+use base64::Engine as _;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
     ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
@@ -21,6 +23,8 @@ use rmcp::{ErrorData, RoleServer, ServerHandler};
 use serde_json::{Map, Value, json};
 
 use crate::ext::{AppExtension, McpTool};
+use crate::media_http::{ThumbError, thumb_file};
+use crate::process::Preset;
 use crate::rpc;
 use crate::state::AppState;
 
@@ -198,11 +202,34 @@ pub(crate) fn framework_tools() -> Vec<McpTool> {
                 &[],
             ),
         ),
+        tool(
+            MEDIA_PREVIEW,
+            "",
+            "Shows thumbnails of up to 4 items as images, so you can see what a photo or \
+             video shows, or an album's cover.",
+            object(
+                json!({
+                    "ids": {
+                        "type": "array",
+                        "items": id,
+                        "minItems": 1,
+                        "maxItems": MAX_PREVIEW_ITEMS,
+                    },
+                }),
+                &["ids"],
+            ),
+        ),
     ]
 }
 
 /// Every method the framework answers. App tools may not call these: the framework decides
 /// which of its methods an agent gets (uploads and rescans it does not).
+/// The tool that shows thumbnails. It has no RPC method: `call_tool` answers it itself.
+const MEDIA_PREVIEW: &str = "media_preview";
+
+/// The most items one `media_preview` shows.
+const MAX_PREVIEW_ITEMS: usize = 4;
+
 const FRAMEWORK_METHODS: [&str; 15] = [
     SERVER_INFO,
     LIBRARY_INFO,
@@ -225,6 +252,7 @@ const FRAMEWORK_METHODS: [&str; 15] = [
 /// calling a framework method, is dropped.
 pub(crate) fn tool_table(ext: &dyn AppExtension) -> Vec<McpTool> {
     let mut tools = framework_tools();
+    // `media_preview` is in the list, so an app tool of that name is dropped as a shadow.
     for t in ext.mcp_tools() {
         if tools.iter().any(|f| f.name == t.name) {
             tracing::warn!(tool = %t.name, "app MCP tool shadows a framework tool; dropped");
@@ -252,6 +280,55 @@ impl AsteriaMcp {
     pub(crate) fn new(state: AppState) -> AsteriaMcp {
         let tools = Arc::new(tool_table(state.extension().as_ref()));
         AsteriaMcp { state, tools }
+    }
+}
+
+impl AsteriaMcp {
+    /// A caption and a thumbnail per item; an item that fails gets only a line saying why,
+    /// and that is not a tool error.
+    async fn media_preview(&self, user: UserId, args: Value) -> CallToolResult {
+        let ids: Vec<String> = match args.get("ids").map(|v| serde_json::from_value(v.clone())) {
+            Some(Ok(ids)) => ids,
+            _ => {
+                return CallToolResult::error(vec![ContentBlock::text(
+                    "ids must be a list of strings",
+                )]);
+            }
+        };
+        if ids.is_empty() {
+            return CallToolResult::error(vec![ContentBlock::text("at least one item")]);
+        }
+        if ids.len() > MAX_PREVIEW_ITEMS {
+            return CallToolResult::error(vec![ContentBlock::text("at most 4 items per preview")]);
+        }
+        let mut content = Vec::new();
+        for id in ids {
+            match self.thumbnail_data(user, &id).await {
+                Ok(data) => {
+                    content.push(ContentBlock::text(format!("{id}:")));
+                    content.push(ContentBlock::image(data, Preset::Thumb.mime()));
+                }
+                Err(e) => {
+                    let why = match e {
+                        ThumbError::NotFound => "not found",
+                        ThumbError::NotReady => "not ready yet, try again shortly",
+                        ThumbError::Unprocessable => "cannot be rendered",
+                        ThumbError::Internal => "failed",
+                    };
+                    content.push(ContentBlock::text(format!("{id}: {why}")));
+                }
+            }
+        }
+        CallToolResult::success(content)
+    }
+
+    async fn thumbnail_data(&self, user: UserId, id: &str) -> Result<String, ThumbError> {
+        let path = thumb_file(&self.state, user, ItemId(id.to_owned()), Preset::Thumb).await?;
+        let bytes = tokio::fs::read(&path).await.map_err(|e| {
+            tracing::error!("reading a thumbnail failed: {e}");
+            ThumbError::Internal
+        })?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
     }
 }
 
@@ -292,6 +369,11 @@ impl ServerHandler for AsteriaMcp {
         request: CallToolRequestParams,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if request.name == MEDIA_PREVIEW {
+            let user = caller(&ctx)?;
+            let args = Value::Object(request.arguments.unwrap_or_default());
+            return Ok(self.media_preview(user, args).await.into());
+        }
         let Some(tool) = self.tools.iter().find(|t| t.name == request.name) else {
             return Err(ErrorData::invalid_params(
                 format!("unknown tool: {}", request.name),
@@ -335,10 +417,10 @@ mod tests {
     #[test]
     fn every_framework_tool_names_a_method() {
         let tools = framework_tools();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
         let names: HashSet<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names.len(), 8);
-        for t in &tools {
+        assert_eq!(names.len(), 9);
+        for t in tools.iter().filter(|t| t.name != MEDIA_PREVIEW) {
             assert_eq!(t.input_schema["type"], "object", "{}", t.name);
             assert!(!t.method.is_empty(), "{}", t.name);
             assert!(!t.description.is_empty(), "{}", t.name);
@@ -391,6 +473,9 @@ mod tests {
                 json!({"limit": 10, "cursor": "c"}),
                 parses::<OrganizeHistoryParams>,
             ),
+            ("media_preview", json!({"ids": [id]}), |v| {
+                assert_eq!(v["ids"].as_array().unwrap().len(), 1)
+            }),
         ];
         let tools = framework_tools();
         assert_eq!(examples.len(), tools.len());
@@ -445,6 +530,6 @@ mod tests {
                 .iter()
                 .any(|t| t.name == "sneaky" || t.name == "rescan")
         );
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 10);
     }
 }

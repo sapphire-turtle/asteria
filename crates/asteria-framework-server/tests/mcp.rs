@@ -5,6 +5,7 @@ mod common;
 use asteria_framework::journal::{JournalEntry, OpKind};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use base64::Engine as _;
 use common::*;
 use http_body_util::BodyExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult};
@@ -15,7 +16,7 @@ use tower::ServiceExt as _;
 const INSTRUCTIONS_START: &str = "Asteria manages a self-hosted media library. Browse with \
 folder_list and media_get; look at pictures with media_preview.";
 
-const FRAMEWORK_TOOLS: [&str; 8] = [
+const FRAMEWORK_TOOLS: [&str; 9] = [
     "library_info",
     "folder_list",
     "media_get",
@@ -24,6 +25,7 @@ const FRAMEWORK_TOOLS: [&str; 8] = [
     "organize_status",
     "organize_undo",
     "organize_history",
+    "media_preview",
 ];
 
 async fn tool(client: &RunningService<RoleClient, ()>, name: &str, args: Value) -> CallToolResult {
@@ -67,6 +69,7 @@ async fn lists_the_framework_tools() {
     for name in FRAMEWORK_TOOLS {
         assert!(names.contains(&name), "{name} missing from {names:?}");
     }
+    assert_eq!(names.len(), 9, "{names:?}");
     let info = client.peer_info().unwrap();
     let instructions = info.instructions.as_deref().unwrap();
     assert!(
@@ -221,4 +224,67 @@ async fn mcp_needs_a_token() {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(body.is_empty());
     }
+}
+
+fn preview_text(r: &CallToolResult, i: usize) -> &str {
+    &r.content[i].as_text().unwrap().text
+}
+
+#[tokio::test]
+async fn media_preview_returns_images() {
+    if !have_tool("vipsthumbnail") {
+        return;
+    }
+    let e = env();
+    hash_all(&e);
+    let client = connect(&e).await;
+    let id = item_id(&e, "a.jpg");
+    let r = tool(&client, "media_preview", json!({"ids": [id]})).await;
+    assert_ne!(r.is_error, Some(true));
+    assert_eq!(r.content.len(), 2);
+    assert_eq!(preview_text(&r, 0), format!("{id}:"));
+    let img = r.content[1].as_image().unwrap();
+    assert_eq!(img.mime_type, "image/webp");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&img.data)
+        .unwrap();
+    assert_eq!(&bytes[..4], b"RIFF");
+    assert_eq!(&bytes[8..12], b"WEBP");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn media_preview_reports_each_missing_item() {
+    if !have_tool("vipsthumbnail") {
+        return;
+    }
+    let e = env();
+    hash_all(&e);
+    let client = connect(&e).await;
+    let id = item_id(&e, "a.jpg");
+    let r = tool(&client, "media_preview", json!({"ids": ["nope", id]})).await;
+    assert_ne!(r.is_error, Some(true));
+    assert_eq!(r.content.len(), 3);
+    assert_eq!(preview_text(&r, 0), "nope: not found");
+    assert_eq!(preview_text(&r, 1), format!("{id}:"));
+    assert!(r.content[2].as_image().is_some());
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn media_preview_takes_at_most_four() {
+    let e = env();
+    let client = connect(&e).await;
+    let r = tool(
+        &client,
+        "media_preview",
+        json!({"ids": ["1", "2", "3", "4", "5"]}),
+    )
+    .await;
+    assert_eq!(r.is_error, Some(true));
+    assert_eq!(text(&r), "at most 4 items per preview");
+    let r = tool(&client, "media_preview", json!({"ids": []})).await;
+    assert_eq!(r.is_error, Some(true));
+    assert_eq!(text(&r), "at least one item");
+    client.cancel().await.unwrap();
 }
