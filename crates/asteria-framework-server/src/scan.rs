@@ -361,13 +361,29 @@ fn arrived_behind_walk(root: &Path, canonical_root: &Path, rel: &str) -> bool {
     if !std::fs::symlink_metadata(root.join(&rel)).is_ok_and(|m| !m.is_dir()) {
         return false;
     }
-    match rel.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => root
+    let dir = rel.parent().unwrap_or(Path::new(""));
+    if !dir.as_os_str().is_empty()
+        && !root
             .join(dir)
             .canonicalize()
-            .is_ok_and(|c| c == canonical_root.join(dir)),
-        _ => true,
+            .is_ok_and(|c| c == canonical_root.join(dir))
+    {
+        return false;
     }
+    // A case-insensitive filesystem finds `a.JPG` after a rename to `a.jpg`: only the
+    // exact name in its directory counts.
+    let (Some(name), Ok(entries)) = (rel.file_name(), std::fs::read_dir(root.join(dir))) else {
+        return false;
+    };
+    has_exact_name(entries.filter_map(|e| e.ok().map(|e| e.file_name())), name)
+}
+
+/// Whether `names` holds `wanted` byte for byte.
+fn has_exact_name(
+    mut names: impl Iterator<Item = std::ffi::OsString>,
+    wanted: &std::ffi::OsStr,
+) -> bool {
+    names.any(|n| n == wanted)
 }
 
 /// A `/`-joined library path as a native relative path.
@@ -463,6 +479,15 @@ mod tests {
         // The next scan picks up the file that had no record yet.
         scan(&lib, &cache, &All).unwrap();
         assert_eq!(paths(&cache), ["2025/x.bin", "2025/y.bin"]);
+    }
+
+    #[test]
+    fn only_the_exact_name_counts_as_present() {
+        let names = || ["a.jpg", "b.png"].map(std::ffi::OsString::from).into_iter();
+        assert!(has_exact_name(names(), "a.jpg".as_ref()));
+        // What a case-insensitive lookup of a case-only rename would find.
+        assert!(!has_exact_name(names(), "a.JPG".as_ref()));
+        assert!(!has_exact_name(names(), "c.jpg".as_ref()));
     }
 
     #[test]
