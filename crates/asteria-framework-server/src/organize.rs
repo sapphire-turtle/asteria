@@ -91,6 +91,8 @@ pub(crate) enum FailAt {
     AfterMedia,
     AfterSidecar,
     AfterJournal,
+    /// Not a stop: a foreign sidecar appears at the target after the media moved.
+    PlantTargetSidecar,
 }
 
 #[cfg(test)]
@@ -215,6 +217,10 @@ pub(crate) fn apply(ctx: &OpCtx, op: &PlannedOp) -> Result<Done, SkipReason> {
     })?;
     #[cfg(test)]
     stop_at(FailAt::AfterMedia)?;
+    #[cfg(test)]
+    if FAIL_AT.with(|f| f.get()) == Some(FailAt::PlantTargetSidecar) {
+        std::fs::write(&to_sidecar, "foreign sidecar").unwrap();
+    }
     if has_sidecar && let Err(e) = move_no_clobber(&from_sidecar, &to_sidecar) {
         // Never leave the media moved with its sidecar behind.
         if let Err(back) = move_no_clobber(&to_abs, &from_abs) {
@@ -229,14 +235,20 @@ pub(crate) fn apply(ctx: &OpCtx, op: &PlannedOp) -> Result<Done, SkipReason> {
     #[cfg(test)]
     stop_at(FailAt::AfterSidecar)?;
 
+    let stamp = (op.expect.size, op.expect.mtime_ns);
     let hash = ctx
         .cache
         .get_by_path(&op.from)
         .ok()
         .flatten()
         .and_then(|r| r.hash)
-        .or_else(|| op.expect.hash.clone())
-        .filter(|h| (h.size, h.mtime_ns) == (op.expect.size, op.expect.mtime_ns));
+        .filter(|h| (h.size, h.mtime_ns) == stamp)
+        .or_else(|| {
+            op.expect
+                .hash
+                .clone()
+                .filter(|h| (h.size, h.mtime_ns) == stamp)
+        });
     let kind = if in_meta_dir(&to) {
         OpKind::Trash
     } else if op.from.rsplit_once('/').map(|p| p.0) == to.rsplit_once('/').map(|p| p.0) {
@@ -596,5 +608,45 @@ mod tests {
         scan(&e.lib, &e.cache, &All).unwrap();
         assert!(e.cache.get_by_path("a.jpg").unwrap().is_none());
         assert!(e.cache.get_by_path("sub/c.jpg").unwrap().is_some());
+    }
+
+    #[test]
+    fn journal_hash_falls_back_to_a_valid_expect_hash_when_the_cached_one_is_stale() {
+        let e = Env::new();
+        let mut op = e.op("a.jpg", to("c.jpg"));
+        let mk = |size, mtime_ns| StoredHash {
+            hash: "h".into(),
+            scope: "s".into(),
+            file_hash: "f".into(),
+            size,
+            mtime_ns,
+        };
+        let mut rec = e.cache.get_by_path("a.jpg").unwrap().unwrap();
+        rec.hash = Some(mk(op.expect.size + 1, op.expect.mtime_ns));
+        e.cache.put(&rec).unwrap();
+        let valid = mk(op.expect.size, op.expect.mtime_ns);
+        op.expect.hash = Some(valid.clone());
+        apply(&e.ctx(), &op).unwrap();
+        let stored: StoredHash = serde_json::from_value(e.last().before["hash"].clone()).unwrap();
+        assert_eq!(stored, valid);
+    }
+
+    #[test]
+    fn a_sidecar_target_taken_mid_move_puts_the_media_back() {
+        let e = Env::new();
+        let n = e.journal_len();
+        let sidecar_before = std::fs::read(e.path("a.jpg.xmp")).unwrap();
+        FAIL_AT.with(|f| f.set(Some(FailAt::PlantTargetSidecar)));
+        let r = apply(&e.ctx(), &e.op("a.jpg", to("c.jpg")));
+        FAIL_AT.with(|f| f.set(None));
+        assert_eq!(r.unwrap_err(), SkipReason::TargetExists);
+        assert_eq!(std::fs::read(e.path("a.jpg")).unwrap(), b"photo a");
+        assert_eq!(std::fs::read(e.path("a.jpg.xmp")).unwrap(), sidecar_before);
+        assert_eq!(
+            std::fs::read(e.path("c.jpg.xmp")).unwrap(),
+            b"foreign sidecar"
+        );
+        assert!(!e.path("c.jpg").exists());
+        assert_eq!(e.journal_len(), n);
     }
 }
