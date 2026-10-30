@@ -604,6 +604,44 @@ async fn status_falls_back_to_the_journal() {
 }
 
 #[tokio::test]
+async fn status_of_a_failed_batch_falls_back_to_the_journal() {
+    use asteria_framework::journal::{Actor, BatchId, OpId};
+    use chrono::Utc;
+    use grain_id::GrainId;
+
+    let e = env();
+    let batch = BatchId(GrainId::random());
+    e.state.writer().fail_batch_for_test(batch);
+    // No header was journaled: nothing changed.
+    let s = batch_status(&e, &batch.0.to_string()).await;
+    assert_eq!(s["error"]["code"], codes::NOT_FOUND, "{s}");
+    assert_eq!(
+        s["error"]["message"],
+        "the batch failed before changing anything"
+    );
+
+    e.lib
+        .journal()
+        .unwrap()
+        .append(&JournalEntry {
+            op_id: OpId(GrainId::random()),
+            plan_id: Some(batch),
+            actor: Actor::User(e.lib.owner()),
+            at: Utc::now(),
+            kind: OpKind::Batch,
+            before: Value::Null,
+            after: json!({"label": "broke", "op_count": 2, "undo_of": null}),
+        })
+        .unwrap();
+    let s = batch_status(&e, &batch.0.to_string()).await;
+    let r = &s["result"];
+    assert_eq!(r["running"], false, "{s}");
+    assert_eq!(r["complete"], false);
+    assert_eq!(r["done"], 0);
+    assert!(r.get("results").is_none(), "{s}");
+}
+
+#[tokio::test]
 async fn status_of_an_unknown_batch_is_not_found() {
     let e = env();
     for id in [

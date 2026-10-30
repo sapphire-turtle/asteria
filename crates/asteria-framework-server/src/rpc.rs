@@ -451,8 +451,8 @@ async fn dispatch(
                     skipped: count(&results, OpStatus::Skipped),
                     results: Some(results),
                 }),
-                Some(Slot::Failed) => Err(internal("the batch ended with an error")),
-                None => {
+                // A failed batch may have changed files before it stopped; the journal knows.
+                slot @ (Some(Slot::Failed) | None) => {
                     let library = state.library().clone();
                     let all = tokio::task::spawn_blocking(move || {
                         let entries = library.journal()?.read_all()?;
@@ -463,7 +463,13 @@ async fn dispatch(
                     .map_err(internal)?;
                     let id = id.0.to_string();
                     let found = all.into_iter().find(|b| b.batch_id == id);
-                    let b = found.ok_or_else(no_such)?;
+                    let b = found.ok_or_else(|| match slot {
+                        Some(_) => rpc_error(
+                            codes::NOT_FOUND,
+                            "the batch failed before changing anything",
+                        ),
+                        None => no_such(),
+                    })?;
                     to_value(OrganizeStatus {
                         batch_id: b.batch_id,
                         running: false,

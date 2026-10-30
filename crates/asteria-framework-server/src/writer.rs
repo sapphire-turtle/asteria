@@ -259,6 +259,13 @@ impl Writer {
         &self.book
     }
 
+    /// Marks `id` as failed in the book, as a batch that ended with an error would. Only for
+    /// tests, which cannot make a batch fail on cue.
+    #[doc(hidden)]
+    pub fn fail_batch_for_test(&self, id: BatchId) {
+        self.book.fail(id);
+    }
+
     /// Sets how long [`Writer::organize`] waits for a batch (tests use a short one).
     pub(crate) fn set_organize_wait(&self, wait: Duration) {
         *self.organize_wait.lock().unwrap_or_else(|p| p.into_inner()) = wait;

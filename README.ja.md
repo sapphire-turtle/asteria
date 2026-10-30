@@ -41,16 +41,16 @@ asteria-music-server serve --config ~/.config/asteria/music.toml
 
 ## MCP クライアントの接続
 
-どちらのサーバーも Model Context Protocol に対応しているので、AI エージェントからライブラリを見て整理できます。
+どちらのサーバーも Model Context Protocol に対応しているので、AI エージェントからライブラリを見て整理できる。
 
 ```sh
 # Claude Code の場合。<URL> はサーバーのアドレス（例: http://127.0.0.1:7811）
 claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Bearer <token>"
 ```
 
-- エンドポイントは `<サーバーの URL>/mcp`（Streamable HTTP）です。トークンはクライアントと同じ Bearer トークンで、エージェントはそのトークンのユーザーとして動きます。
-- ツールは、ライブラリ・フォルダ・アイテムの参照、`organize_apply` とその状況・取り消し・履歴、サムネイルを見る `media_preview` です。music サーバーには `album_list`、`album_get`、`artist_list`、`artist_get`、`playlist_list`、`playlist_get` が加わります。
-- エージェントの変更はジャーナルに `agent` として残り、`organize_undo` でバッチごと取り消せます。
+- エンドポイントは `<サーバーの URL>/mcp`（Streamable HTTP）である。トークンはクライアントと同じ Bearer トークンで、エージェントはそのトークンのユーザーとして動く。
+- ツールは、ライブラリ・フォルダ・アイテムの参照、評価・タグ・説明を書き換える `media_update`、ファイルの移動・改名・ゴミ箱入れをする `organize_apply` とその状況・取り消し・履歴、サムネイルを見る `media_preview` である。music サーバーには `album_list`、`album_get`、`artist_list`、`artist_get`、`playlist_list`、`playlist_get` が加わる。
+- エージェントの変更はジャーナルに `agent` として残り、`organize_undo` でファイル操作のバッチごと取り消せる。メタデータの編集（`media_update`）はバッチではなく、取り消せない。
 
 ## photos クライアントの起動
 

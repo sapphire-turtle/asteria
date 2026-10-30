@@ -3,6 +3,7 @@
 mod common;
 
 use asteria_framework::journal::{JournalEntry, OpKind};
+use asteria_framework_server::router_with_shutdown;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
@@ -109,6 +110,65 @@ async fn media_update_is_recorded_as_the_agent() {
         json!({"user": e.lib.owner().to_string()})
     );
     client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn media_update_by_another_user_rates_for_that_user() {
+    let e = env();
+    let client = connect_as(&e, &e.guest_token).await;
+    let id = item_id(&e, "a.jpg");
+    let r = tool(&client, "media_update", json!({"id": id, "rating": 2})).await;
+    assert_eq!(ok_json(&r)["rating"], 2);
+    let rating = |token: &str| {
+        let (e, id) = (&e, &id);
+        let token = token.to_owned();
+        async move {
+            call(&e.app, &token, "media.get", json!({"id": id})).await["result"]["rating"].clone()
+        }
+    };
+    assert_eq!(rating(&e.guest_token).await, 2);
+    assert_ne!(rating(&e.owner_token).await, 2);
+    let write = journal(&e)
+        .into_iter()
+        .rev()
+        .find(|l| l.kind == OpKind::WriteSidecar)
+        .unwrap();
+    assert_eq!(actor(&write), json!({"agent": e.guest.to_string()}));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn results_are_compact_json() {
+    let e = env();
+    let client = connect(&e).await;
+    let r = tool(&client, "library_info", json!({})).await;
+    assert!(!text(&r).contains('\n'), "{}", text(&r));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_ends_open_mcp_streams() {
+    let e = env();
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let app = router_with_shutdown(e.state.clone(), shutdown.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let token = shutdown.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move { token.cancelled().await })
+            .await
+    });
+    let client = connect_to(addr, &e.owner_token).await;
+    tool(&client, "library_info", json!({})).await;
+    // Let the client open its stream for server messages.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    shutdown.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("the server waited for the open MCP stream")
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

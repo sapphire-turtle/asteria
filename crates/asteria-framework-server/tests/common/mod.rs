@@ -40,6 +40,7 @@ pub struct Env {
     pub processor: Arc<Processor>,
     pub owner_token: String,
     pub guest_token: String,
+    pub guest: UserId,
     pub _rescan_rx: tokio::sync::mpsc::Receiver<()>,
 }
 
@@ -120,6 +121,7 @@ fn env_full(make: impl FnOnce(PathBuf) -> Processor, ext: Arc<dyn AppExtension>)
         processor,
         owner_token,
         guest_token,
+        guest,
         _rescan_rx: rescan_rx,
     }
 }
@@ -158,12 +160,22 @@ pub async fn call(app: &Router, token: &str, method: &str, params: Value) -> Val
 
 /// Serves `e.app` on a free local port and connects to its `/mcp` as the owner.
 pub async fn connect(e: &Env) -> RunningService<RoleClient, ()> {
+    connect_as(e, &e.owner_token).await
+}
+
+/// The same, with `token`'s user.
+pub async fn connect_as(e: &Env, token: &str) -> RunningService<RoleClient, ()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = e.app.clone();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    connect_to(addr, token).await
+}
+
+/// Connects to the `/mcp` of the server at `addr`.
+pub async fn connect_to(addr: SocketAddr, token: &str) -> RunningService<RoleClient, ()> {
     let config = StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp"))
-        .auth_header(e.owner_token.clone());
+        .auth_header(token.to_owned());
     let transport = StreamableHttpClientTransport::from_config(config);
     ().serve(transport).await.unwrap()
 }

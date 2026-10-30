@@ -23,7 +23,7 @@ mod upload_http;
 pub mod watch;
 pub mod writer;
 
-pub use app::router;
+pub use app::{router, router_with_shutdown};
 pub use auth::{Tokens, new_token, token_hash};
 pub use cache::{
     CACHE_SCHEMA, Cache, ExtraRecord, ItemRecord, SidecarSnapshot, StoredHash, item_id_for,

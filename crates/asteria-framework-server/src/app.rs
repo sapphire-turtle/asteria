@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
+use tokio_util::sync::CancellationToken;
 
 use crate::mcp::AsteriaMcp;
 use crate::media_http::media;
@@ -24,9 +25,15 @@ use crate::upload_http::upload_chunk;
 /// same limit.
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
 
-/// Builds the app. The auth layer wraps every route added before it, so routes added later
-/// must be registered before the `layer` call below.
+/// Builds the app; see [`router_with_shutdown`]. Nothing ends its MCP streams early.
 pub fn router(state: AppState) -> Router {
+    router_with_shutdown(state, CancellationToken::new())
+}
+
+/// Builds the app. Cancelling `shutdown` ends the open MCP streams, which would otherwise
+/// keep a graceful shutdown waiting. The auth layer wraps every route added before it, so
+/// routes added later must be registered before the `layer` call below.
+pub fn router_with_shutdown(state: AppState, shutdown: CancellationToken) -> Router {
     let server = AsteriaMcp::new(state.clone());
     // `DefaultBodyLimit` only reaches axum extractors, so rmcp gets the limit itself. The
     // bearer token, not the Host header, is what keeps other sites out, and the server is
@@ -35,6 +42,7 @@ pub fn router(state: AppState) -> Router {
         move || Ok(server.clone()),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default()
+            .with_cancellation_token(shutdown.child_token())
             .with_max_request_body_bytes(BODY_LIMIT)
             .disable_allowed_hosts(),
     );

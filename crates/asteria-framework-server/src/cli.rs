@@ -20,7 +20,8 @@ use crate::upload::UploadStore;
 use crate::watch::{DEFAULT_DEBOUNCE, DEFAULT_PERIOD};
 use crate::{
     AppExtension, AppState, Cache, Processor, ScanLoop, ServerConfig, TokenEntry, Tokens,
-    cache_dir_for, data_dir_for, new_token, router, spawn_scan_loop, spawn_writer, token_hash,
+    cache_dir_for, data_dir_for, new_token, router_with_shutdown, spawn_scan_loop, spawn_writer,
+    token_hash,
 };
 
 type AnyResult<T> = Result<T, Box<dyn Error>>;
@@ -326,7 +327,7 @@ async fn run(
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "listening");
     let shutdown = CancellationToken::new();
-    let app = router(state);
+    let app = router_with_shutdown(state, shutdown.clone());
     let token = shutdown.clone();
     let mut server = tokio::spawn(async move {
         axum::serve(listener, app)

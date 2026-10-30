@@ -49,8 +49,8 @@ claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Beare
 ```
 
 - The endpoint is `<server URL>/mcp` (Streamable HTTP). The token is the same Bearer token the clients use; the agent acts as that token's user.
-- The tools are the library, folder and item calls, `organize_apply` and its status, undo and history, and `media_preview` for thumbnails. The music server adds `album_list`, `album_get`, `artist_list`, `artist_get`, `playlist_list` and `playlist_get`.
-- What the agent changes is recorded in the journal as `agent`, and `organize_undo` takes a batch back.
+- The tools are the library, folder and item calls, `media_update` for ratings, tags and descriptions, `organize_apply` and its status, undo and history, and `media_preview` for thumbnails. The music server adds `album_list`, `album_get`, `artist_list`, `artist_get`, `playlist_list` and `playlist_get`.
+- What the agent changes is recorded in the journal as `agent`, and `organize_undo` takes a batch of file operations back. Metadata edits (`media_update`) are not batches and cannot be undone.
 
 ## Running the photos client
 
