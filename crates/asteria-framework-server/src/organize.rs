@@ -462,11 +462,24 @@ pub(crate) fn done(
     }
 }
 
-/// The report of an operation that `apply` carried out.
+/// The path an operation reports, never one inside `.asteria`: a restore from the trash
+/// reports the place the item goes back to.
+pub(crate) fn reported_path(op: &PlannedOp) -> &str {
+    match &op.to {
+        Target::Path(to) if in_meta_dir(&op.from) => to,
+        _ => &op.from,
+    }
+}
+
+/// The report of an operation that `apply` carried out. A move into the trash (the redo
+/// of a trash) reports like a trash: no new path or id.
 pub(crate) fn applied(index: usize, op: &PlannedOp, d: Done) -> OpResult {
-    match op.to {
-        Target::Path(_) => done(index, &op.from, Some(d.to), d.record.map(|r| r.id)),
-        Target::Trash => done(index, &op.from, None, None),
+    let path = reported_path(op);
+    match &op.to {
+        Target::Path(to) if !in_meta_dir(to) => {
+            done(index, path, Some(d.to), d.record.map(|r| r.id))
+        }
+        _ => done(index, path, None, None),
     }
 }
 
@@ -480,15 +493,21 @@ pub(crate) fn dry_run(ctx: &OpCtx, ops: &[Planned]) -> Vec<OpResult> {
         .map(|(i, planned)| match planned {
             Err((path, why)) => skipped(i, path, *why),
             Ok(op) => match check(ctx, op, &sim) {
-                Err(why) => skipped(i, &op.from, why),
+                Err(why) => skipped(i, reported_path(op), why),
                 Ok(()) => match &op.to {
                     Target::Path(to) => {
                         sim.record(&op.from, to);
-                        done(i, &op.from, Some(to.clone()), Some(item_id_for(lib_id, to)))
+                        // A move into the trash (the redo of a trash) reports like a trash.
+                        let (new_path, id) = if in_meta_dir(to) {
+                            (None, None)
+                        } else {
+                            (Some(to.clone()), Some(item_id_for(lib_id, to)))
+                        };
+                        done(i, reported_path(op), new_path, id)
                     }
                     Target::Trash => {
                         sim.free(&op.from);
-                        done(i, &op.from, None, None)
+                        done(i, reported_path(op), None, None)
                     }
                 },
             },
@@ -791,9 +810,12 @@ pub(crate) fn plan_undo(entries: &[JournalEntry], id: BatchId) -> Result<UndoPla
                 Some(op) => ops.push(Ok(op)),
                 None => {
                     tracing::warn!(op = %e.op_id.0, "journal line cannot be undone");
-                    // Journal paths are library-relative; anything else is not reported.
-                    let path = parsed(&e.after, "path")
-                        .filter(|p: &String| plain_rel(p))
+                    // Journal paths are library-relative; anything else is not reported,
+                    // and neither is a place in the trash: the item's old place stands in.
+                    let shown =
+                        |v| parsed(v, "path").filter(|p: &String| plain_rel(p) && !in_meta_dir(p));
+                    let path = shown(&e.after)
+                        .or_else(|| shown(&e.before))
                         .unwrap_or_default();
                     ops.push(Err((path, SkipReason::Io)));
                 }

@@ -317,8 +317,16 @@ async fn undo_restores_trash_with_its_rating() {
             .clone();
     assert!(hash.is_string());
     let b = batch_id(&apply(&e, vec![trash(&e, "a.jpg")], false, None).await);
+    // The trash is internal: a restore reports the place the item goes back to.
+    let dry = undo(&e, &b, true).await;
+    assert_eq!(dry["result"]["results"][0]["path"], "a.jpg");
+    assert_eq!(dry["result"]["results"][0]["new_path"], "a.jpg");
     let v = undo(&e, &b, false).await;
     assert_eq!(status(&v, 0), "done");
+    let r = &v["result"]["results"][0];
+    assert_eq!(r["path"], "a.jpg");
+    assert_eq!(r["new_path"], "a.jpg");
+    assert_eq!(r["new_item_id"], id);
     assert!(e.root.join("a.jpg").exists());
     let got = call(&e.app, &e.owner_token, "media.get", json!({"id": id})).await;
     assert_eq!(got["result"]["rating"], 4);
@@ -334,8 +342,22 @@ async fn undo_of_undo_redoes() {
     let b = batch_id(&apply(&e, vec![trash(&e, "a.jpg")], false, None).await);
     let u = batch_id(&undo(&e, &b, false).await);
     assert!(e.root.join("a.jpg").exists());
+    // A redo of a trash reports like a trash: no place inside `.asteria`.
+    let dry = undo(&e, &u, true).await;
+    let r = &dry["result"]["results"][0];
+    assert_eq!(r["path"], "a.jpg");
+    assert!(
+        r.get("new_path").is_none() && r.get("new_item_id").is_none(),
+        "{r}"
+    );
     let v = undo(&e, &u, false).await;
     assert_eq!(status(&v, 0), "done");
+    let r = &v["result"]["results"][0];
+    assert_eq!(r["path"], "a.jpg");
+    assert!(
+        r.get("new_path").is_none() && r.get("new_item_id").is_none(),
+        "{r}"
+    );
     assert!(!e.root.join("a.jpg").exists());
     let kinds: Vec<OpKind> = journal(&e).iter().map(|l| l.kind).collect();
     assert_eq!(kinds.iter().filter(|k| **k == OpKind::Trash).count(), 2);
@@ -413,6 +435,16 @@ async fn undo_skips_when_the_old_place_is_taken() {
     assert_eq!(v["result"]["results"][0]["reason"], "target_exists");
     assert_eq!(fs::read(e.root.join("a.jpg")).unwrap(), b"someone else");
     assert!(e.root.join("2025/x.jpg").exists());
+}
+
+#[tokio::test]
+async fn a_skipped_restore_reports_the_old_place_not_the_trash() {
+    let e = env();
+    let b = batch_id(&apply(&e, vec![trash(&e, "a.jpg")], false, None).await);
+    fs::write(e.root.join("a.jpg"), "someone else").unwrap();
+    let v = undo(&e, &b, false).await;
+    assert_eq!(status(&v, 0), "skipped");
+    assert_eq!(v["result"]["results"][0]["path"], "a.jpg");
 }
 
 #[tokio::test]

@@ -358,7 +358,7 @@ impl Writer {
                     completed.push((op.from.clone(), to));
                     results.push(organize::applied(i, &op, d));
                 }
-                Err(why) => results.push(organize::skipped(i, &op.from, why)),
+                Err(why) => results.push(organize::skipped(i, organize::reported_path(&op), why)),
             }
         }
 
