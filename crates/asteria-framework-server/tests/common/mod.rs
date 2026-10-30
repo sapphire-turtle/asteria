@@ -17,6 +17,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use grain_id::GrainId;
 use http_body_util::BodyExt;
+use rmcp::service::{RoleClient, RunningService, ServiceExt as _};
+use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -151,6 +154,18 @@ pub async fn call(app: &Router, token: &str, method: &str, params: Value) -> Val
     assert_eq!(v["jsonrpc"], "2.0");
     assert_eq!(v["id"], 7);
     v
+}
+
+/// Serves `e.app` on a free local port and connects to its `/mcp` as the owner.
+pub async fn connect(e: &Env) -> RunningService<RoleClient, ()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = e.app.clone();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp"))
+        .auth_header(e.owner_token.clone());
+    let transport = StreamableHttpClientTransport::from_config(config);
+    ().serve(transport).await.unwrap()
 }
 
 pub fn item_id(e: &Env, path: &str) -> String {

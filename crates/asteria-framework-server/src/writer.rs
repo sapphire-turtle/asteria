@@ -63,7 +63,7 @@ type ExecFn = Box<dyn FnOnce(&Arc<Library>, &Arc<Cache>) + Send>;
 
 enum Job {
     Update {
-        user: UserId,
+        actor: Actor,
         params: MediaUpdateParams,
         reply: oneshot::Sender<Result<ItemRecord, WriteError>>,
     },
@@ -128,11 +128,11 @@ pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHa
             let (lib, cache) = (library.clone(), cache.clone());
             match job {
                 Job::Update {
-                    user,
+                    actor,
                     params,
                     reply,
                 } => {
-                    let r = run_blocking(move || do_update(&lib, &cache, user, params)).await;
+                    let r = run_blocking(move || do_update(&lib, &cache, actor, params)).await;
                     let _ = reply.send(r);
                 }
                 Job::Relink { reply } => {
@@ -201,15 +201,17 @@ fn stopped() -> WriteError {
 }
 
 impl Writer {
+    /// Applies `params` to an item's sidecar; the journal records `actor`, and the rating
+    /// is that of the user `actor` acts as.
     pub async fn update(
         &self,
-        user: UserId,
+        actor: Actor,
         params: MediaUpdateParams,
     ) -> Result<ItemRecord, WriteError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(Job::Update {
-                user,
+                actor,
                 params,
                 reply,
             })
@@ -671,10 +673,11 @@ fn usable_file_hash(rec: &ItemRecord, now: Option<Stamp>) -> Option<ContentHash>
 fn do_update(
     library: &Library,
     cache: &Cache,
-    user: UserId,
+    actor: Actor,
     params: MediaUpdateParams,
 ) -> Result<ItemRecord, WriteError> {
     validate(&params)?;
+    let user = organize::actor_user(actor);
     let id: ItemId = params.id.clone();
     let rec = cache
         .get_by_id(&id)
@@ -690,7 +693,7 @@ fn do_update(
     let owner = library.owner();
 
     // One closure: one sidecar write, one journal entry, no rehash when `hash` is set.
-    let written = library.update_sidecar(rel, Actor::User(user), |sc| {
+    let written = library.update_sidecar(rel, actor, |sc| {
         if sc.content_hash.is_none() {
             sc.content_hash = hash;
         }

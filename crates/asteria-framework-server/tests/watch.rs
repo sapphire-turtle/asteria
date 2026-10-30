@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use asteria_framework::journal::Actor;
 use asteria_framework::{Library, MediaKind};
 use asteria_framework_api::MediaUpdateParams;
 use asteria_framework_server::{AppExtension, Cache, ScanLoop, spawn_scan_loop, spawn_writer};
@@ -219,7 +220,7 @@ async fn moved_file_sidecar_is_relinked() {
     let id = e.cache.get_by_path("a.jpg").unwrap().unwrap().id;
     e.writer
         .update(
-            e.lib.owner(),
+            Actor::User(e.lib.owner()),
             MediaUpdateParams {
                 id,
                 rating: Some(5),

@@ -107,7 +107,20 @@ pub(crate) async fn rpc(
             Err(rpc_error(codes::INVALID_REQUEST, "jsonrpc must be \"2.0\"")),
         );
     }
-    respond(id, dispatch(&state, user, &req.method, req.params).await)
+    respond(
+        id,
+        dispatch(&state, Actor::User(user), &req.method, req.params).await,
+    )
+}
+
+/// Runs one RPC method for `actor` (`/mcp` calls the methods through this).
+pub(crate) async fn call(
+    state: &AppState,
+    actor: Actor,
+    method: &str,
+    params: Value,
+) -> Result<Value, RpcError> {
+    dispatch(state, actor, method, params).await
 }
 
 fn params<P: DeserializeOwned>(v: Value) -> Result<P, RpcError> {
@@ -176,12 +189,15 @@ async fn upload_blocking<T: Send + 'static>(
     }
 }
 
+/// Runs `method`. Writes are journaled as `actor`; everything else sees the user `actor`
+/// acts as.
 async fn dispatch(
     state: &AppState,
-    user: UserId,
+    actor: Actor,
     method: &str,
     p: Value,
 ) -> Result<Value, RpcError> {
+    let user = organize::actor_user(actor);
     let owner = state.library().owner();
     match method {
         SERVER_INFO => {
@@ -246,7 +262,7 @@ async fn dispatch(
         }
         MEDIA_UPDATE => {
             let p: MediaUpdateParams = params(p)?;
-            let rec = state.writer().update(user, p).await.map_err(write_err)?;
+            let rec = state.writer().update(actor, p).await.map_err(write_err)?;
             to_value(media_item(rec, user, owner))
         }
         UPLOAD_CHECK => {
@@ -329,13 +345,7 @@ async fn dispatch(
             };
             let batch = state
                 .writer()
-                .organize(
-                    Actor::User(user),
-                    p.label,
-                    planned,
-                    state.extension().clone(),
-                    kind,
-                )
+                .organize(actor, p.label, planned, state.extension().clone(), kind)
                 .await
                 .map_err(write_err)?;
             to_value(OrganizeResult {
@@ -390,13 +400,7 @@ async fn dispatch(
             };
             let batch = state
                 .writer()
-                .organize(
-                    Actor::User(user),
-                    None,
-                    plan.ops,
-                    state.extension().clone(),
-                    kind,
-                )
+                .organize(actor, None, plan.ops, state.extension().clone(), kind)
                 .await
                 .map_err(write_err)?;
             to_value(OrganizeResult {

@@ -1004,7 +1004,11 @@ mod tests {
             description: None,
             label: None,
         };
-        let updated = tokio::time::timeout(Duration::from_secs(5), writer.update(me, update)).await;
+        let updated = tokio::time::timeout(
+            Duration::from_secs(5),
+            writer.update(Actor::User(me), update),
+        )
+        .await;
         release.send(()).unwrap();
         *hold::HOLD.lock().unwrap() = None;
         let rec = updated
