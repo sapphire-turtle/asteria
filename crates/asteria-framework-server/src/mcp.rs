@@ -222,14 +222,14 @@ pub(crate) fn framework_tools() -> Vec<McpTool> {
     ]
 }
 
-/// Every method the framework answers. App tools may not call these: the framework decides
-/// which of its methods an agent gets (uploads and rescans it does not).
 /// The tool that shows thumbnails. It has no RPC method: `call_tool` answers it itself.
 const MEDIA_PREVIEW: &str = "media_preview";
 
 /// The most items one `media_preview` shows.
 const MAX_PREVIEW_ITEMS: usize = 4;
 
+/// Every method the framework answers. App tools may not call these: the framework decides
+/// which of its methods an agent gets (uploads and rescans it does not).
 const FRAMEWORK_METHODS: [&str; 15] = [
     SERVER_INFO,
     LIBRARY_INFO,

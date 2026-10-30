@@ -6,8 +6,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use asteria_framework::MediaKind;
 use asteria_framework_server::{
-    AppExtension, ExtContext, ItemRecord, Rewrite, ServerError, ThumbSource,
+    AppExtension, ExtContext, ItemRecord, McpTool, Rewrite, ServerError, ThumbSource,
 };
+use serde_json::json;
+
 use asteria_music_api::{
     ALBUM_GET, ALBUM_LIST, ARTIST_GET, ARTIST_LIST, PLAYLIST_GET, PLAYLIST_LIST, RpcError,
     TrackTags,
@@ -102,6 +104,52 @@ pub fn is_playlist(rel: &str) -> bool {
     })
 }
 
+fn paging_schema() -> serde_json::Map<String, serde_json::Value> {
+    schema(
+        json!({
+            "cursor": {"type": "string", "description": "next_cursor of the previous page."},
+            "limit": {"type": "integer", "minimum": 1, "description": "The most entries to return."},
+        }),
+        &[],
+    )
+}
+
+fn id_schema(what: &str) -> serde_json::Map<String, serde_json::Value> {
+    schema(
+        json!({"id": {"type": "string", "description": format!("The {what}'s id, as listed.")}}),
+        &["id"],
+    )
+}
+
+fn schema(
+    properties: serde_json::Value,
+    required: &[&str],
+) -> serde_json::Map<String, serde_json::Value> {
+    let serde_json::Value::Object(schema) = json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    }) else {
+        unreachable!("json! of an object literal is an object")
+    };
+    schema
+}
+
+fn tool(
+    name: &str,
+    method: &str,
+    description: &str,
+    input_schema: serde_json::Map<String, serde_json::Value>,
+) -> McpTool {
+    McpTool {
+        name: name.into(),
+        description: description.into(),
+        input_schema,
+        method: method.into(),
+    }
+}
+
 impl AppExtension for MusicExtension {
     fn accepts(&self, kind: MediaKind) -> bool {
         kind == MediaKind::Audio
@@ -129,6 +177,53 @@ impl AppExtension for MusicExtension {
             }
         };
         cover::thumb_source(ctx.library.root(), &rec.path, abs, &images)
+    }
+
+    fn mcp_tools(&self) -> Vec<McpTool> {
+        vec![
+            tool(
+                "album_list",
+                ALBUM_LIST,
+                "Lists the albums of the music library with their title, artist, year and \
+                 track count. Pass next_cursor back as cursor for the next page.",
+                paging_schema(),
+            ),
+            tool(
+                "album_get",
+                ALBUM_GET,
+                "Returns one album by id with its tracks in track order. Each track carries \
+                 its media item id and tags.",
+                id_schema("album"),
+            ),
+            tool(
+                "artist_list",
+                ARTIST_LIST,
+                "Lists the artists of the music library with their album counts. Pass \
+                 next_cursor back as cursor for the next page.",
+                paging_schema(),
+            ),
+            tool(
+                "artist_get",
+                ARTIST_GET,
+                "Returns one artist by id with the albums they made and the albums they \
+                 appear on.",
+                id_schema("artist"),
+            ),
+            tool(
+                "playlist_list",
+                PLAYLIST_LIST,
+                "Lists the playlists (.m3u and .m3u8 files) found in the library. Pass \
+                 next_cursor back as cursor for the next page.",
+                paging_schema(),
+            ),
+            tool(
+                "playlist_get",
+                PLAYLIST_GET,
+                "Returns one playlist by id with its entries; each entry says whether its \
+                 track was found and, if so, which track it is.",
+                id_schema("playlist"),
+            ),
+        ]
     }
 
     fn rpc(
@@ -188,5 +283,83 @@ impl AppExtension for MusicExtension {
             }
         }
         rewrites
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use asteria_framework_server::AppExtension;
+    use asteria_music_api::*;
+    use serde::de::DeserializeOwned;
+    use serde_json::{Value, json};
+
+    use super::MusicExtension;
+
+    type Check = fn(&Value);
+
+    fn parses<T: DeserializeOwned>(v: &Value) {
+        serde_json::from_value::<T>(v.clone()).unwrap();
+    }
+
+    #[test]
+    fn schema_examples_parse() {
+        let tools = MusicExtension::new().mcp_tools();
+        let examples: Vec<(&str, &str, Value, Check)> = vec![
+            (
+                "album_list",
+                ALBUM_LIST,
+                json!({"cursor": "c", "limit": 50}),
+                parses::<ListParams>,
+            ),
+            (
+                "album_get",
+                ALBUM_GET,
+                json!({"id": "a1"}),
+                parses::<AlbumGetParams>,
+            ),
+            (
+                "artist_list",
+                ARTIST_LIST,
+                json!({"cursor": "c", "limit": 50}),
+                parses::<ListParams>,
+            ),
+            (
+                "artist_get",
+                ARTIST_GET,
+                json!({"id": "r1"}),
+                parses::<ArtistGetParams>,
+            ),
+            (
+                "playlist_list",
+                PLAYLIST_LIST,
+                json!({"cursor": "c", "limit": 50}),
+                parses::<ListParams>,
+            ),
+            (
+                "playlist_get",
+                PLAYLIST_GET,
+                json!({"id": "p1"}),
+                parses::<PlaylistGetParams>,
+            ),
+        ];
+        assert_eq!(tools.len(), examples.len());
+        for (name, method, example, check) in examples {
+            let t = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} missing"));
+            assert_eq!(t.method, method, "{name}");
+            assert!(!t.description.is_empty(), "{name}");
+            assert_eq!(t.input_schema["type"], "object", "{name}");
+            assert_eq!(t.input_schema["additionalProperties"], false, "{name}");
+            let props = t.input_schema["properties"].as_object().unwrap();
+            for key in example.as_object().unwrap().keys() {
+                assert!(props.contains_key(key), "{name}: {key} not in properties");
+            }
+            for key in t.input_schema["required"].as_array().unwrap() {
+                assert!(example.get(key.as_str().unwrap()).is_some(), "{name}");
+            }
+            check(&example);
+        }
     }
 }
