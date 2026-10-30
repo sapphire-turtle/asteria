@@ -190,9 +190,9 @@ async fn chunk_errors_map_to_statuses() {
 }
 
 #[tokio::test]
-async fn rpc_limit_still_64k() {
+async fn rpc_limit_is_not_lifted_by_the_chunk_route() {
     let e = env();
-    let pad = "x".repeat(65 * 1024);
+    let pad = "x".repeat(4 * 1024 * 1024 + 1024);
     let body = json!({"jsonrpc":"2.0","id":1,"method":"server.info","params":{"pad":pad}});
     let (s, _) = post_raw(
         &e.app,
