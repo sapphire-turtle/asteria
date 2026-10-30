@@ -611,6 +611,11 @@ fn apply_rewrite(ctx: &OpCtx, rw: &Rewrite) {
         return;
     }
     let abs = ctx.library.root().join(&rw.path);
+    // Writing over a link would replace it with a plain file.
+    if std::fs::symlink_metadata(&abs).is_ok_and(|m| m.file_type().is_symlink()) {
+        tracing::info!(path = %rw.path, "rewrite skipped: the playlist is a symlink");
+        return;
+    }
     match std::fs::read_to_string(&abs) {
         Ok(now) if now == rw.before => {}
         Ok(_) => {
@@ -1040,6 +1045,28 @@ mod tests {
         };
         assert_eq!(apply(&e.ctx(), &link).unwrap_err(), SkipReason::Symlink);
         assert!(e.path("b.jpg").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_playlist_is_not_rewritten() {
+        let e = Env::new();
+        std::fs::write(e.path("real.m3u"), "a.jpg\n").unwrap();
+        std::os::unix::fs::symlink("real.m3u", e.path("list.m3u")).unwrap();
+        let before = e.journal_len();
+        let rw = Rewrite {
+            path: "list.m3u".into(),
+            before: "a.jpg\n".into(),
+            after: "c.jpg\n".into(),
+        };
+        apply_rewrite(&e.ctx(), &rw);
+        let link = std::fs::symlink_metadata(e.path("list.m3u")).unwrap();
+        assert!(link.file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(e.path("real.m3u")).unwrap(),
+            "a.jpg\n"
+        );
+        assert_eq!(e.journal_len(), before);
     }
 
     #[test]
