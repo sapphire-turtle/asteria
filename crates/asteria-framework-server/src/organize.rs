@@ -1,29 +1,33 @@
 //! Moving, renaming and trashing one media file together with its sidecar: the per-operation
-//! core of the organize batches. Nothing here is wired to the writer yet.
+//! core of the organize batches, and the pieces the writer strings into a batch (request
+//! validation, dry runs, the closing steps).
 //!
 //! Writes are ordered original, journal, cache. A move never replaces an existing file, and
 //! a stop at any point never loses an original: after the media moved but before the sidecar
 //! did, `relink_orphans` finds the sidecar again; a missing journal line only loses the
 //! undo of that one move; a stale cache is fixed by the next scan.
 
-// Not called until the writer uses it.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::Path;
 
+use asteria_framework::fsutil::atomic_write;
 use asteria_framework::hash::file_hash;
 use asteria_framework::journal::{Actor, BatchId, JournalEntry, OpId, OpKind};
-use asteria_framework::paths::{META_DIR, sidecar_path_for, trash_rel};
+use asteria_framework::paths::{META_DIR, TRASH_DIR, sidecar_path_for, trash_rel};
+use asteria_framework::upload_path::validate_inbox_path;
 use asteria_framework::{Error as FwError, Library, classify};
-use asteria_framework_api::SkipReason;
+use asteria_framework_api::{
+    ItemId, MAX_LABEL_CHARS, MAX_OPS, OpResult, OpStatus, OrganizeAction, OrganizeOp, RpcError,
+    SkipReason, codes,
+};
 use chrono::Utc;
 use grain_id::GrainId;
 
-use crate::cache::{Cache, ItemRecord, SidecarSnapshot, StoredHash, item_id_for};
-use crate::ext::AppExtension;
+use crate::cache::{Cache, ExtraRecord, ItemRecord, SidecarSnapshot, StoredHash, item_id_for};
+use crate::ext::{AppExtension, ExtContext, Rewrite};
 use crate::fsutil::move_no_clobber;
+use crate::rpc::rpc_error;
 use crate::scan::{extract_guarded, mtime_ns};
 
 /// One planned operation: move `from` to `to`, provided the file is still what was planned.
@@ -76,6 +80,12 @@ pub(crate) struct Sim {
 
 impl Sim {
     /// Notes that `from` was moved to `to` (media paths; the sidecar follows its media).
+    /// Notes that `from` was moved away to somewhere that cannot clash (the trash).
+    pub(crate) fn free(&mut self, from: &str) {
+        self.taken.remove(from);
+        self.freed.insert(from.to_string());
+    }
+
     pub(crate) fn record(&mut self, from: &str, to: &str) {
         self.taken.remove(from);
         self.freed.insert(from.to_string());
@@ -335,6 +345,307 @@ fn restore_record(ctx: &OpCtx, op: &PlannedOp, to: &str) -> Result<Option<ItemRe
         .put_many_with_app_data(std::slice::from_ref(&rec), &[(to.to_string(), data)])
         .map_err(|e| e.to_string())?;
     Ok(Some(rec))
+}
+
+/// An operation of a request after the acceptance checks: ready to run, or already skipped
+/// (the path is what `OpResult::path` reports; empty when the item is unknown).
+pub(crate) type Planned = Result<PlannedOp, (String, SkipReason)>;
+
+/// What a finished batch reports.
+pub struct Batch {
+    /// `None` for a dry run.
+    pub id: Option<BatchId>,
+    pub results: Vec<OpResult>,
+}
+
+fn invalid(msg: impl Into<String>) -> RpcError {
+    rpc_error(codes::INVALID_PARAMS, msg)
+}
+
+/// A label is at most `MAX_LABEL_CHARS` characters without control characters.
+pub(crate) fn validate_label(label: Option<&str>) -> Result<(), RpcError> {
+    if let Some(l) = label
+        && (l.chars().count() > MAX_LABEL_CHARS || l.chars().any(char::is_control))
+    {
+        return Err(invalid(format!(
+            "label is at most {MAX_LABEL_CHARS} characters without control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn extension_of(path: &str) -> Option<&str> {
+    Path::new(path).extension().and_then(|e| e.to_str())
+}
+
+/// Checks the whole request and turns it into planned operations. Any problem with the
+/// request itself is an error and nothing runs; an unknown item only skips its operation.
+pub(crate) fn plan_apply(cache: &Cache, ops: &[OrganizeOp]) -> Result<Vec<Planned>, RpcError> {
+    if ops.len() > MAX_OPS {
+        return Err(invalid(format!("at most {MAX_OPS} operations per batch")));
+    }
+    let mut seen_items = HashSet::new();
+    let mut seen_targets: std::collections::HashMap<&str, usize> = Default::default();
+    let mut planned = Vec::with_capacity(ops.len());
+    for (i, op) in ops.iter().enumerate() {
+        if !seen_items.insert(op.item_id.0.as_str()) {
+            return Err(invalid(format!("item {i} appears twice")));
+        }
+        let rec = cache.get_by_id(&op.item_id).map_err(|e| {
+            tracing::error!(error = %e, "organize: cache read failed");
+            rpc_error(codes::INTERNAL_ERROR, "internal error")
+        })?;
+        let target = match &op.action {
+            OrganizeAction::Move { to } => {
+                validate_inbox_path(to).map_err(|m| rpc_error(codes::INVALID_PATH, m))?;
+                if let Some(j) = seen_targets.insert(to.as_str(), i) {
+                    return Err(invalid(format!(
+                        "operations {j} and {i} have the same target"
+                    )));
+                }
+                if let Some(rec) = &rec {
+                    let (a, b) = (extension_of(&rec.path), extension_of(to));
+                    let same = match (a, b) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                        _ => false,
+                    };
+                    if !same {
+                        return Err(invalid(format!("operation {i} changes the extension")));
+                    }
+                }
+                Target::Path(to.clone())
+            }
+            OrganizeAction::Trash => Target::Trash,
+        };
+        planned.push(match rec {
+            None => Err((String::new(), SkipReason::Missing)),
+            Some(rec) => Ok(PlannedOp {
+                from: rec.path,
+                to: target,
+                expect: Expect {
+                    size: rec.size,
+                    mtime_ns: rec.mtime_ns,
+                    file_hash: op.file_hash.clone(),
+                    hash: rec.hash,
+                },
+            }),
+        });
+    }
+    Ok(planned)
+}
+
+pub(crate) fn skipped(index: usize, path: &str, reason: SkipReason) -> OpResult {
+    OpResult {
+        index: index as u32,
+        status: OpStatus::Skipped,
+        path: path.to_string(),
+        new_path: None,
+        new_item_id: None,
+        reason: Some(reason),
+    }
+}
+
+pub(crate) fn done(
+    index: usize,
+    path: &str,
+    new_path: Option<String>,
+    new_item_id: Option<ItemId>,
+) -> OpResult {
+    OpResult {
+        index: index as u32,
+        status: OpStatus::Done,
+        path: path.to_string(),
+        new_path,
+        new_item_id,
+        reason: None,
+    }
+}
+
+/// The report of an operation that `apply` carried out.
+pub(crate) fn applied(index: usize, op: &PlannedOp, d: Done) -> OpResult {
+    match op.to {
+        Target::Path(_) => done(index, &op.from, Some(d.to), d.record.map(|r| r.id)),
+        Target::Trash => done(index, &op.from, None, None),
+    }
+}
+
+/// Checks every operation in order without touching anything; each one sees the effect the
+/// earlier ones would have.
+pub(crate) fn dry_run(ctx: &OpCtx, ops: &[Planned]) -> Vec<OpResult> {
+    let mut sim = Sim::default();
+    let lib_id = &ctx.library.config().id;
+    ops.iter()
+        .enumerate()
+        .map(|(i, planned)| match planned {
+            Err((path, why)) => skipped(i, path, *why),
+            Ok(op) => match check(ctx, op, &sim) {
+                Err(why) => skipped(i, &op.from, why),
+                Ok(()) => match &op.to {
+                    Target::Path(to) => {
+                        sim.record(&op.from, to);
+                        done(i, &op.from, Some(to.clone()), Some(item_id_for(lib_id, to)))
+                    }
+                    Target::Trash => {
+                        sim.free(&op.from);
+                        done(i, &op.from, None, None)
+                    }
+                },
+            },
+        })
+        .collect()
+}
+
+/// The user an actor acts for.
+pub(crate) fn actor_user(actor: Actor) -> asteria_framework::UserId {
+    match actor {
+        Actor::User(u) => u,
+        Actor::Agent { on_behalf_of } => on_behalf_of,
+    }
+}
+
+/// Asks the app what else the moves change. A panicking extension gives nothing.
+pub(crate) fn rewrites_after(
+    ext: &dyn AppExtension,
+    ctx: &ExtContext,
+    moves: &[(String, String)],
+) -> Vec<Rewrite> {
+    if moves.is_empty() {
+        return Vec::new();
+    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ext.after_moves(ctx, moves)))
+        .unwrap_or_else(|_| {
+            tracing::error!("after_moves panicked; no playlists were rewritten");
+            Vec::new()
+        })
+}
+
+/// The first journal line of a batch.
+pub(crate) fn write_header(
+    ctx: &OpCtx,
+    label: Option<&str>,
+    op_count: usize,
+    undo_of: Option<BatchId>,
+) -> Result<(), FwError> {
+    append(
+        ctx,
+        OpKind::Batch,
+        serde_json::Value::Null,
+        serde_json::json!({ "label": label, "op_count": op_count, "undo_of": undo_of }),
+    )
+}
+
+fn append(
+    ctx: &OpCtx,
+    kind: OpKind,
+    before: serde_json::Value,
+    after: serde_json::Value,
+) -> Result<(), FwError> {
+    ctx.library.journal()?.append(&JournalEntry {
+        op_id: OpId(GrainId::random()),
+        plan_id: ctx.batch,
+        actor: ctx.actor,
+        at: Utc::now(),
+        kind,
+        before,
+        after,
+    })
+}
+
+/// The last write job of a batch: removes the folders the moves emptied, applies the
+/// rewrites and journals the end.
+pub(crate) fn finish(
+    ctx: &OpCtx,
+    sources: &[String],
+    rewrites: &[Rewrite],
+    done: usize,
+    skipped: usize,
+) {
+    remove_emptied_folders(ctx.library.root(), sources);
+    for rw in rewrites {
+        apply_rewrite(ctx, rw);
+    }
+    let end = append(
+        ctx,
+        OpKind::BatchEnd,
+        serde_json::Value::Null,
+        serde_json::json!({ "done": done, "skipped": skipped }),
+    );
+    if let Err(e) = end {
+        tracing::error!(error = %e, "could not journal the end of a batch");
+    }
+}
+
+/// Removes the folders that `sources` left empty, up towards the root. The library root,
+/// `.asteria` and the trash folder stay.
+fn remove_emptied_folders(root: &Path, sources: &[String]) {
+    let keep = format!("{META_DIR}/{TRASH_DIR}");
+    for src in sources {
+        let mut dir = src.rsplit_once('/').map(|p| p.0);
+        while let Some(rel) = dir {
+            if rel == META_DIR || rel == keep {
+                break;
+            }
+            // Fails while the folder still holds something (or on any other error): stop.
+            if std::fs::remove_dir(root.join(rel)).is_err() {
+                break;
+            }
+            dir = rel.rsplit_once('/').map(|p| p.0);
+        }
+    }
+}
+
+fn safe_rel(rel: &str) -> bool {
+    !rel.is_empty()
+        && !in_meta_dir(rel)
+        && Path::new(rel)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// Writes `rw.after` over `rw.path` if the file still holds `rw.before`, journals it and
+/// updates the extras record. Anything else is logged and left alone.
+fn apply_rewrite(ctx: &OpCtx, rw: &Rewrite) {
+    if !safe_rel(&rw.path) {
+        tracing::warn!(path = %rw.path, "rewrite refused: not a library path");
+        return;
+    }
+    let abs = ctx.library.root().join(&rw.path);
+    match std::fs::read_to_string(&abs) {
+        Ok(now) if now == rw.before => {}
+        Ok(_) => {
+            tracing::warn!(path = %rw.path, "rewrite skipped: the file changed meanwhile");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(path = %rw.path, error = %e, "rewrite skipped: cannot read the file");
+            return;
+        }
+    }
+    if let Err(e) = atomic_write(&abs, rw.after.as_bytes()) {
+        tracing::warn!(path = %rw.path, error = %e, "rewrite failed");
+        return;
+    }
+    let journaled = append(
+        ctx,
+        OpKind::RewritePlaylist,
+        serde_json::json!({ "path": rw.path, "content": rw.before }),
+        serde_json::json!({ "path": rw.path, "content": rw.after }),
+    );
+    if let Err(e) = journaled {
+        tracing::error!(path = %rw.path, error = %e, "rewrote a file but could not journal it");
+    }
+    if ctx.ext.wants_extra(&rw.path)
+        && let Ok(meta) = std::fs::metadata(&abs)
+    {
+        let rec = ExtraRecord {
+            size: meta.len(),
+            mtime_ns: mtime_ns(&meta),
+        };
+        if let Err(e) = ctx.cache.put_extras(&[(rw.path.clone(), rec)]) {
+            tracing::warn!(path = %rw.path, error = %e, "extras not updated; the next scan will fix it");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -648,5 +959,20 @@ mod tests {
         );
         assert!(!e.path("c.jpg").exists());
         assert_eq!(e.journal_len(), n);
+    }
+
+    #[test]
+    fn more_than_max_ops_is_refused() {
+        let e = Env::new();
+        let ops: Vec<OrganizeOp> = (0..=MAX_OPS)
+            .map(|i| OrganizeOp {
+                item_id: ItemId(format!("i{i}")),
+                action: OrganizeAction::Trash,
+                file_hash: None,
+            })
+            .collect();
+        let err = plan_apply(&e.cache, &ops).err().unwrap();
+        assert_eq!(err.code, codes::INVALID_PARAMS);
+        assert_eq!(err.message, "at most 10000 operations per batch");
     }
 }

@@ -39,6 +39,16 @@ pub enum ThumbSource {
     None,
 }
 
+/// A change to an app file (a playlist, say) that follows a batch of moves: `path` is
+/// rewritten from `before` to `after`, but only if it still holds exactly `before`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rewrite {
+    /// Library-relative, with `/` separators.
+    pub path: String,
+    pub before: String,
+    pub after: String,
+}
+
 pub trait AppExtension: Send + Sync + 'static {
     /// Which kinds of media this app turns into items.
     fn accepts(&self, kind: MediaKind) -> bool;
@@ -62,5 +72,11 @@ pub trait AppExtension: Send + Sync + 'static {
         _params: serde_json::Value,
     ) -> Option<Result<serde_json::Value, RpcError>> {
         None
+    }
+    /// Called once a batch has moved files. `moves` are the (old path, new path) pairs that
+    /// completed; moves to the trash are not included. The returned rewrites are applied
+    /// and journaled as part of the batch.
+    fn after_moves(&self, _ctx: &ExtContext, _moves: &[(String, String)]) -> Vec<Rewrite> {
+        Vec::new()
     }
 }

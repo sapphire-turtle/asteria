@@ -383,3 +383,125 @@ fn a_cancelled_scan_stops_early_and_removes_nothing() {
     assert!(e.cache.get_by_path("old.jpg").unwrap().is_none());
     assert!(e.cache.extras().unwrap().is_empty());
 }
+
+/// Rewrites `list.m3u8` after a batch: `old` becomes `new`, but only if the file says
+/// `before`. `panics` makes `after_moves` panic instead.
+struct Playlist {
+    before: String,
+    panics: bool,
+    seen: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl AppExtension for Playlist {
+    fn accepts(&self, kind: MediaKind) -> bool {
+        matches!(kind, MediaKind::Image)
+    }
+    fn wants_extra(&self, rel: &str) -> bool {
+        rel.ends_with(".m3u8")
+    }
+    fn after_moves(
+        &self,
+        ctx: &ExtContext,
+        moves: &[(String, String)],
+    ) -> Vec<asteria_framework_server::Rewrite> {
+        assert!(self.panics || ctx.user == ctx.owner);
+        if self.panics {
+            panic!("boom");
+        }
+        *self.seen.lock().unwrap() = moves.to_vec();
+        vec![asteria_framework_server::Rewrite {
+            path: "list.m3u8".into(),
+            before: self.before.clone(),
+            after: "c.jpg\n".into(),
+        }]
+    }
+}
+
+fn playlist_env(before: &str, panics: bool, content: &str) -> (common::Env, Arc<Playlist>) {
+    let ext = Arc::new(Playlist {
+        before: before.into(),
+        panics,
+        seen: Default::default(),
+    });
+    let e = common::env_ext(ext.clone());
+    fs::write(e.root.join("list.m3u8"), content).unwrap();
+    scan(&e.lib, &e.cache, ext.as_ref()).unwrap();
+    (e, ext)
+}
+
+async fn move_a_to_c(e: &common::Env) -> Value {
+    let id = common::item_id(e, "a.jpg");
+    common::call(
+        &e.app,
+        &e.owner_token,
+        "organize.apply",
+        json!({"ops": [{"item_id": id, "kind": "move", "to": "c.jpg"}]}),
+    )
+    .await
+}
+
+fn kinds(e: &common::Env) -> Vec<String> {
+    e.lib
+        .journal()
+        .unwrap()
+        .read_all()
+        .unwrap()
+        .iter()
+        .map(|l| {
+            serde_json::to_value(l.kind)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn after_moves_rewrites_are_written_and_journaled() {
+    let (e, ext) = playlist_env("a.jpg\n", false, "a.jpg\n");
+    move_a_to_c(&e).await;
+    assert_eq!(
+        *ext.seen.lock().unwrap(),
+        vec![("a.jpg".to_string(), "c.jpg".to_string())]
+    );
+    assert_eq!(
+        fs::read_to_string(e.root.join("list.m3u8")).unwrap(),
+        "c.jpg\n"
+    );
+    let j = e.lib.journal().unwrap().read_all().unwrap();
+    let rw = j
+        .iter()
+        .find(|l| serde_json::to_value(l.kind).unwrap() == "rewrite_playlist")
+        .unwrap();
+    assert_eq!(rw.before["content"], "a.jpg\n");
+    assert_eq!(rw.after["content"], "c.jpg\n");
+    assert_eq!(rw.after["path"], "list.m3u8");
+    let extras = e.cache.extras().unwrap();
+    assert_eq!(extras[0].1.size, 6);
+}
+
+#[tokio::test]
+async fn a_rewrite_of_a_changed_file_is_skipped() {
+    let (e, _ext) = playlist_env("a.jpg\n", false, "edited meanwhile\n");
+    let v = move_a_to_c(&e).await;
+    assert_eq!(v["result"]["results"][0]["status"], "done");
+    assert_eq!(
+        fs::read_to_string(e.root.join("list.m3u8")).unwrap(),
+        "edited meanwhile\n"
+    );
+    assert!(!kinds(&e).contains(&"rewrite_playlist".to_string()));
+    assert_eq!(kinds(&e).last().unwrap(), "batch_end");
+}
+
+#[tokio::test]
+async fn a_panicking_after_moves_still_ends_the_batch() {
+    let (e, _ext) = playlist_env("a.jpg\n", true, "a.jpg\n");
+    let v = move_a_to_c(&e).await;
+    assert_eq!(v["result"]["results"][0]["status"], "done");
+    assert_eq!(
+        fs::read_to_string(e.root.join("list.m3u8")).unwrap(),
+        "a.jpg\n"
+    );
+    assert_eq!(kinds(&e).last().unwrap(), "batch_end");
+}

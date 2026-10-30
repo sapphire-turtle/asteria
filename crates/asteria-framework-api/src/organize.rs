@@ -4,6 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::ItemId;
 
+/// Most operations one `organize.apply` batch may carry; more is `INVALID_PARAMS`.
+pub const MAX_OPS: usize = 10_000;
+/// Longest batch label, in characters.
+pub const MAX_LABEL_CHARS: usize = 200;
+
 /// One operation of an `organize.apply` batch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrganizeOp {

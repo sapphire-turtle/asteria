@@ -5,12 +5,14 @@ use std::sync::atomic::Ordering;
 
 use asteria_framework::UserId;
 use asteria_framework::hash::ContentHash;
+use asteria_framework::journal::Actor;
 use asteria_framework_api::{
     ExistingMedia, FOLDER_LIST, FolderListParams, FolderListing, ItemId, LIBRARY_INFO,
     LIBRARY_RESCAN, LibraryInfo, MEDIA_GET, MEDIA_UPDATE, MediaGetParams, MediaItem,
-    MediaUpdateParams, RpcError, RpcOutcome, RpcResponse, SERVER_INFO, ServerInfo, UPLOAD_ABORT,
-    UPLOAD_BEGIN, UPLOAD_CHECK, UPLOAD_COMMIT, UPLOAD_STATUS, UploadBeginParams, UploadCheckParams,
-    UploadCheckResult, UploadCommitParams, UploadCommitResult, UploadSessionParams, codes,
+    MediaUpdateParams, ORGANIZE_APPLY, OrganizeApplyParams, OrganizeResult, RpcError, RpcOutcome,
+    RpcResponse, SERVER_INFO, ServerInfo, UPLOAD_ABORT, UPLOAD_BEGIN, UPLOAD_CHECK, UPLOAD_COMMIT,
+    UPLOAD_STATUS, UploadBeginParams, UploadCheckParams, UploadCheckResult, UploadCommitParams,
+    UploadCommitResult, UploadSessionParams, codes,
 };
 use axum::Extension;
 use axum::Json;
@@ -25,9 +27,10 @@ use tokio::sync::mpsc::error::TrySendError;
 use crate::cache::ItemRecord;
 use crate::error::ServerError;
 use crate::ext::ExtContext;
+use crate::organize;
 use crate::state::AppState;
 use crate::upload::UploadError;
-use crate::writer::WriteError;
+use crate::writer::{BatchKind, WriteError};
 
 const DEFAULT_LIMIT: u32 = 200;
 const MAX_LIMIT: u32 = 1000;
@@ -307,6 +310,35 @@ async fn dispatch(
                 }
             }
             to_value(result)
+        }
+        ORGANIZE_APPLY => {
+            let p: OrganizeApplyParams = params(p)?;
+            organize::validate_label(p.label.as_deref())?;
+            let cache = state.cache().clone();
+            let ops = p.ops;
+            let planned = tokio::task::spawn_blocking(move || organize::plan_apply(&cache, &ops))
+                .await
+                .map_err(internal)??;
+            let kind = if p.dry_run {
+                BatchKind::DryRun
+            } else {
+                BatchKind::Apply
+            };
+            let batch = state
+                .writer()
+                .organize(
+                    Actor::User(user),
+                    p.label,
+                    planned,
+                    state.extension().clone(),
+                    kind,
+                )
+                .await
+                .map_err(write_err)?;
+            to_value(OrganizeResult {
+                batch_id: batch.id.map(|b| b.0.to_string()),
+                results: batch.results,
+            })
         }
         _ => {
             // Not a common method: the app may know it. The extension is synchronous and
