@@ -1,5 +1,7 @@
 //! The axum router and its bearer-token authentication.
 
+use std::sync::Arc;
+
 use asteria_framework_api::UPLOAD_CHUNK_SIZE;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Request, State};
@@ -7,7 +9,11 @@ use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
+use tokio_util::sync::CancellationToken;
 
+use crate::mcp::AsteriaMcp;
 use crate::media_http::media;
 use crate::rpc::rpc;
 use crate::state::AppState;
@@ -15,14 +21,34 @@ use crate::upload_http::upload_chunk;
 
 /// Largest accepted request body. Bigger bodies get 413 before reaching `/rpc`: the only
 /// non-200 answer from `/rpc` besides the 401 of the auth layer. Sized so that an
-/// `organize.apply` of `MAX_OPS` operations (about 150 bytes each) fits.
+/// `organize.apply` of `MAX_OPS` operations (about 150 bytes each) fits. `/mcp` has the
+/// same limit.
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
 
-/// Builds the app. The auth layer wraps every route added before it, so routes added later
-/// must be registered before the `layer` call below.
+/// Builds the app; see [`router_with_shutdown`]. Nothing ends its MCP streams early.
 pub fn router(state: AppState) -> Router {
+    router_with_shutdown(state, CancellationToken::new())
+}
+
+/// Builds the app. Cancelling `shutdown` ends the open MCP streams, which would otherwise
+/// keep a graceful shutdown waiting. The auth layer wraps every route added before it, so
+/// routes added later must be registered before the `layer` call below.
+pub fn router_with_shutdown(state: AppState, shutdown: CancellationToken) -> Router {
+    let server = AsteriaMcp::new(state.clone());
+    // `DefaultBodyLimit` only reaches axum extractors, so rmcp gets the limit itself. The
+    // bearer token, not the Host header, is what keeps other sites out, and the server is
+    // reached by whatever name its host has, so rmcp's loopback-only Host check is off.
+    let mcp = StreamableHttpService::new(
+        move || Ok(server.clone()),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default()
+            .with_cancellation_token(shutdown.child_token())
+            .with_max_request_body_bytes(BODY_LIMIT)
+            .disable_allowed_hosts(),
+    );
     Router::new()
         .route("/rpc", post(rpc))
+        .nest_service("/mcp", mcp)
         .route("/media/{id}/{what}", get(media))
         // A chunk is far bigger than an RPC body; only this route lifts the limit.
         .route(

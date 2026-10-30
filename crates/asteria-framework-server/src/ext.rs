@@ -1,6 +1,7 @@
 //! The extension point an app plugs into the shared server: which media become items,
-//! per-item data extracted at scan time, extra files worth remembering, thumbnail sources
-//! and app-specific RPC methods. Everything defaults to "nothing special".
+//! per-item data extracted at scan time, extra files worth remembering, thumbnail sources,
+//! app-specific RPC methods and the MCP tools that call them. Everything defaults to
+//! "nothing special".
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -49,6 +50,18 @@ pub struct Rewrite {
     pub after: String,
 }
 
+/// An MCP tool: calling it calls the RPC method `method` with the tool's arguments as the
+/// params, as an agent acting for the token's user.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpTool {
+    pub name: String,
+    /// What the tool does and returns, for the model.
+    pub description: String,
+    /// JSON Schema of the arguments (an `"object"`).
+    pub input_schema: serde_json::Map<String, serde_json::Value>,
+    pub method: String,
+}
+
 pub trait AppExtension: Send + Sync + 'static {
     /// Which kinds of media this app turns into items.
     fn accepts(&self, kind: MediaKind) -> bool;
@@ -72,6 +85,11 @@ pub trait AppExtension: Send + Sync + 'static {
         _params: serde_json::Value,
     ) -> Option<Result<serde_json::Value, RpcError>> {
         None
+    }
+    /// MCP tools for the app's RPC methods. A tool named like one of the framework's is
+    /// dropped.
+    fn mcp_tools(&self) -> Vec<McpTool> {
+        Vec::new()
     }
     /// Called once a batch has moved files. `moves` are the (old path, new path) pairs that
     /// completed; moves to the trash are not included. The returned rewrites are applied

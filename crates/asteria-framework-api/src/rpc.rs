@@ -70,6 +70,7 @@ pub const UPLOAD_ABORT: &str = "upload.abort";
 pub const ORGANIZE_APPLY: &str = "organize.apply";
 pub const ORGANIZE_UNDO: &str = "organize.undo";
 pub const ORGANIZE_HISTORY: &str = "organize.history";
+pub const ORGANIZE_STATUS: &str = "organize.status";
 
 #[cfg(test)]
 mod tests {

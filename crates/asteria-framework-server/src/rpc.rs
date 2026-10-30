@@ -9,11 +9,12 @@ use asteria_framework::journal::{Actor, BatchId};
 use asteria_framework_api::{
     ExistingMedia, FOLDER_LIST, FolderListParams, FolderListing, HISTORY_DEFAULT_LIMIT,
     HISTORY_MAX_LIMIT, ItemId, LIBRARY_INFO, LIBRARY_RESCAN, LibraryInfo, MEDIA_GET, MEDIA_UPDATE,
-    MediaGetParams, MediaItem, MediaUpdateParams, ORGANIZE_APPLY, ORGANIZE_HISTORY, ORGANIZE_UNDO,
-    OrganizeApplyParams, OrganizeHistoryParams, OrganizeResult, OrganizeUndoParams, RpcError,
-    RpcOutcome, RpcResponse, SERVER_INFO, ServerInfo, UPLOAD_ABORT, UPLOAD_BEGIN, UPLOAD_CHECK,
-    UPLOAD_COMMIT, UPLOAD_STATUS, UploadBeginParams, UploadCheckParams, UploadCheckResult,
-    UploadCommitParams, UploadCommitResult, UploadSessionParams, codes,
+    MediaGetParams, MediaItem, MediaUpdateParams, ORGANIZE_APPLY, ORGANIZE_HISTORY,
+    ORGANIZE_STATUS, ORGANIZE_UNDO, OpStatus, OrganizeApplyParams, OrganizeHistoryParams,
+    OrganizeResult, OrganizeStatus, OrganizeStatusParams, OrganizeUndoParams, RpcError, RpcOutcome,
+    RpcResponse, SERVER_INFO, ServerInfo, UPLOAD_ABORT, UPLOAD_BEGIN, UPLOAD_CHECK, UPLOAD_COMMIT,
+    UPLOAD_STATUS, UploadBeginParams, UploadCheckParams, UploadCheckResult, UploadCommitParams,
+    UploadCommitResult, UploadSessionParams, codes,
 };
 use axum::Extension;
 use axum::Json;
@@ -25,6 +26,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::error::TrySendError;
 
+use crate::batches::Slot;
 use crate::cache::ItemRecord;
 use crate::error::ServerError;
 use crate::ext::ExtContext;
@@ -105,7 +107,20 @@ pub(crate) async fn rpc(
             Err(rpc_error(codes::INVALID_REQUEST, "jsonrpc must be \"2.0\"")),
         );
     }
-    respond(id, dispatch(&state, user, &req.method, req.params).await)
+    respond(
+        id,
+        dispatch(&state, Actor::User(user), &req.method, req.params).await,
+    )
+}
+
+/// Runs one RPC method for `actor` (`/mcp` calls the methods through this).
+pub(crate) async fn call(
+    state: &AppState,
+    actor: Actor,
+    method: &str,
+    params: Value,
+) -> Result<Value, RpcError> {
+    dispatch(state, actor, method, params).await
 }
 
 fn params<P: DeserializeOwned>(v: Value) -> Result<P, RpcError> {
@@ -174,12 +189,15 @@ async fn upload_blocking<T: Send + 'static>(
     }
 }
 
+/// Runs `method`. Writes are journaled as `actor`; everything else sees the user `actor`
+/// acts as.
 async fn dispatch(
     state: &AppState,
-    user: UserId,
+    actor: Actor,
     method: &str,
     p: Value,
 ) -> Result<Value, RpcError> {
+    let user = organize::actor_user(actor);
     let owner = state.library().owner();
     match method {
         SERVER_INFO => {
@@ -244,7 +262,7 @@ async fn dispatch(
         }
         MEDIA_UPDATE => {
             let p: MediaUpdateParams = params(p)?;
-            let rec = state.writer().update(user, p).await.map_err(write_err)?;
+            let rec = state.writer().update(actor, p).await.map_err(write_err)?;
             to_value(media_item(rec, user, owner))
         }
         UPLOAD_CHECK => {
@@ -327,18 +345,13 @@ async fn dispatch(
             };
             let batch = state
                 .writer()
-                .organize(
-                    Actor::User(user),
-                    p.label,
-                    planned,
-                    state.extension().clone(),
-                    kind,
-                )
+                .organize(actor, p.label, planned, state.extension().clone(), kind)
                 .await
                 .map_err(write_err)?;
             to_value(OrganizeResult {
                 batch_id: batch.id.map(|b| b.0.to_string()),
                 results: batch.results,
+                running: batch.running,
             })
         }
         ORGANIZE_UNDO => {
@@ -387,18 +400,13 @@ async fn dispatch(
             };
             let batch = state
                 .writer()
-                .organize(
-                    Actor::User(user),
-                    None,
-                    plan.ops,
-                    state.extension().clone(),
-                    kind,
-                )
+                .organize(actor, None, plan.ops, state.extension().clone(), kind)
                 .await
                 .map_err(write_err)?;
             to_value(OrganizeResult {
                 batch_id: batch.id.map(|b| b.0.to_string()),
                 results: batch.results,
+                running: batch.running,
             })
         }
         ORGANIZE_HISTORY => {
@@ -416,6 +424,62 @@ async fn dispatch(
             .map_err(internal)?
             .map_err(internal)?;
             to_value(organize::history_page(all, limit, p.cursor.as_deref())?)
+        }
+        ORGANIZE_STATUS => {
+            let p: OrganizeStatusParams = params(p)?;
+            let no_such = || rpc_error(codes::NOT_FOUND, "no such batch");
+            let Ok(id) = p.batch_id.parse::<grain_id::GrainId>().map(BatchId) else {
+                return Err(no_such());
+            };
+            let count = |results: &[asteria_framework_api::OpResult], status| {
+                results.iter().filter(|r| r.status == status).count() as u32
+            };
+            match state.writer().book().get(id) {
+                Some(Slot::Running) => to_value(OrganizeStatus {
+                    batch_id: p.batch_id,
+                    running: true,
+                    complete: false,
+                    done: 0,
+                    skipped: 0,
+                    results: None,
+                }),
+                Some(Slot::Done(results)) => to_value(OrganizeStatus {
+                    batch_id: p.batch_id,
+                    running: false,
+                    complete: true,
+                    done: count(&results, OpStatus::Done),
+                    skipped: count(&results, OpStatus::Skipped),
+                    results: Some(results),
+                }),
+                // A failed batch may have changed files before it stopped; the journal knows.
+                slot @ (Some(Slot::Failed) | None) => {
+                    let library = state.library().clone();
+                    let all = tokio::task::spawn_blocking(move || {
+                        let entries = library.journal()?.read_all()?;
+                        Ok::<_, asteria_framework::Error>(organize::history(&entries))
+                    })
+                    .await
+                    .map_err(internal)?
+                    .map_err(internal)?;
+                    let id = id.0.to_string();
+                    let found = all.into_iter().find(|b| b.batch_id == id);
+                    let b = found.ok_or_else(|| match slot {
+                        Some(_) => rpc_error(
+                            codes::NOT_FOUND,
+                            "the batch failed before changing anything",
+                        ),
+                        None => no_such(),
+                    })?;
+                    to_value(OrganizeStatus {
+                        batch_id: b.batch_id,
+                        running: false,
+                        complete: b.complete,
+                        done: b.done,
+                        skipped: b.skipped,
+                        results: None,
+                    })
+                }
+            }
         }
         _ => {
             // Not a common method: the app may know it. The extension is synchronous and

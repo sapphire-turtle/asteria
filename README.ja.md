@@ -39,6 +39,19 @@ asteria-music-server serve --config ~/.config/asteria/music.toml
 - アルバムのジャケットは、トラックに埋め込まれた画像、なければトラックのフォルダ、そこになければその上のアルバムのフォルダ（`CD1` のようなディスクのフォルダの場合）にある `cover`、`folder`、`front`、`album` という名前の画像（`.jpg`、`.jpeg`、`.png`、`.webp`）。
 - ジャケットには `vipsthumbnail`（libvips-tools）が必要。トラックのオフライン用の音声（Ogg Opus。原本が大きすぎる場所で聴くためのもの）には、libopus 付きでビルドされた `ffmpeg` が必要。どちらもなければ、その要求は 503 を返し、ほかは普通に動く。
 
+## MCP クライアントの接続
+
+どちらのサーバーも Model Context Protocol に対応しているので、AI エージェントからライブラリを見て整理できる。
+
+```sh
+# Claude Code の場合。<URL> はサーバーのアドレス（例: http://127.0.0.1:7811）
+claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Bearer <token>"
+```
+
+- エンドポイントは `<サーバーの URL>/mcp`（Streamable HTTP）である。トークンはクライアントと同じ Bearer トークンで、エージェントはそのトークンのユーザーとして動く。
+- ツールは、ライブラリ・フォルダ・アイテムの参照、評価・タグ・説明を書き換える `media_update`、ファイルの移動・改名・ゴミ箱入れをする `organize_apply` とその状況・取り消し・履歴、サムネイルを見る `media_preview` である。music サーバーには `album_list`、`album_get`、`artist_list`、`artist_get`、`playlist_list`、`playlist_get` が加わる。
+- エージェントの変更はジャーナルに `agent` として残り、`organize_undo` でファイル操作のバッチごと取り消せる。メタデータの編集（`media_update`）はバッチではなく、取り消せない。
+
 ## photos クライアントの起動
 
 ```sh

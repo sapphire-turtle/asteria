@@ -39,6 +39,19 @@ asteria-music-server serve --config ~/.config/asteria/music.toml
 - The cover of an album is the picture embedded in a track, else an image named `cover`, `folder`, `front` or `album` (`.jpg`, `.jpeg`, `.png` or `.webp`) in the track's folder or, failing that, in the album folder above it (for a disc folder such as `CD1`).
 - Covers need `vipsthumbnail` (libvips-tools). The offline copy of a track (Ogg Opus, for listening where the original is too large) needs `ffmpeg` built with libopus. Without them those requests answer 503 and everything else works.
 
+## Connecting an MCP client
+
+Both servers speak the Model Context Protocol, so an AI agent can browse the library and tidy it up.
+
+```sh
+# Claude Code; <URL> is the server's address, such as http://127.0.0.1:7811
+claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Bearer <token>"
+```
+
+- The endpoint is `<server URL>/mcp` (Streamable HTTP). The token is the same Bearer token the clients use; the agent acts as that token's user.
+- The tools are the library, folder and item calls, `media_update` for ratings, tags and descriptions, `organize_apply` and its status, undo and history, and `media_preview` for thumbnails. The music server adds `album_list`, `album_get`, `artist_list`, `artist_get`, `playlist_list` and `playlist_get`.
+- What the agent changes is recorded in the journal as `agent`, and `organize_undo` takes a batch of file operations back. Metadata edits (`media_update`) are not batches and cannot be undone.
+
 ## Running the photos client
 
 ```sh

@@ -523,6 +523,137 @@ async fn an_incomplete_batch_shows_and_undoes() {
     assert!(e.root.join("a.jpg").exists());
 }
 
+async fn batch_status(e: &Env, id: &str) -> Value {
+    call(
+        &e.app,
+        &e.owner_token,
+        "organize.status",
+        json!({"batch_id": id}),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn apply_within_the_wait_is_not_running() {
+    let e = env();
+    let v = apply(&e, vec![mv(&e, "a.jpg", "c.jpg")], false, None).await;
+    assert_eq!(v["result"]["running"], false);
+    assert_eq!(v["result"]["results"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn status_of_a_finished_batch_has_its_results() {
+    let e = env();
+    let v = apply(&e, vec![mv(&e, "a.jpg", "c.jpg")], false, None).await;
+    let s = batch_status(&e, &batch_id(&v)).await;
+    let r = &s["result"];
+    assert_eq!(r["running"], false, "{s}");
+    assert_eq!(r["complete"], true);
+    assert_eq!(r["done"], 1);
+    assert_eq!(r["skipped"], 0);
+    assert_eq!(r["batch_id"], v["result"]["batch_id"]);
+    assert_eq!(r["results"], v["result"]["results"]);
+}
+
+#[tokio::test]
+async fn status_falls_back_to_the_journal() {
+    use asteria_framework::journal::{Actor, BatchId, OpId};
+    use chrono::Utc;
+    use grain_id::GrainId;
+
+    let e = env();
+    let batch = BatchId(GrainId::random());
+    let line = |kind, before: Value, after: Value| JournalEntry {
+        op_id: OpId(GrainId::random()),
+        plan_id: Some(batch),
+        actor: Actor::User(e.lib.owner()),
+        at: Utc::now(),
+        kind,
+        before,
+        after,
+    };
+    fs::create_dir(e.root.join("2025")).unwrap();
+    fs::rename(e.root.join("a.jpg"), e.root.join("2025/x.jpg")).unwrap();
+    let meta = fs::metadata(e.root.join("2025/x.jpg")).unwrap();
+    let mtime = meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64;
+    let j = e.lib.journal().unwrap();
+    j.append(&line(
+        OpKind::Batch,
+        Value::Null,
+        json!({"label": "crashed", "op_count": 1, "undo_of": null}),
+    ))
+    .unwrap();
+    j.append(&line(
+        OpKind::Move,
+        json!({"path": "a.jpg", "size": meta.len(), "mtime_ns": mtime, "hash": null}),
+        json!({"path": "2025/x.jpg", "sidecar": false}),
+    ))
+    .unwrap();
+
+    let s = batch_status(&e, &batch.0.to_string()).await;
+    let r = &s["result"];
+    assert_eq!(r["running"], false, "{s}");
+    assert_eq!(r["complete"], false);
+    assert_eq!(r["done"], 1);
+    assert!(r.get("results").is_none(), "{s}");
+}
+
+#[tokio::test]
+async fn status_of_a_failed_batch_falls_back_to_the_journal() {
+    use asteria_framework::journal::{Actor, BatchId, OpId};
+    use chrono::Utc;
+    use grain_id::GrainId;
+
+    let e = env();
+    let batch = BatchId(GrainId::random());
+    e.state.writer().fail_batch_for_test(batch);
+    // No header was journaled: nothing changed.
+    let s = batch_status(&e, &batch.0.to_string()).await;
+    assert_eq!(s["error"]["code"], codes::NOT_FOUND, "{s}");
+    assert_eq!(
+        s["error"]["message"],
+        "the batch failed before changing anything"
+    );
+
+    e.lib
+        .journal()
+        .unwrap()
+        .append(&JournalEntry {
+            op_id: OpId(GrainId::random()),
+            plan_id: Some(batch),
+            actor: Actor::User(e.lib.owner()),
+            at: Utc::now(),
+            kind: OpKind::Batch,
+            before: Value::Null,
+            after: json!({"label": "broke", "op_count": 2, "undo_of": null}),
+        })
+        .unwrap();
+    let s = batch_status(&e, &batch.0.to_string()).await;
+    let r = &s["result"];
+    assert_eq!(r["running"], false, "{s}");
+    assert_eq!(r["complete"], false);
+    assert_eq!(r["done"], 0);
+    assert!(r.get("results").is_none(), "{s}");
+}
+
+#[tokio::test]
+async fn status_of_an_unknown_batch_is_not_found() {
+    let e = env();
+    for id in [
+        "not an id".to_string(),
+        grain_id::GrainId::random().to_string(),
+    ] {
+        let s = batch_status(&e, &id).await;
+        assert_eq!(s["error"]["code"], codes::NOT_FOUND, "{s}");
+        assert_eq!(s["error"]["message"], "no such batch");
+    }
+}
+
 #[tokio::test]
 async fn history_pages_newest_first() {
     let e = env();

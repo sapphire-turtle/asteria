@@ -17,6 +17,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use grain_id::GrainId;
 use http_body_util::BodyExt;
+use rmcp::service::{RoleClient, RunningService, ServiceExt as _};
+use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -33,9 +36,11 @@ pub struct Env {
     pub lib: Arc<Library>,
     pub cache: Arc<Cache>,
     pub app: Router,
+    pub state: AppState,
     pub processor: Arc<Processor>,
     pub owner_token: String,
     pub guest_token: String,
+    pub guest: UserId,
     pub _rescan_rx: tokio::sync::mpsc::Receiver<()>,
 }
 
@@ -111,10 +116,12 @@ fn env_full(make: impl FnOnce(PathBuf) -> Processor, ext: Arc<dyn AppExtension>)
         root,
         lib,
         cache,
-        app: router(state),
+        app: router(state.clone()),
+        state,
         processor,
         owner_token,
         guest_token,
+        guest,
         _rescan_rx: rescan_rx,
     }
 }
@@ -149,6 +156,28 @@ pub async fn call(app: &Router, token: &str, method: &str, params: Value) -> Val
     assert_eq!(v["jsonrpc"], "2.0");
     assert_eq!(v["id"], 7);
     v
+}
+
+/// Serves `e.app` on a free local port and connects to its `/mcp` as the owner.
+pub async fn connect(e: &Env) -> RunningService<RoleClient, ()> {
+    connect_as(e, &e.owner_token).await
+}
+
+/// The same, with `token`'s user.
+pub async fn connect_as(e: &Env, token: &str) -> RunningService<RoleClient, ()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = e.app.clone();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    connect_to(addr, token).await
+}
+
+/// Connects to the `/mcp` of the server at `addr`.
+pub async fn connect_to(addr: SocketAddr, token: &str) -> RunningService<RoleClient, ()> {
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp"))
+        .auth_header(token.to_owned());
+    let transport = StreamableHttpClientTransport::from_config(config);
+    ().serve(transport).await.unwrap()
 }
 
 pub fn item_id(e: &Env, path: &str) -> String {

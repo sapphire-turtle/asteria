@@ -452,6 +452,108 @@ mod linux {
     }
 
     #[test]
+    fn music_tools_are_listed_and_call_through() {
+        use rmcp::ServiceExt as _;
+        use rmcp::model::CallToolRequestParams;
+        use rmcp::transport::StreamableHttpClientTransport;
+        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let env = Env {
+            home: tmp.path().join("home"),
+            logs: tmp.path().join("logs"),
+        };
+        std::fs::create_dir_all(&env.home).unwrap();
+        std::fs::create_dir_all(&env.logs).unwrap();
+        let lib = tmp.path().join("lib");
+        std::fs::create_dir_all(lib.join("A")).unwrap();
+        let tags = Tags {
+            title: "One",
+            artist: "Artist",
+            album: "Mcp Album",
+            track: 1,
+            picture: false,
+        };
+        tagged_copy(
+            "sine440.flac",
+            &lib.join("A/1.flac"),
+            TagType::VorbisComments,
+            &tags,
+        );
+        let config = tmp.path().join("conf/server.toml");
+        let out = env
+            .command()
+            .args(["init", "--owner", "me", "--library"])
+            .arg(&lib)
+            .arg("--config")
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let token = String::from_utf8(out.stdout).unwrap().trim().to_owned();
+        let listen = format!("127.0.0.1:{}", free_port());
+        let api = Api {
+            client: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap(),
+            base: format!("http://{listen}"),
+            token: token.clone(),
+        };
+        let mut server = Server::start(&env, &config, &listen);
+        api.wait_ready(&mut server);
+        api.wait_scanned(1);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let cfg = StreamableHttpClientTransportConfig::with_uri(format!("http://{listen}/mcp"))
+                .auth_header(token);
+            let client = ().serve(StreamableHttpClientTransport::from_config(cfg)).await.unwrap();
+            let tools = client.list_all_tools().await.unwrap();
+            let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+            for name in [
+                "library_info",
+                "folder_list",
+                "media_get",
+                "media_preview",
+                "media_update",
+                "organize_apply",
+                "organize_status",
+                "organize_undo",
+                "organize_history",
+                "album_list",
+                "album_get",
+                "artist_list",
+                "artist_get",
+                "playlist_list",
+                "playlist_get",
+            ] {
+                assert!(names.contains(&name), "{name} missing from {names:?}");
+            }
+            assert_eq!(names.len(), 15, "{names:?}");
+
+            let r = client
+                .call_tool(CallToolRequestParams::new("album_list"))
+                .await
+                .unwrap();
+            assert_ne!(r.is_error, Some(true), "{r:?}");
+            let text = &r.content[0].as_text().unwrap().text;
+            let listing: AlbumListing = serde_json::from_str(text).unwrap();
+            assert_eq!(listing.albums.len(), 1);
+            assert_eq!(listing.albums[0].title, "Mcp Album");
+            client.cancel().await.unwrap();
+        });
+        server.stop();
+    }
+
+    #[test]
     fn organize_moves_a_track_and_its_playlist_entry() {
         let tmp = tempfile::tempdir().unwrap();
         let env = Env {

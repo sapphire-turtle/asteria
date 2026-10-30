@@ -60,3 +60,5 @@ opus-pure = { version = "0.2.2", default-features = false }
 rubato = "5.0.1"
 cpal = "0.18.2"
 rtrb = "0.3"
+# The MCP endpoint of the servers (Streamable HTTP).
+rmcp = { version = "3.8.0", default-features = false }

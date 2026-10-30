@@ -52,6 +52,13 @@ async fn token_not_logged() {
     let tmp = asteria_framework::fsutil::tmp_path_for(&e.root.join("sub/b.jpg.xmp"));
     fs::write(tmp, b"x").unwrap();
     call(&e.app, t, "media.update", json!({"id": id, "rating": 3})).await;
+    // `/mcp` hands the request's headers to the tool handler; they must not reach the log.
+    let client = connect(&e).await;
+    client.list_all_tools().await.unwrap();
+    let args = json!({"id": "missing"}).as_object().unwrap().clone();
+    let get = rmcp::model::CallToolRequestParams::new("media_get").with_arguments(args);
+    client.call_tool(get).await.unwrap();
+    client.cancel().await.unwrap();
     let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
     assert!(!log.is_empty(), "the subscriber captured nothing");
     assert!(log.contains("busy"), "refused write was not logged: {log}");

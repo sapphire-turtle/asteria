@@ -31,9 +31,11 @@ notify.workspace = true
 axum.workspace = true
 tower-http.workspace = true
 tower = { workspace = true }
+rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 http-body-util.workspace = true
 lofty.workspace = true
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }

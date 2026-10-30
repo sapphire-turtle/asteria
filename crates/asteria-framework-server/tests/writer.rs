@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use asteria_framework::journal::Actor;
 use asteria_framework::{Library, MediaKind, UserId};
 use asteria_framework_api::{ItemId, MediaUpdateParams};
 use asteria_framework_server::{
@@ -72,7 +73,7 @@ async fn update_rating_and_tags_writes_sidecar_and_cache() {
     p.rating = Some(4);
     p.subjects = Some(vec!["cat".into()]);
     let owner = e.lib.owner();
-    let rec = e.writer.update(owner, p).await.unwrap();
+    let rec = e.writer.update(Actor::User(owner), p).await.unwrap();
     assert_eq!(rec.sidecar.owner_rating, Some(4));
     assert_eq!(rec.sidecar.subjects, vec!["cat".to_string()]);
     let sc = e.lib.read_sidecar(Path::new("a.jpg")).unwrap().unwrap();
@@ -88,7 +89,7 @@ async fn non_owner_rating_goes_to_user_ratings() {
     let other = UserId(GrainId::random());
     let mut p = params(id(&e));
     p.rating = Some(2);
-    let rec = e.writer.update(other, p).await.unwrap();
+    let rec = e.writer.update(Actor::User(other), p).await.unwrap();
     assert_eq!(rec.sidecar.owner_rating, None);
     assert_eq!(rec.sidecar.user_ratings.get(&other.to_string()), Some(&2));
 }
@@ -101,7 +102,7 @@ async fn read_only_item_is_refused_untouched() {
     scan(&e.lib, &e.cache, &Photos).unwrap();
     let mut p = params(id(&e));
     p.rating = Some(3);
-    let r = e.writer.update(e.lib.owner(), p).await;
+    let r = e.writer.update(Actor::User(e.lib.owner()), p).await;
     assert!(matches!(r, Err(WriteError::ReadOnly(_))), "{r:?}");
     assert_eq!(fs::read(&xmp).unwrap(), b"<not xmp");
 }
@@ -112,11 +113,11 @@ async fn deleted_file_is_not_found() {
     let mut p = params(id(&e));
     p.label = Some(Some("x".into()));
     fs::remove_file(e.root.join("a.jpg")).unwrap();
-    let r = e.writer.update(e.lib.owner(), p).await;
+    let r = e.writer.update(Actor::User(e.lib.owner()), p).await;
     assert_eq!(r, Err(WriteError::NotFound));
     let r = e
         .writer
-        .update(e.lib.owner(), params(ItemId("nope".into())))
+        .update(Actor::User(e.lib.owner()), params(ItemId("nope".into())))
         .await;
     assert_eq!(r, Err(WriteError::NotFound));
 }
@@ -132,17 +133,20 @@ async fn control_chars_are_invalid() {
             2 => p.subjects = Some(vec!["ok".into(), "b\u{0}".into()]),
             _ => p.hierarchical_subjects = Some(vec!["a|\u{1f}".into()]),
         }
-        let r = e.writer.update(e.lib.owner(), p).await;
+        let r = e.writer.update(Actor::User(e.lib.owner()), p).await;
         assert!(matches!(r, Err(WriteError::Invalid(_))), "{r:?}");
     }
     assert!(!e.root.join("a.jpg.xmp").exists());
     let mut p = params(id(&e));
     p.label = Some(Some("tab\tnl\n".into()));
-    e.writer.update(e.lib.owner(), p).await.unwrap();
+    e.writer
+        .update(Actor::User(e.lib.owner()), p)
+        .await
+        .unwrap();
     let mut p = params(id(&e));
     p.rating = Some(9);
     assert!(matches!(
-        e.writer.update(e.lib.owner(), p).await,
+        e.writer.update(Actor::User(e.lib.owner()), p).await,
         Err(WriteError::Invalid(_))
     ));
 }
@@ -158,7 +162,9 @@ async fn concurrent_updates_are_serialized() {
         let mut p = params(id(&e));
         p.label = Some(Some(format!("l{i}")));
         p.subjects = Some(vec![format!("s{i}")]);
-        hs.push(tokio::spawn(async move { w.update(owner, p).await }));
+        hs.push(tokio::spawn(async move {
+            w.update(Actor::User(owner), p).await
+        }));
     }
     for h in hs {
         h.await.unwrap().unwrap();
@@ -191,7 +197,10 @@ async fn cached_hash_avoids_rehash() {
     );
     let mut p = params(rec.id);
     p.label = Some(Some("x".into()));
-    e.writer.update(e.lib.owner(), p).await.unwrap();
+    e.writer
+        .update(Actor::User(e.lib.owner()), p)
+        .await
+        .unwrap();
     let sc = e.lib.read_sidecar(Path::new("a.jpg")).unwrap().unwrap();
     assert_eq!(sc.content_hash.unwrap().0.to_string(), fake);
 }
@@ -224,7 +233,10 @@ async fn rating_only_uses_cached_hash() {
     let fake = fake_hash(&e);
     let mut p = params(id(&e));
     p.rating = Some(5);
-    e.writer.update(e.lib.owner(), p).await.unwrap();
+    e.writer
+        .update(Actor::User(e.lib.owner()), p)
+        .await
+        .unwrap();
     let sc = e.lib.read_sidecar(Path::new("a.jpg")).unwrap().unwrap();
     assert_eq!(sc.content_hash.unwrap().0.to_string(), fake);
     assert_eq!(sc.rating.unwrap().value, 5);
@@ -237,7 +249,10 @@ async fn rating_and_label_is_one_journal_entry() {
     let mut p = params(id(&e));
     p.rating = Some(3);
     p.label = Some(Some("x".into()));
-    e.writer.update(e.lib.owner(), p).await.unwrap();
+    e.writer
+        .update(Actor::User(e.lib.owner()), p)
+        .await
+        .unwrap();
     assert_eq!(journal_len(&e), before + 1);
 }
 
@@ -251,7 +266,10 @@ async fn stale_cached_hash_is_not_used() {
     fs::write(e.root.join("a.jpg"), bytes).unwrap();
     let mut p = params(id(&e));
     p.label = Some(Some("x".into()));
-    e.writer.update(e.lib.owner(), p).await.unwrap();
+    e.writer
+        .update(Actor::User(e.lib.owner()), p)
+        .await
+        .unwrap();
     let sc = e.lib.read_sidecar(Path::new("a.jpg")).unwrap().unwrap();
     assert_ne!(sc.content_hash.unwrap().0.to_string(), fake);
 }
@@ -263,7 +281,7 @@ async fn malformed_sidecar_at_write_time_sets_error() {
     fs::write(e.root.join("a.jpg.xmp"), b"<not xmp").unwrap();
     let mut p = params(id(&e));
     p.label = Some(Some("x".into()));
-    let r = e.writer.update(e.lib.owner(), p.clone()).await;
+    let r = e.writer.update(Actor::User(e.lib.owner()), p.clone()).await;
     assert!(matches!(r, Err(WriteError::ReadOnly(_))), "{r:?}");
     let Err(WriteError::ReadOnly(msg)) = &r else {
         unreachable!()
@@ -280,7 +298,11 @@ async fn writer_does_not_touch_cached_hash() {
     let e = env();
     let mut p = params(id(&e));
     p.label = Some(Some("x".into()));
-    let rec = e.writer.update(e.lib.owner(), p).await.unwrap();
+    let rec = e
+        .writer
+        .update(Actor::User(e.lib.owner()), p)
+        .await
+        .unwrap();
     assert_eq!(rec.hash, None);
     assert_eq!(e.cache.get_by_path("a.jpg").unwrap().unwrap().hash, None);
 }
@@ -295,7 +317,9 @@ async fn shutdown_drains_all_queued_jobs() {
         let w = w.clone();
         let mut p = params(id(&e));
         p.subjects = Some(vec![format!("t{i}")]);
-        tasks.push(tokio::spawn(async move { w.update(owner, p).await }));
+        tasks.push(tokio::spawn(async move {
+            w.update(Actor::User(owner), p).await
+        }));
     }
     // Let every task enqueue its job before dropping our handle.
     for _ in 0..50 {
@@ -333,7 +357,9 @@ async fn close_drains_queued_jobs_while_clones_live() {
         let w = w.clone();
         let mut p = params(id(&e));
         p.subjects = Some(vec![format!("t{i}")]);
-        tasks.push(tokio::spawn(async move { w.update(owner, p).await }));
+        tasks.push(tokio::spawn(async move {
+            w.update(Actor::User(owner), p).await
+        }));
     }
     for _ in 0..50 {
         tokio::task::yield_now().await;
