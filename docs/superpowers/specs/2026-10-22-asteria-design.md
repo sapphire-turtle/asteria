@@ -383,6 +383,25 @@ MCP のツールは3種類に分ける。
 **クライアントへの知らせ**
 - 移動ではアイテムの数が変わらない。`LibraryInfo` に変更の通し番号 `revision`（プロセスの中だけのもの）を足し、書き込みとスキャンでアイテムが変わるたびに増やす。クライアントは `revision` か `epoch` が変わったら一覧を取り直す。
 
+**長いまとまり（2026-10-30 決定、#37）**
+- `organize.apply` と `organize.undo` は、まとまりを最大 10 秒待つ。終わらなければ、`batch_id` と `running: true`（操作ごとの結果は空）を返す。まとまりはそのまま最後まで進む。
+- `organize.status { batch_id }` は、実行中か終わったかを返し、終わっていれば操作ごとの結果も返す。結果はメモリに最近の 64 件まで、終わってから 6 時間まで置く。それより古いもの（再起動の後を含む）は、ジャーナルから組み立てた要約（完了と飛ばした数、終わったか）だけを返す。ジャーナルにも無い ID は NOT_FOUND。
+- `dry_run` は待ち時間の対象にせず、最後まで待つ。
+
+**MCP（2026-10-30 決定、Plan 7b）**
+- `/mcp` を rmcp の Streamable HTTP で受ける。ほかのルートと同じ Bearer 認証の内側に置き、トークンは `/rpc` と同じものを使う。
+- `/mcp` からの書き込みは、実行者を `Actor::Agent { on_behalf_of: <トークンのユーザー> }` として記録する。`/rpc` からは今までどおり `User`。エージェントだけを無効にする仕組みは持たない。
+- ツールは、既存の RPC メソッドへの薄い入口にする。ツールごとに「名前、説明、入力の JSON Schema、対応する RPC メソッド」を持ち、呼ばれたら `/rpc` と同じ処理に実行者を付けて渡す。RPC と MCP で動きがずれないため。入力の Schema は手で書き、例を api の型でデシリアライズするテストで型と合わせる（`*-api` クレートには schemars を入れない）。
+- framework のツール
+  - 読み取り：`library_info`、`folder_list`、`media_get`
+  - `media_preview`：アイテム ID を最大 4 件受け取り、それぞれのサムネイル（写真と動画はサムネイル、音楽はジャケット）を画像として返す。まだ作れないものや無いものは、その旨を文字で返す。
+  - 直接実行：`media_update`（評価、タグ、説明、ラベル）
+  - ファイル操作：`organize_apply`（`dry_run` あり）、`organize_status`、`organize_undo`、`organize_history`
+- アプリのツールは `AppExtension::mcp_tools()`（§4.8）で足す。music は `album_list`、`album_get`、`artist_list`、`artist_get`、`playlist_list`、`playlist_get`。
+- RPC のエラーは、ツールのエラー結果（`isError`）として同じ文言で返す。
+- サーバーの説明文（instructions）に使い方の約束を書く：大きな整理の前に `dry_run` の結果をユーザーに見せる、`label` に何をしたかを書く、`running` が返ったら `organize_status` で待つ、間違えたら `organize_undo` で取り消す。
+- プレイリストの作成と編集は、MCP より先に RPC が要るので別の計画にする（2026-10-30 決定）。
+
 ### 4.7 アップロード
 
 アップロードは framework に置き、photos と music の両方で使う（Plan 5 では photos だけが使う）。受け取ったファイルは常に `Inbox/` の下に置く。
@@ -426,7 +445,7 @@ framework-server の RPC メソッドとキャッシュは、アプリに共通�
   - `rpc(method, params, ctx)`：共通のメソッドで扱えないメソッドを処理する。`ctx` からライブラリ、キャッシュ、リクエストしたユーザーを引ける。扱わないメソッドなら「扱わない」と返し、サーバーは METHOD_NOT_FOUND を返す。
 - photos-server は、`accepts` だけを持つ実装を使う。
 - `APP_DATA` と `EXTRAS` を足したので、キャッシュのスキーマは 4 になる。更新後の最初の起動でキャッシュを作り直す。
-- MCP（Plan 7b）でアプリ固有のツールを足すときも、この口を広げて使う。
+- `mcp_tools() -> Vec<McpTool>`：アプリの MCP ツール（§4.6）。中身はアプリの RPC メソッドを指す。既定は空。
 
 ### 4.9 music-server（2026-10-27 決定）
 
@@ -687,7 +706,8 @@ music-server は photos-server と同じ形のバイナリで、`AppExtension` �
    - music のデスクトップクライアントと再生エンジン（§5.4、§5.7）。サーバーは変えない。（Plan 6b）
 8. ファイル操作と MCP。2つの計画に分ける（2026-10-30 決定）。承認画面は作らない（§4.6）。
    - ファイル操作のまとまり、取り消し、一覧、プレイリストの書き換え、`revision`（§4.6）。（Plan 7a）
-   - MCP（読み取り、直接実行、`dry_run` 付きのファイル操作）。（Plan 7b）
+   - MCP（読み取り、サムネイル、直接実行、`dry_run` 付きのファイル操作）と、長いまとまりの `organize.status`（#37）。（Plan 7b）
+   - プレイリストの作成と編集（RPC と MCP ツール）は別の計画にする。
    - music の埋め込みタグの書き換え（§3.6、#30）と、サイドカーの曖昧・衝突を画面で解決する仕組み（#31）は、Plan 7 の後に回す。クライアントでのユーザー自身のファイル操作の画面と Ctrl-Z も後で入れる。
 9. オフラインキャッシュと操作キュー。（Plan 8）
 10. payload ハッシュの第2段階。（Plan 9）
