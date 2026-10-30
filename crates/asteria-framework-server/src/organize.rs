@@ -356,6 +356,8 @@ pub struct Batch {
     /// `None` for a dry run.
     pub id: Option<BatchId>,
     pub results: Vec<OpResult>,
+    /// Not over yet; `results` is empty.
+    pub running: bool,
 }
 
 fn invalid(msg: impl Into<String>) -> RpcError {

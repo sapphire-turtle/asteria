@@ -12,6 +12,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use asteria_framework::hash::{ContentHash, HashScope};
 use asteria_framework::journal::{Actor, BatchId};
@@ -24,6 +25,7 @@ use grain_id::GrainId;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::batches::BatchBook;
 use crate::cache::{Cache, ItemRecord, SidecarSnapshot, StoredHash};
 use crate::error::ServerError;
 use crate::ext::{AppExtension, ExtContext, Rewrite};
@@ -34,6 +36,8 @@ use crate::upload::{UploadError, UploadStore};
 use crate::upload_commit::{Begun, Prepared, place, prepare_sealed, seal_group};
 
 const QUEUE: usize = 256;
+/// How long `organize` waits for a batch before it answers `running`; the batch goes on.
+pub(crate) const APPLY_WAIT: Duration = Duration::from_secs(25);
 /// How many upload commits hash and stage their files at once; more wait their turn, so
 /// that big files do not all compete for the disk.
 const COMMIT_PREPARE_JOBS: usize = 2;
@@ -101,6 +105,10 @@ pub struct Writer {
     running: Arc<Mutex<HashSet<BatchId>>>,
     /// Turns for the first phase of upload commits (`COMMIT_PREPARE_JOBS`).
     prepare_permits: Arc<Semaphore>,
+    /// The batches this run started, running and ended.
+    book: Arc<BatchBook>,
+    /// How long `organize` waits for a batch.
+    organize_wait: Arc<Mutex<Duration>>,
 }
 
 /// Starts the writer task. Must be called inside a Tokio runtime (it uses `tokio::spawn`).
@@ -112,6 +120,8 @@ pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHa
         library: library.clone(),
         running: Arc::default(),
         prepare_permits: Arc::new(Semaphore::new(COMMIT_PREPARE_JOBS)),
+        book: Arc::default(),
+        organize_wait: Arc::new(Mutex::new(APPLY_WAIT)),
     };
     let handle = tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
@@ -242,11 +252,25 @@ impl Writer {
         RunningGuard::try_new(&self.running, id)
     }
 
+    /// The batches this run started: which are running, and the results of those that ended.
+    pub(crate) fn book(&self) -> &BatchBook {
+        &self.book
+    }
+
+    /// Sets how long [`Writer::organize`] waits for a batch (tests use a short one).
+    pub(crate) fn set_organize_wait(&self, wait: Duration) {
+        *self.organize_wait.lock().unwrap_or_else(|p| p.into_inner()) = wait;
+    }
+
     /// Runs a batch of moves and trashes: a header line, then each operation as a job of its
     /// own (so other writes interleave), then a last job that tidies up and journals the
     /// end. A dry run is one job that touches nothing. The batch runs in a task of its own
     /// and finishes even when the caller stops waiting. The cache is updated by the
     /// operations, so the caller need not rescan.
+    ///
+    /// A batch that is not over after the wait (`set_organize_wait`) is answered with
+    /// `running: true` and no results; it goes on, and its outcome lands in [`Writer::book`].
+    /// A dry run is always waited for.
     ///
     /// An error means nothing was done: the header could not be journaled (for example the
     /// server has no state directory), so no file was touched.
@@ -258,38 +282,14 @@ impl Writer {
         ext: Arc<dyn AppExtension>,
         kind: BatchKind,
     ) -> Result<Batch, WriteError> {
-        let writer = self.clone();
-        let task =
-            tokio::spawn(async move { writer.run_batch(actor, label, ops, ext, kind).await });
-        task.await.unwrap_or_else(|e| {
-            tracing::error!(error = %e, "organize task failed");
-            Err(WriteError::Internal("write job failed".into()))
-        })
-    }
-
-    async fn run_batch(
-        &self,
-        actor: Actor,
-        label: Option<String>,
-        ops: Vec<Planned>,
-        ext: Arc<dyn AppExtension>,
-        kind: BatchKind,
-    ) -> Result<Batch, WriteError> {
-        let (undo_of, restores, _claim) = match kind {
+        let (undo_of, restores, claim) = match kind {
             BatchKind::DryRun => {
-                let results = self
-                    .exec(move |lib, cache| {
-                        let ctx = OpCtx {
-                            library: lib,
-                            cache,
-                            ext: ext.as_ref(),
-                            actor,
-                            batch: None,
-                        };
-                        organize::dry_run(&ctx, &ops)
-                    })
-                    .await?;
-                return Ok(Batch { id: None, results });
+                let writer = self.clone();
+                let task = tokio::spawn(async move { writer.run_dry(actor, ops, ext).await });
+                return task.await.unwrap_or_else(|e| {
+                    tracing::error!(error = %e, "organize task failed");
+                    Err(WriteError::Internal("write job failed".into()))
+                });
             }
             BatchKind::Apply => (None, None, None),
             BatchKind::Undo {
@@ -298,8 +298,78 @@ impl Writer {
                 claim,
             } => (Some(of), Some(restores), Some(claim)),
         };
-
         let id = BatchId(GrainId::random());
+        self.book.start(id);
+        let wait = *self.organize_wait.lock().unwrap_or_else(|p| p.into_inner());
+        let writer = self.clone();
+        let mut task = tokio::spawn(async move {
+            // However the task ends, the book must not keep the batch as running.
+            let mut ending = Ending {
+                book: writer.book.clone(),
+                id,
+                ended: false,
+            };
+            // The claim lives until the batch has ended, even when nobody waits for it.
+            let _claim = claim;
+            let outcome = writer
+                .run_batch(id, actor, label, ops, ext, undo_of, restores)
+                .await;
+            match &outcome {
+                Ok(batch) => writer.book.finish(id, batch.results.clone()),
+                Err(_) => writer.book.fail(id),
+            }
+            ending.ended = true;
+            outcome
+        });
+        match tokio::time::timeout(wait, &mut task).await {
+            Err(_) => Ok(Batch {
+                id: Some(id),
+                results: Vec::new(),
+                running: true,
+            }),
+            Ok(joined) => joined.unwrap_or_else(|e| {
+                tracing::error!(error = %e, "organize task failed");
+                Err(WriteError::Internal("write job failed".into()))
+            }),
+        }
+    }
+
+    async fn run_dry(
+        &self,
+        actor: Actor,
+        ops: Vec<Planned>,
+        ext: Arc<dyn AppExtension>,
+    ) -> Result<Batch, WriteError> {
+        let results = self
+            .exec(move |lib, cache| {
+                let ctx = OpCtx {
+                    library: lib,
+                    cache,
+                    ext: ext.as_ref(),
+                    actor,
+                    batch: None,
+                };
+                organize::dry_run(&ctx, &ops)
+            })
+            .await?;
+        Ok(Batch {
+            id: None,
+            results,
+            running: false,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_batch(
+        &self,
+        id: BatchId,
+        actor: Actor,
+        label: Option<String>,
+        ops: Vec<Planned>,
+        ext: Arc<dyn AppExtension>,
+        undo_of: Option<BatchId>,
+        restores: Option<Vec<Rewrite>>,
+    ) -> Result<Batch, WriteError> {
         let _running = RunningGuard::new(&self.running, id);
         let count = ops.len();
         let header = {
@@ -402,6 +472,7 @@ impl Writer {
         Ok(Batch {
             id: Some(id),
             results,
+            running: false,
         })
     }
 
@@ -470,6 +541,21 @@ impl Writer {
             .await
             .map_err(|_| upload_stopped())?;
         rx.await.map_err(|_| upload_stopped())?
+    }
+}
+
+/// Marks a batch as failed in the book if its task ends without having said how.
+struct Ending {
+    book: Arc<BatchBook>,
+    id: BatchId,
+    ended: bool,
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        if !self.ended {
+            self.book.fail(self.id);
+        }
     }
 }
 

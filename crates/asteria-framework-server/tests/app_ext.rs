@@ -550,3 +550,110 @@ async fn undo_leaves_an_edited_playlist_alone() {
         "edited\n"
     );
 }
+
+/// Sleeps in `after_moves` (an apply) and, once `armed`, in `extract` (which
+/// restoring a file from the trash calls), so a batch outlasts a short wait.
+#[derive(Default)]
+struct Slow {
+    armed: AtomicBool,
+}
+
+impl AppExtension for Slow {
+    fn accepts(&self, kind: MediaKind) -> bool {
+        matches!(kind, MediaKind::Image)
+    }
+    fn extract(&self, _rel: &str, _abs: &Path) -> Option<Vec<u8>> {
+        if self.armed.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        None
+    }
+    fn after_moves(
+        &self,
+        _ctx: &ExtContext,
+        _moves: &[(String, String)],
+    ) -> Vec<asteria_framework_server::Rewrite> {
+        std::thread::sleep(Duration::from_millis(500));
+        Vec::new()
+    }
+}
+
+/// Polls `organize.status` until the batch is no longer running (generous deadline).
+async fn finished_status(e: &common::Env, id: &str) -> Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = common::call(
+            &e.app,
+            &e.owner_token,
+            "organize.status",
+            json!({"batch_id": id}),
+        )
+        .await;
+        if s["result"]["running"] == false {
+            return s;
+        }
+        assert!(std::time::Instant::now() < deadline, "still running: {s}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_slow_batch_returns_running_and_finishes() {
+    let e = common::env_ext(Arc::new(Slow::default()));
+    e.state.set_organize_wait(Duration::from_millis(100));
+    let v = move_a_to_c(&e).await;
+    let r = &v["result"];
+    assert_eq!(r["running"], true, "{v}");
+    assert!(r["results"].as_array().unwrap().is_empty());
+    let id = r["batch_id"].as_str().unwrap().to_string();
+
+    let now = common::call(
+        &e.app,
+        &e.owner_token,
+        "organize.status",
+        json!({"batch_id": id}),
+    )
+    .await;
+    assert_eq!(now["result"]["running"], true, "{now}");
+    assert_eq!(now["result"]["complete"], false);
+
+    let s = finished_status(&e, &id).await;
+    assert_eq!(s["result"]["complete"], true, "{s}");
+    assert_eq!(s["result"]["done"], 1);
+    let results = s["result"]["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["status"], "done");
+    assert!(e.root.join("c.jpg").exists() && !e.root.join("a.jpg").exists());
+}
+
+#[tokio::test]
+async fn a_slow_undo_returns_running() {
+    let slow = Arc::new(Slow::default());
+    let e = common::env_ext(slow.clone());
+    // Only restoring from the trash extracts, so that is what gets undone.
+    let first = common::call(
+        &e.app,
+        &e.owner_token,
+        "organize.apply",
+        json!({"ops": [{"item_id": common::item_id(&e, "a.jpg"), "kind": "trash"}]}),
+    )
+    .await;
+    assert_eq!(first["result"]["running"], false, "{first}");
+    let of = first["result"]["batch_id"].as_str().unwrap().to_string();
+
+    slow.armed.store(true, Ordering::SeqCst);
+    e.state.set_organize_wait(Duration::from_millis(100));
+    let v = common::call(
+        &e.app,
+        &e.owner_token,
+        "organize.undo",
+        json!({"batch_id": of}),
+    )
+    .await;
+    assert_eq!(v["result"]["running"], true, "{v}");
+    let id = v["result"]["batch_id"].as_str().unwrap().to_string();
+    let s = finished_status(&e, &id).await;
+    assert_eq!(s["result"]["complete"], true, "{s}");
+    assert_eq!(s["result"]["results"][0]["status"], "done", "{s}");
+    assert!(e.root.join("a.jpg").exists());
+}

@@ -88,6 +88,12 @@ impl AppState {
     pub fn writer(&self) -> &Writer {
         &self.writer
     }
+    /// Sets how long `organize.apply` and `organize.undo` wait for a batch before they
+    /// answer `running`. For tests.
+    #[doc(hidden)]
+    pub fn set_organize_wait(&self, wait: std::time::Duration) {
+        self.writer.set_organize_wait(wait);
+    }
     pub fn tokens(&self) -> &Tokens {
         &self.tokens
     }

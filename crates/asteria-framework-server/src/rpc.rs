@@ -9,11 +9,12 @@ use asteria_framework::journal::{Actor, BatchId};
 use asteria_framework_api::{
     ExistingMedia, FOLDER_LIST, FolderListParams, FolderListing, HISTORY_DEFAULT_LIMIT,
     HISTORY_MAX_LIMIT, ItemId, LIBRARY_INFO, LIBRARY_RESCAN, LibraryInfo, MEDIA_GET, MEDIA_UPDATE,
-    MediaGetParams, MediaItem, MediaUpdateParams, ORGANIZE_APPLY, ORGANIZE_HISTORY, ORGANIZE_UNDO,
-    OrganizeApplyParams, OrganizeHistoryParams, OrganizeResult, OrganizeUndoParams, RpcError,
-    RpcOutcome, RpcResponse, SERVER_INFO, ServerInfo, UPLOAD_ABORT, UPLOAD_BEGIN, UPLOAD_CHECK,
-    UPLOAD_COMMIT, UPLOAD_STATUS, UploadBeginParams, UploadCheckParams, UploadCheckResult,
-    UploadCommitParams, UploadCommitResult, UploadSessionParams, codes,
+    MediaGetParams, MediaItem, MediaUpdateParams, ORGANIZE_APPLY, ORGANIZE_HISTORY,
+    ORGANIZE_STATUS, ORGANIZE_UNDO, OpStatus, OrganizeApplyParams, OrganizeHistoryParams,
+    OrganizeResult, OrganizeStatus, OrganizeStatusParams, OrganizeUndoParams, RpcError, RpcOutcome,
+    RpcResponse, SERVER_INFO, ServerInfo, UPLOAD_ABORT, UPLOAD_BEGIN, UPLOAD_CHECK, UPLOAD_COMMIT,
+    UPLOAD_STATUS, UploadBeginParams, UploadCheckParams, UploadCheckResult, UploadCommitParams,
+    UploadCommitResult, UploadSessionParams, codes,
 };
 use axum::Extension;
 use axum::Json;
@@ -25,6 +26,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::error::TrySendError;
 
+use crate::batches::Slot;
 use crate::cache::ItemRecord;
 use crate::error::ServerError;
 use crate::ext::ExtContext;
@@ -339,6 +341,7 @@ async fn dispatch(
             to_value(OrganizeResult {
                 batch_id: batch.id.map(|b| b.0.to_string()),
                 results: batch.results,
+                running: batch.running,
             })
         }
         ORGANIZE_UNDO => {
@@ -399,6 +402,7 @@ async fn dispatch(
             to_value(OrganizeResult {
                 batch_id: batch.id.map(|b| b.0.to_string()),
                 results: batch.results,
+                running: batch.running,
             })
         }
         ORGANIZE_HISTORY => {
@@ -416,6 +420,56 @@ async fn dispatch(
             .map_err(internal)?
             .map_err(internal)?;
             to_value(organize::history_page(all, limit, p.cursor.as_deref())?)
+        }
+        ORGANIZE_STATUS => {
+            let p: OrganizeStatusParams = params(p)?;
+            let no_such = || rpc_error(codes::NOT_FOUND, "no such batch");
+            let Ok(id) = p.batch_id.parse::<grain_id::GrainId>().map(BatchId) else {
+                return Err(no_such());
+            };
+            let count = |results: &[asteria_framework_api::OpResult], status| {
+                results.iter().filter(|r| r.status == status).count() as u32
+            };
+            match state.writer().book().get(id) {
+                Some(Slot::Running) => to_value(OrganizeStatus {
+                    batch_id: p.batch_id,
+                    running: true,
+                    complete: false,
+                    done: 0,
+                    skipped: 0,
+                    results: None,
+                }),
+                Some(Slot::Done(results)) => to_value(OrganizeStatus {
+                    batch_id: p.batch_id,
+                    running: false,
+                    complete: true,
+                    done: count(&results, OpStatus::Done),
+                    skipped: count(&results, OpStatus::Skipped),
+                    results: Some(results),
+                }),
+                Some(Slot::Failed) => Err(internal("the batch ended with an error")),
+                None => {
+                    let library = state.library().clone();
+                    let all = tokio::task::spawn_blocking(move || {
+                        let entries = library.journal()?.read_all()?;
+                        Ok::<_, asteria_framework::Error>(organize::history(&entries))
+                    })
+                    .await
+                    .map_err(internal)?
+                    .map_err(internal)?;
+                    let id = id.0.to_string();
+                    let found = all.into_iter().find(|b| b.batch_id == id);
+                    let b = found.ok_or_else(no_such)?;
+                    to_value(OrganizeStatus {
+                        batch_id: b.batch_id,
+                        running: false,
+                        complete: b.complete,
+                        done: b.done,
+                        skipped: b.skipped,
+                        results: None,
+                    })
+                }
+            }
         }
         _ => {
             // Not a common method: the app may know it. The extension is synchronous and

@@ -59,7 +59,33 @@ pub struct OrganizeUndoParams {
 pub struct OrganizeResult {
     /// `None` for a dry run.
     pub batch_id: Option<String>,
+    /// Empty while `running`.
     pub results: Vec<OpResult>,
+    /// The batch did not end within the wait and goes on in the background; ask
+    /// `organize.status` for the outcome.
+    #[serde(default)]
+    pub running: bool,
+}
+
+/// Parameters of `organize.status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrganizeStatusParams {
+    pub batch_id: String,
+}
+
+/// Result of `organize.status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrganizeStatus {
+    pub batch_id: String,
+    /// The server is still running the batch.
+    pub running: bool,
+    /// The batch ran to its end marker.
+    pub complete: bool,
+    pub done: u32,
+    pub skipped: u32,
+    /// The per-op results; present only for a batch the server finished since it started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<Vec<OpResult>>,
 }
 
 /// What happened to one operation. In a dry run `Done` means "can be done".
