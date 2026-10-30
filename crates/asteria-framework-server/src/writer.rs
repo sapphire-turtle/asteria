@@ -37,7 +37,7 @@ use crate::upload_commit::{Begun, Prepared, place, prepare_sealed, seal_group};
 
 const QUEUE: usize = 256;
 /// How long `organize` waits for a batch before it answers `running`; the batch goes on.
-pub(crate) const APPLY_WAIT: Duration = Duration::from_secs(25);
+pub(crate) const APPLY_WAIT: Duration = Duration::from_secs(10);
 /// How many upload commits hash and stage their files at once; more wait their turn, so
 /// that big files do not all compete for the disk.
 const COMMIT_PREPARE_JOBS: usize = 2;

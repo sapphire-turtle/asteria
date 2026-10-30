@@ -10,7 +10,7 @@ use asteria_framework::journal::BatchId;
 use asteria_framework_api::OpResult;
 
 /// How long the results of an ended batch are kept.
-pub(crate) const BOOK_KEEP_FOR: Duration = Duration::from_secs(60 * 60);
+pub(crate) const BOOK_KEEP_FOR: Duration = Duration::from_secs(6 * 60 * 60);
 /// The most ended batches kept; older ones go first.
 pub(crate) const BOOK_KEEP: usize = 64;
 
