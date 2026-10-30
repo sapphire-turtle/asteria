@@ -136,6 +136,30 @@ async fn organize_apply_is_recorded_as_the_agent() {
 }
 
 #[tokio::test]
+async fn organize_undo_is_recorded_as_the_agent() {
+    let e = env();
+    let client = connect(&e).await;
+    let ops = json!([{"item_id": item_id(&e, "a.jpg"), "kind": "move", "to": "2025/a.jpg"}]);
+    let v = ok_json(&tool(&client, "organize_apply", json!({"ops": ops})).await);
+    let before = journal(&e).len();
+    let u = ok_json(&tool(&client, "organize_undo", json!({"batch_id": v["batch_id"]})).await);
+    assert_eq!(u["results"][0]["status"], "done");
+    assert!(e.root.join("a.jpg").exists());
+    let lines: Vec<JournalEntry> = journal(&e).into_iter().skip(before).collect();
+    let header = lines.iter().find(|l| l.kind == OpKind::Batch).unwrap();
+    assert_eq!(header.after["undo_of"], v["batch_id"]);
+    let ops: Vec<&JournalEntry> = lines
+        .iter()
+        .filter(|l| !matches!(l.kind, OpKind::Batch | OpKind::BatchEnd))
+        .collect();
+    assert!(!ops.is_empty());
+    for l in std::iter::once(header).chain(ops) {
+        assert_eq!(actor(l), agent(&e), "{:?}", l.kind);
+    }
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn rpc_errors_are_tool_errors() {
     let e = env();
     let client = connect(&e).await;

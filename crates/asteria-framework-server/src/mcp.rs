@@ -7,8 +7,9 @@ use std::sync::Arc;
 use asteria_framework::UserId;
 use asteria_framework::journal::Actor;
 use asteria_framework_api::{
-    FOLDER_LIST, LIBRARY_INFO, MAX_LABEL_CHARS, MEDIA_GET, MEDIA_UPDATE, ORGANIZE_APPLY,
-    ORGANIZE_HISTORY, ORGANIZE_STATUS, ORGANIZE_UNDO,
+    FOLDER_LIST, LIBRARY_INFO, LIBRARY_RESCAN, MAX_LABEL_CHARS, MEDIA_GET, MEDIA_UPDATE,
+    ORGANIZE_APPLY, ORGANIZE_HISTORY, ORGANIZE_STATUS, ORGANIZE_UNDO, SERVER_INFO, UPLOAD_ABORT,
+    UPLOAD_BEGIN, UPLOAD_CHECK, UPLOAD_COMMIT, UPLOAD_STATUS,
 };
 use axum::http::request::Parts;
 use rmcp::model::{
@@ -200,13 +201,39 @@ pub(crate) fn framework_tools() -> Vec<McpTool> {
     ]
 }
 
-/// The framework's tools and then the app's; an app tool named like a framework one is
-/// dropped.
+/// Every method the framework answers. App tools may not call these: the framework decides
+/// which of its methods an agent gets (uploads and rescans it does not).
+const FRAMEWORK_METHODS: [&str; 15] = [
+    SERVER_INFO,
+    LIBRARY_INFO,
+    LIBRARY_RESCAN,
+    FOLDER_LIST,
+    MEDIA_GET,
+    MEDIA_UPDATE,
+    UPLOAD_CHECK,
+    UPLOAD_BEGIN,
+    UPLOAD_STATUS,
+    UPLOAD_COMMIT,
+    UPLOAD_ABORT,
+    ORGANIZE_APPLY,
+    ORGANIZE_UNDO,
+    ORGANIZE_HISTORY,
+    ORGANIZE_STATUS,
+];
+
+/// The framework's tools and then the app's. An app tool named like a framework one, or
+/// calling a framework method, is dropped.
 pub(crate) fn tool_table(ext: &dyn AppExtension) -> Vec<McpTool> {
     let mut tools = framework_tools();
     for t in ext.mcp_tools() {
         if tools.iter().any(|f| f.name == t.name) {
             tracing::warn!(tool = %t.name, "app MCP tool shadows a framework tool; dropped");
+        } else if FRAMEWORK_METHODS.contains(&t.method.as_str()) {
+            tracing::warn!(
+                tool = %t.name,
+                method = %t.method,
+                "app MCP tool calls a framework method; dropped"
+            );
         } else {
             tools.push(t);
         }
@@ -399,6 +426,8 @@ mod tests {
             vec![
                 tool("media_get", "album.get"),
                 tool("album_list", "album.list"),
+                tool("sneaky", "upload.commit"),
+                tool("rescan", "library.rescan"),
             ]
         }
     }
@@ -411,6 +440,11 @@ mod tests {
         assert_eq!(gets[0].method, "media.get");
         let album = tools.iter().find(|t| t.name == "album_list").unwrap();
         assert_eq!(album.method, "album.list");
+        assert!(
+            !tools
+                .iter()
+                .any(|t| t.name == "sneaky" || t.name == "rescan")
+        );
         assert_eq!(tools.len(), 9);
     }
 }
