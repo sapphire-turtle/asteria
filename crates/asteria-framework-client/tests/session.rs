@@ -11,7 +11,7 @@ use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use asteria_framework::{Library, MediaKind};
-use asteria_framework_api::{ClientInfo, FolderListParams, HandshakeError};
+use asteria_framework_api::{ClientInfo, FolderListParams, HandshakeError, MediaUpdateParams};
 use asteria_framework_client::profiles::ServerProfile;
 use asteria_framework_client::rpc::ClientError;
 use asteria_framework_client::session::{
@@ -621,4 +621,47 @@ fn a_scan_that_ends_or_a_new_item_count_asks_for_the_listing_again() {
     assert!(ask(&mut session), "the scan ended");
     assert!(!ask(&mut session), "nothing changed");
     assert!(ask(&mut session), "the watcher found a change");
+}
+
+#[test]
+fn a_write_between_scans_refetches() {
+    let server = TestServer::start();
+    let mut session = Session::open(
+        &server.profile(&server.token),
+        photos_client(),
+        egui::Context::default(),
+    );
+    wait_settled(&mut session);
+    let ask = |session: &mut Session, request: Request| {
+        let id = session.request(request);
+        wait_replies(session, &[id]).remove(0)
+    };
+    let listing = ask(&mut session, list_root());
+    let item = match listing.result {
+        Ok(Response::FolderList(l)) => l.items[0].id.clone(),
+        other => panic!("expected a folder listing, got {other:?}"),
+    };
+    ask(&mut session, Request::LibraryInfo);
+    session.take_refetch_listing();
+
+    // A rating change keeps the item count; only the revision moves.
+    let updated = ask(
+        &mut session,
+        Request::MediaUpdate(MediaUpdateParams {
+            id: item,
+            rating: Some(4),
+            subjects: None,
+            hierarchical_subjects: None,
+            description: None,
+            label: None,
+        }),
+    );
+    assert!(updated.result.is_ok(), "{updated:?}");
+    ask(&mut session, Request::LibraryInfo);
+    assert!(
+        session.take_refetch_listing(),
+        "the write moved the revision"
+    );
+    ask(&mut session, Request::LibraryInfo);
+    assert!(!session.take_refetch_listing(), "nothing changed since");
 }
