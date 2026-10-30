@@ -324,7 +324,8 @@ async fn undo_restores_trash_with_its_rating() {
     assert_eq!(got["result"]["rating"], 4);
     assert_eq!(got["result"]["file_hash"], hash);
     let trash_dir = e.root.join(".asteria/trash");
-    assert!(!trash_dir.exists() || fs::read_dir(&trash_dir).unwrap().next().is_none());
+    assert!(trash_dir.is_dir());
+    assert!(fs::read_dir(&trash_dir).unwrap().next().is_none());
 }
 
 #[tokio::test]
@@ -524,4 +525,61 @@ async fn history_pages_newest_first() {
 
     let bad = hist(json!({"cursor": "nonsense"})).await;
     assert_eq!(bad["error"]["code"], codes::INVALID_PARAMS);
+}
+
+#[tokio::test]
+async fn an_unreadable_journal_line_is_a_skipped_op() {
+    use asteria_framework::journal::{Actor, BatchId, OpId};
+    use chrono::Utc;
+    use grain_id::GrainId;
+
+    let e = env();
+    let batch = BatchId(GrainId::random());
+    let line = |kind, before: Value, after: Value| JournalEntry {
+        op_id: OpId(GrainId::random()),
+        plan_id: Some(batch),
+        actor: Actor::User(e.lib.owner()),
+        at: Utc::now(),
+        kind,
+        before,
+        after,
+    };
+    fs::create_dir(e.root.join("2025")).unwrap();
+    fs::rename(e.root.join("a.jpg"), e.root.join("2025/x.jpg")).unwrap();
+    let meta = fs::metadata(e.root.join("2025/x.jpg")).unwrap();
+    let mtime = meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64;
+    let j = e.lib.journal().unwrap();
+    for l in [
+        line(
+            OpKind::Batch,
+            Value::Null,
+            json!({"label": null, "op_count": 2, "undo_of": null}),
+        ),
+        line(
+            OpKind::Move,
+            json!({"path": "a.jpg", "size": meta.len(), "mtime_ns": mtime, "hash": null}),
+            json!({"path": "2025/x.jpg", "sidecar": false}),
+        ),
+        // No size: this one cannot be read.
+        line(
+            OpKind::Move,
+            json!({"path": "b.jpg", "mtime_ns": 1}),
+            json!({"path": "2025/y.jpg", "sidecar": false}),
+        ),
+    ] {
+        j.append(&l).unwrap();
+    }
+    let v = undo(&e, &batch.0.to_string(), false).await;
+    let results = v["result"]["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2, "{v}");
+    let bad = results.iter().find(|r| r["status"] == "skipped").unwrap();
+    assert_eq!(bad["reason"], "io");
+    assert_eq!(bad["path"], "2025/y.jpg");
+    assert_eq!(results.iter().filter(|r| r["status"] == "done").count(), 1);
+    assert!(e.root.join("a.jpg").exists());
 }

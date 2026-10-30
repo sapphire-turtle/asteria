@@ -651,7 +651,8 @@ fn apply_rewrite(ctx: &OpCtx, rw: &Rewrite) {
 /// What `organize.undo` runs: the inverse operations, newest first, and the playlists to put
 /// back afterwards.
 pub(crate) struct UndoPlan {
-    pub ops: Vec<PlannedOp>,
+    /// A journal line that cannot be read stays in as a skipped operation.
+    pub ops: Vec<Planned>,
     pub restores: Vec<Rewrite>,
 }
 
@@ -782,8 +783,15 @@ pub(crate) fn plan_undo(entries: &[JournalEntry], id: BatchId) -> Result<UndoPla
         match e.kind {
             OpKind::Batch => found = true,
             OpKind::Move | OpKind::Rename | OpKind::Trash => match inverse(e) {
-                Some(op) => ops.push(op),
-                None => tracing::warn!(op = %e.op_id.0, "journal line cannot be undone"),
+                Some(op) => ops.push(Ok(op)),
+                None => {
+                    tracing::warn!(op = %e.op_id.0, "journal line cannot be undone");
+                    // Journal paths are library-relative; anything else is not reported.
+                    let path = parsed(&e.after, "path")
+                        .filter(|p: &String| plain_rel(p))
+                        .unwrap_or_default();
+                    ops.push(Err((path, SkipReason::Io)));
+                }
             },
             OpKind::RewritePlaylist => match inverse_rewrite(e) {
                 Some(rw) => restores.push(rw),

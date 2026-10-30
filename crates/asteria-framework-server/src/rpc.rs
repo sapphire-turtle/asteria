@@ -390,7 +390,7 @@ async fn dispatch(
                 .organize(
                     Actor::User(user),
                     None,
-                    plan.ops.into_iter().map(Ok).collect(),
+                    plan.ops,
                     state.extension().clone(),
                     kind,
                 )
