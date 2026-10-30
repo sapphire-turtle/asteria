@@ -5,14 +5,15 @@ use std::sync::atomic::Ordering;
 
 use asteria_framework::UserId;
 use asteria_framework::hash::ContentHash;
-use asteria_framework::journal::Actor;
+use asteria_framework::journal::{Actor, BatchId};
 use asteria_framework_api::{
-    ExistingMedia, FOLDER_LIST, FolderListParams, FolderListing, ItemId, LIBRARY_INFO,
-    LIBRARY_RESCAN, LibraryInfo, MEDIA_GET, MEDIA_UPDATE, MediaGetParams, MediaItem,
-    MediaUpdateParams, ORGANIZE_APPLY, OrganizeApplyParams, OrganizeResult, RpcError, RpcOutcome,
-    RpcResponse, SERVER_INFO, ServerInfo, UPLOAD_ABORT, UPLOAD_BEGIN, UPLOAD_CHECK, UPLOAD_COMMIT,
-    UPLOAD_STATUS, UploadBeginParams, UploadCheckParams, UploadCheckResult, UploadCommitParams,
-    UploadCommitResult, UploadSessionParams, codes,
+    ExistingMedia, FOLDER_LIST, FolderListParams, FolderListing, HISTORY_DEFAULT_LIMIT,
+    HISTORY_MAX_LIMIT, ItemId, LIBRARY_INFO, LIBRARY_RESCAN, LibraryInfo, MEDIA_GET, MEDIA_UPDATE,
+    MediaGetParams, MediaItem, MediaUpdateParams, ORGANIZE_APPLY, ORGANIZE_HISTORY, ORGANIZE_UNDO,
+    OrganizeApplyParams, OrganizeHistoryParams, OrganizeResult, OrganizeUndoParams, RpcError,
+    RpcOutcome, RpcResponse, SERVER_INFO, ServerInfo, UPLOAD_ABORT, UPLOAD_BEGIN, UPLOAD_CHECK,
+    UPLOAD_COMMIT, UPLOAD_STATUS, UploadBeginParams, UploadCheckParams, UploadCheckResult,
+    UploadCommitParams, UploadCommitResult, UploadSessionParams, codes,
 };
 use axum::Extension;
 use axum::Json;
@@ -339,6 +340,82 @@ async fn dispatch(
                 batch_id: batch.id.map(|b| b.0.to_string()),
                 results: batch.results,
             })
+        }
+        ORGANIZE_UNDO => {
+            let p: OrganizeUndoParams = params(p)?;
+            // An id that is not one is an id nobody has.
+            let Ok(of) = p.batch_id.parse::<grain_id::GrainId>().map(BatchId) else {
+                return Err(rpc_error(codes::NOT_FOUND, "no such batch"));
+            };
+            let busy = || rpc_error(codes::BUSY, "that batch is being changed; retry");
+            // The claim comes before the journal is read: the check for an earlier undo and
+            // the start of this one must not interleave with another undo of the same batch.
+            let claim = if p.dry_run {
+                let running = state.writer().running();
+                let taken = running
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&of);
+                if taken {
+                    return Err(busy());
+                }
+                None
+            } else {
+                Some(state.writer().claim_running(of).ok_or_else(busy)?)
+            };
+            let library = state.library().clone();
+            let plan = tokio::task::spawn_blocking(move || {
+                let entries = library.journal()?.read_all()?;
+                Ok::<_, asteria_framework::Error>(organize::plan_undo(&entries, of))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?
+            .map_err(|e| match e {
+                organize::UndoError::NotFound => rpc_error(codes::NOT_FOUND, "no such batch"),
+                organize::UndoError::AlreadyUndone => {
+                    rpc_error(codes::ALREADY_UNDONE, "that batch was already undone")
+                }
+            })?;
+            let kind = match claim {
+                Some(claim) => BatchKind::Undo {
+                    of,
+                    restores: plan.restores,
+                    claim,
+                },
+                None => BatchKind::DryRun,
+            };
+            let batch = state
+                .writer()
+                .organize(
+                    Actor::User(user),
+                    None,
+                    plan.ops.into_iter().map(Ok).collect(),
+                    state.extension().clone(),
+                    kind,
+                )
+                .await
+                .map_err(write_err)?;
+            to_value(OrganizeResult {
+                batch_id: batch.id.map(|b| b.0.to_string()),
+                results: batch.results,
+            })
+        }
+        ORGANIZE_HISTORY => {
+            let p: OrganizeHistoryParams = params(p)?;
+            let limit = p
+                .limit
+                .unwrap_or(HISTORY_DEFAULT_LIMIT)
+                .clamp(1, HISTORY_MAX_LIMIT);
+            let library = state.library().clone();
+            let all = tokio::task::spawn_blocking(move || {
+                let entries = library.journal()?.read_all()?;
+                Ok::<_, asteria_framework::Error>(organize::history(&entries))
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
+            to_value(organize::history_page(all, limit, p.cursor.as_deref())?)
         }
         _ => {
             // Not a common method: the app may know it. The extension is synchronous and

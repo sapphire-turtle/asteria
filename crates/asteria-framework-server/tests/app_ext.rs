@@ -505,3 +505,48 @@ async fn a_panicking_after_moves_still_ends_the_batch() {
     );
     assert_eq!(kinds(&e).last().unwrap(), "batch_end");
 }
+
+#[tokio::test]
+async fn undo_puts_the_playlist_back_without_asking_the_app() {
+    let (e, ext) = playlist_env("a.jpg\n", false, "a.jpg\n");
+    let v = move_a_to_c(&e).await;
+    let batch = v["result"]["batch_id"].as_str().unwrap().to_string();
+    let u = common::call(
+        &e.app,
+        &e.owner_token,
+        "organize.undo",
+        json!({"batch_id": batch}),
+    )
+    .await;
+    assert_eq!(u["result"]["results"][0]["status"], "done", "{u}");
+    assert!(e.root.join("a.jpg").exists());
+    assert_eq!(
+        fs::read_to_string(e.root.join("list.m3u8")).unwrap(),
+        "a.jpg\n"
+    );
+    // after_moves ran for the original batch only.
+    assert_eq!(
+        *ext.seen.lock().unwrap(),
+        vec![("a.jpg".to_string(), "c.jpg".to_string())]
+    );
+    assert_eq!(kinds(&e).last().unwrap(), "batch_end");
+}
+
+#[tokio::test]
+async fn undo_leaves_an_edited_playlist_alone() {
+    let (e, _ext) = playlist_env("a.jpg\n", false, "a.jpg\n");
+    let v = move_a_to_c(&e).await;
+    let batch = v["result"]["batch_id"].as_str().unwrap().to_string();
+    fs::write(e.root.join("list.m3u8"), "edited\n").unwrap();
+    common::call(
+        &e.app,
+        &e.owner_token,
+        "organize.undo",
+        json!({"batch_id": batch}),
+    )
+    .await;
+    assert_eq!(
+        fs::read_to_string(e.root.join("list.m3u8")).unwrap(),
+        "edited\n"
+    );
+}

@@ -8,6 +8,10 @@ use crate::ItemId;
 pub const MAX_OPS: usize = 10_000;
 /// Longest batch label, in characters.
 pub const MAX_LABEL_CHARS: usize = 200;
+/// Batches `organize.history` returns when `limit` is not given.
+pub const HISTORY_DEFAULT_LIMIT: u32 = 50;
+/// The most batches one `organize.history` page holds; a larger `limit` is cut to this.
+pub const HISTORY_MAX_LIMIT: u32 = 200;
 
 /// One operation of an `organize.apply` batch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

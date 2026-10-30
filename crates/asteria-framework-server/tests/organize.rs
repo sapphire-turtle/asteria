@@ -263,3 +263,265 @@ async fn a_folder_that_still_holds_a_file_stays() {
     apply(&e, vec![mv(&e, "sub/b.jpg", "b2.jpg")], false, None).await;
     assert!(e.root.join("sub/other.jpg").exists());
 }
+
+// ---- organize.undo and organize.history ----
+
+async fn undo(e: &Env, batch_id: &str, dry_run: bool) -> Value {
+    call(
+        &e.app,
+        &e.owner_token,
+        "organize.undo",
+        json!({"batch_id": batch_id, "dry_run": dry_run}),
+    )
+    .await
+}
+
+fn batch_id(v: &Value) -> String {
+    v["result"]["batch_id"].as_str().unwrap().to_string()
+}
+
+fn status(v: &Value, i: usize) -> &Value {
+    &v["result"]["results"][i]["status"]
+}
+
+#[tokio::test]
+async fn undo_puts_moves_back() {
+    let e = env();
+    let id = item_id(&e, "a.jpg");
+    let b = batch_id(&apply(&e, vec![mv(&e, "a.jpg", "2025/x.jpg")], false, None).await);
+    assert!(e.root.join("2025/x.jpg").exists());
+    let v = undo(&e, &b, false).await;
+    assert_eq!(status(&v, 0), "done");
+    assert_eq!(v["result"]["results"][0]["new_path"], "a.jpg");
+    assert!(e.root.join("a.jpg").exists());
+    assert!(!e.root.join("2025").exists());
+    let got = call(&e.app, &e.owner_token, "media.get", json!({"id": id})).await;
+    assert_eq!(got["result"]["path"], "a.jpg");
+}
+
+#[tokio::test]
+async fn undo_restores_trash_with_its_rating() {
+    let e = env();
+    common::hash_all(&e);
+    let id = item_id(&e, "a.jpg");
+    let set = call(
+        &e.app,
+        &e.owner_token,
+        "media.update",
+        json!({"id": id, "rating": 4}),
+    )
+    .await;
+    assert!(set.get("error").is_none(), "{set}");
+    let hash =
+        call(&e.app, &e.owner_token, "media.get", json!({"id": id})).await["result"]["file_hash"]
+            .clone();
+    assert!(hash.is_string());
+    let b = batch_id(&apply(&e, vec![trash(&e, "a.jpg")], false, None).await);
+    let v = undo(&e, &b, false).await;
+    assert_eq!(status(&v, 0), "done");
+    assert!(e.root.join("a.jpg").exists());
+    let got = call(&e.app, &e.owner_token, "media.get", json!({"id": id})).await;
+    assert_eq!(got["result"]["rating"], 4);
+    assert_eq!(got["result"]["file_hash"], hash);
+    let trash_dir = e.root.join(".asteria/trash");
+    assert!(!trash_dir.exists() || fs::read_dir(&trash_dir).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn undo_of_undo_redoes() {
+    let e = env();
+    let b = batch_id(&apply(&e, vec![trash(&e, "a.jpg")], false, None).await);
+    let u = batch_id(&undo(&e, &b, false).await);
+    assert!(e.root.join("a.jpg").exists());
+    let v = undo(&e, &u, false).await;
+    assert_eq!(status(&v, 0), "done");
+    assert!(!e.root.join("a.jpg").exists());
+    let kinds: Vec<OpKind> = journal(&e).iter().map(|l| l.kind).collect();
+    assert_eq!(kinds.iter().filter(|k| **k == OpKind::Trash).count(), 2);
+}
+
+#[tokio::test]
+async fn twice_is_already_undone() {
+    let e = env();
+    let b = batch_id(&apply(&e, vec![mv(&e, "a.jpg", "c.jpg")], false, None).await);
+    assert!(undo(&e, &b, false).await.get("error").is_none());
+    let again = undo(&e, &b, false).await;
+    assert_eq!(again["error"]["code"], codes::ALREADY_UNDONE);
+    let dry = undo(&e, &b, true).await;
+    assert_eq!(dry["error"]["code"], codes::ALREADY_UNDONE);
+}
+
+#[tokio::test]
+async fn concurrent_undos_of_one_batch_run_once() {
+    let e = env();
+    let b = batch_id(&apply(&e, vec![mv(&e, "a.jpg", "c.jpg")], false, None).await);
+    let (x, y) = tokio::join!(undo(&e, &b, false), undo(&e, &b, false));
+    let ok = [&x, &y].iter().filter(|v| v.get("error").is_none()).count();
+    assert_eq!(ok, 1, "{x} {y}");
+    for v in [&x, &y] {
+        if let Some(err) = v.get("error") {
+            let code = err["code"].as_i64().unwrap();
+            assert!(code == codes::BUSY as i64 || code == codes::ALREADY_UNDONE as i64);
+        }
+    }
+    let headers = journal(&e)
+        .iter()
+        .filter(|l| l.kind == OpKind::Batch && !l.after["undo_of"].is_null())
+        .count();
+    assert_eq!(headers, 1);
+}
+
+#[tokio::test]
+async fn undo_skips_files_changed_since() {
+    let e = env();
+    let b = batch_id(
+        &apply(
+            &e,
+            vec![
+                mv(&e, "a.jpg", "2025/x.jpg"),
+                mv(&e, "sub/b.jpg", "2025/y.jpg"),
+            ],
+            false,
+            None,
+        )
+        .await,
+    );
+    let mut f = fs::OpenOptions::new()
+        .append(true)
+        .open(e.root.join("2025/x.jpg"))
+        .unwrap();
+    std::io::Write::write_all(&mut f, b"more").unwrap();
+    drop(f);
+    let v = undo(&e, &b, false).await;
+    // Newest first: y.jpg goes back, x.jpg is left alone.
+    let results = v["result"]["results"].as_array().unwrap();
+    let of = |p: &str| results.iter().find(|r| r["path"] == p).unwrap().clone();
+    assert_eq!(of("2025/x.jpg")["status"], "skipped");
+    assert_eq!(of("2025/x.jpg")["reason"], "changed");
+    assert_eq!(of("2025/y.jpg")["status"], "done");
+    assert!(e.root.join("sub/b.jpg").exists() && e.root.join("2025/x.jpg").exists());
+}
+
+#[tokio::test]
+async fn undo_skips_when_the_old_place_is_taken() {
+    let e = env();
+    let b = batch_id(&apply(&e, vec![mv(&e, "a.jpg", "2025/x.jpg")], false, None).await);
+    fs::write(e.root.join("a.jpg"), "someone else").unwrap();
+    let v = undo(&e, &b, false).await;
+    assert_eq!(status(&v, 0), "skipped");
+    assert_eq!(v["result"]["results"][0]["reason"], "target_exists");
+    assert_eq!(fs::read(e.root.join("a.jpg")).unwrap(), b"someone else");
+    assert!(e.root.join("2025/x.jpg").exists());
+}
+
+#[tokio::test]
+async fn undo_dry_run_changes_nothing() {
+    let e = env();
+    let b = batch_id(&apply(&e, vec![mv(&e, "a.jpg", "2025/x.jpg")], false, None).await);
+    let n = journal(&e).len();
+    let v = undo(&e, &b, true).await;
+    assert_eq!(status(&v, 0), "done");
+    assert!(v["result"]["batch_id"].is_null());
+    assert!(e.root.join("2025/x.jpg").exists() && !e.root.join("a.jpg").exists());
+    assert_eq!(journal(&e).len(), n);
+}
+
+#[tokio::test]
+async fn unknown_batch_is_not_found() {
+    let e = env();
+    let v = undo(&e, &grain_id::GrainId::random().to_string(), false).await;
+    assert_eq!(v["error"]["code"], codes::NOT_FOUND);
+    let v = undo(&e, "nonsense", false).await;
+    assert_eq!(v["error"]["code"], codes::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn an_incomplete_batch_shows_and_undoes() {
+    use asteria_framework::journal::{Actor, BatchId, OpId};
+    use chrono::Utc;
+    use grain_id::GrainId;
+
+    let e = env();
+    let batch = BatchId(GrainId::random());
+    let line = |kind, before: Value, after: Value| JournalEntry {
+        op_id: OpId(GrainId::random()),
+        plan_id: Some(batch),
+        actor: Actor::User(e.lib.owner()),
+        at: Utc::now(),
+        kind,
+        before,
+        after,
+    };
+    // The batch stopped after one move: header and the move, no end line.
+    fs::create_dir(e.root.join("2025")).unwrap();
+    fs::rename(e.root.join("a.jpg"), e.root.join("2025/x.jpg")).unwrap();
+    let meta = fs::metadata(e.root.join("2025/x.jpg")).unwrap();
+    let mtime = meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64;
+    let j = e.lib.journal().unwrap();
+    j.append(&line(
+        OpKind::Batch,
+        Value::Null,
+        json!({"label": "crashed", "op_count": 1, "undo_of": null}),
+    ))
+    .unwrap();
+    j.append(&line(
+        OpKind::Move,
+        json!({"path": "a.jpg", "size": meta.len(), "mtime_ns": mtime, "hash": null}),
+        json!({"path": "2025/x.jpg", "sidecar": false}),
+    ))
+    .unwrap();
+
+    let h = call(&e.app, &e.owner_token, "organize.history", json!({})).await;
+    let b = &h["result"]["batches"][0];
+    assert_eq!(b["batch_id"], batch.0.to_string());
+    assert_eq!(b["complete"], false);
+    assert_eq!(b["done"], 1);
+    assert_eq!(b["op_count"], 1);
+    assert_eq!(b["skipped"], 0);
+    assert_eq!(b["label"], "crashed");
+
+    let v = undo(&e, &batch.0.to_string(), false).await;
+    assert_eq!(status(&v, 0), "done", "{v}");
+    assert!(e.root.join("a.jpg").exists());
+}
+
+#[tokio::test]
+async fn history_pages_newest_first() {
+    let e = env();
+    let b1 = batch_id(&apply(&e, vec![mv(&e, "a.jpg", "c.jpg")], false, Some("one")).await);
+    let b2 = batch_id(&apply(&e, vec![mv(&e, "sub/b.jpg", "d.jpg")], false, Some("two")).await);
+    let b3 = batch_id(&undo(&e, &b1, false).await);
+
+    let hist = |params: Value| {
+        let e = &e;
+        async move { call(&e.app, &e.owner_token, "organize.history", params).await }
+    };
+    let p1 = hist(json!({"limit": 2})).await;
+    let batches = p1["result"]["batches"].as_array().unwrap();
+    assert_eq!(batches.len(), 2);
+    assert_eq!(batches[0]["batch_id"], b3);
+    assert_eq!(batches[1]["batch_id"], b2);
+    assert_eq!(p1["result"]["next_cursor"], b2);
+    assert_eq!(batches[0]["undo_of"], b1);
+    assert_eq!(batches[0]["agent"], false);
+    assert_eq!(batches[0]["user"], e.lib.owner().to_string());
+    assert_eq!(batches[1]["label"], "two");
+    assert_eq!(batches[1]["complete"], true);
+    assert_eq!(batches[1]["done"], 1);
+    assert!(batches[1]["undone_by"].is_null());
+
+    let p2 = hist(json!({"limit": 2, "cursor": b2})).await;
+    let batches = p2["result"]["batches"].as_array().unwrap();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0]["batch_id"], b1);
+    assert_eq!(batches[0]["undone_by"], b3);
+    assert!(p2["result"]["next_cursor"].is_null());
+
+    let bad = hist(json!({"cursor": "nonsense"})).await;
+    assert_eq!(bad["error"]["code"], codes::INVALID_PARAMS);
+}

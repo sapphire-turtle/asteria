@@ -7,7 +7,7 @@
 //! did, `relink_orphans` finds the sidecar again; a missing journal line only loses the
 //! undo of that one move; a stale cache is fixed by the next scan.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::Path;
 
@@ -18,10 +18,10 @@ use asteria_framework::paths::{META_DIR, TRASH_DIR, sidecar_path_for, trash_rel}
 use asteria_framework::upload_path::validate_inbox_path;
 use asteria_framework::{Error as FwError, Library, classify};
 use asteria_framework_api::{
-    ItemId, MAX_LABEL_CHARS, MAX_OPS, OpResult, OpStatus, OrganizeAction, OrganizeOp, RpcError,
-    SkipReason, codes,
+    BatchSummary, ItemId, MAX_LABEL_CHARS, MAX_OPS, OpResult, OpStatus, OrganizeAction,
+    OrganizeHistory, OrganizeOp, RpcError, SkipReason, codes,
 };
-use chrono::Utc;
+use chrono::{SecondsFormat, Utc};
 use grain_id::GrainId;
 
 use crate::cache::{Cache, ExtraRecord, ItemRecord, SidecarSnapshot, StoredHash, item_id_for};
@@ -646,6 +646,182 @@ fn apply_rewrite(ctx: &OpCtx, rw: &Rewrite) {
             tracing::warn!(path = %rw.path, error = %e, "extras not updated; the next scan will fix it");
         }
     }
+}
+
+/// What `organize.undo` runs: the inverse operations, newest first, and the playlists to put
+/// back afterwards.
+pub(crate) struct UndoPlan {
+    pub ops: Vec<PlannedOp>,
+    pub restores: Vec<Rewrite>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UndoError {
+    NotFound,
+    AlreadyUndone,
+}
+
+fn header_undo_of(e: &JournalEntry) -> Option<BatchId> {
+    serde_json::from_value(e.after.get("undo_of")?.clone()).ok()
+}
+
+/// The batches in the journal, newest first.
+pub(crate) fn history(entries: &[JournalEntry]) -> Vec<BatchSummary> {
+    let mut order: Vec<BatchSummary> = Vec::new();
+    let mut index: HashMap<BatchId, usize> = HashMap::new();
+    for e in entries {
+        let Some(id) = e.plan_id else { continue };
+        match e.kind {
+            OpKind::Batch if !index.contains_key(&id) => {
+                let (user, agent) = match e.actor {
+                    Actor::User(u) => (u, false),
+                    Actor::Agent { on_behalf_of } => (on_behalf_of, true),
+                };
+                index.insert(id, order.len());
+                order.push(BatchSummary {
+                    batch_id: id.0.to_string(),
+                    user: user.to_string(),
+                    agent,
+                    at: e.at.to_rfc3339_opts(SecondsFormat::AutoSi, true),
+                    label: parsed(&e.after, "label"),
+                    op_count: parsed(&e.after, "op_count").unwrap_or(0),
+                    done: 0,
+                    skipped: 0,
+                    complete: false,
+                    undo_of: header_undo_of(e).map(|b| b.0.to_string()),
+                    undone_by: None,
+                });
+            }
+            OpKind::Move | OpKind::Rename | OpKind::Trash => {
+                if let Some(&i) = index.get(&id) {
+                    order[i].done += 1;
+                }
+            }
+            OpKind::BatchEnd => {
+                if let Some(&i) = index.get(&id) {
+                    order[i].complete = true;
+                    order[i].skipped = parsed(&e.after, "skipped").unwrap_or(0);
+                }
+            }
+            _ => {}
+        }
+    }
+    // In journal order, so the newest undo of a batch is the one that stays.
+    for i in 0..order.len() {
+        let Some(target) = order[i].undo_of.clone() else {
+            continue;
+        };
+        let by = order[i].batch_id.clone();
+        if let Some(&t) = target
+            .parse::<GrainId>()
+            .ok()
+            .and_then(|g| index.get(&BatchId(g)))
+        {
+            order[t].undone_by = Some(by);
+        }
+    }
+    order.reverse();
+    order
+}
+
+/// One page of `all` (newest first): the batches older than `cursor`, at most `limit`.
+pub(crate) fn history_page(
+    all: Vec<BatchSummary>,
+    limit: u32,
+    cursor: Option<&str>,
+) -> Result<OrganizeHistory, RpcError> {
+    let start = match cursor {
+        None => 0,
+        Some(c) => {
+            all.iter()
+                .position(|b| b.batch_id == c)
+                .ok_or_else(|| invalid("unknown cursor"))?
+                + 1
+        }
+    };
+    let mut batches: Vec<BatchSummary> = all.into_iter().skip(start).collect();
+    let more = batches.len() > limit as usize;
+    batches.truncate(limit as usize);
+    let next_cursor = if more {
+        batches.last().map(|b| b.batch_id.clone())
+    } else {
+        None
+    };
+    Ok(OrganizeHistory {
+        batches,
+        next_cursor,
+    })
+}
+
+fn parsed<T: serde::de::DeserializeOwned>(v: &serde_json::Value, key: &str) -> Option<T> {
+    serde_json::from_value(v.get(key)?.clone()).ok()
+}
+
+/// A path as the journal wrote it: relative, with plain components only (it may lie in the
+/// trash folder).
+fn plain_rel(rel: &str) -> bool {
+    !rel.is_empty()
+        && Path::new(rel)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// The inverse of batch `id`. Fails when there is no such batch or an undo of it exists.
+/// A line that cannot be read is logged and left out.
+pub(crate) fn plan_undo(entries: &[JournalEntry], id: BatchId) -> Result<UndoPlan, UndoError> {
+    let mut found = false;
+    let mut ops = Vec::new();
+    let mut restores = Vec::new();
+    for e in entries {
+        if e.kind == OpKind::Batch && header_undo_of(e) == Some(id) {
+            return Err(UndoError::AlreadyUndone);
+        }
+        if e.plan_id != Some(id) {
+            continue;
+        }
+        match e.kind {
+            OpKind::Batch => found = true,
+            OpKind::Move | OpKind::Rename | OpKind::Trash => match inverse(e) {
+                Some(op) => ops.push(op),
+                None => tracing::warn!(op = %e.op_id.0, "journal line cannot be undone"),
+            },
+            OpKind::RewritePlaylist => match inverse_rewrite(e) {
+                Some(rw) => restores.push(rw),
+                None => tracing::warn!(op = %e.op_id.0, "journal line cannot be undone"),
+            },
+            _ => {}
+        }
+    }
+    if !found {
+        return Err(UndoError::NotFound);
+    }
+    ops.reverse();
+    restores.reverse();
+    Ok(UndoPlan { ops, restores })
+}
+
+fn inverse(e: &JournalEntry) -> Option<PlannedOp> {
+    let to: String = parsed(&e.before, "path").filter(|p: &String| plain_rel(p))?;
+    let from: String = parsed(&e.after, "path").filter(|p: &String| plain_rel(p))?;
+    let mtime: i64 = parsed(&e.before, "mtime_ns")?;
+    Some(PlannedOp {
+        from,
+        to: Target::Path(to),
+        expect: Expect {
+            size: parsed(&e.before, "size")?,
+            mtime_ns: i128::from(mtime),
+            file_hash: None,
+            hash: parsed(&e.before, "hash"),
+        },
+    })
+}
+
+fn inverse_rewrite(e: &JournalEntry) -> Option<Rewrite> {
+    Some(Rewrite {
+        path: parsed(&e.after, "path").filter(|p: &String| plain_rel(p))?,
+        before: parsed(&e.after, "content")?,
+        after: parsed(&e.before, "content")?,
+    })
 }
 
 #[cfg(test)]

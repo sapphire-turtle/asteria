@@ -83,12 +83,13 @@ pub(crate) enum BatchKind {
     Apply,
     /// Check everything, change nothing.
     DryRun,
-    /// A batch that undoes `of`; `restores` put playlists back after the moves.
-    // Built by `organize.undo`.
-    #[allow(dead_code)]
+    /// A batch that undoes `of`; `restores` put playlists back after the moves. `claim`
+    /// keeps `of` marked as running until the batch has ended, so no second undo of it can
+    /// start in between.
     Undo {
         of: BatchId,
         restores: Vec<Rewrite>,
+        claim: RunningGuard,
     },
 }
 
@@ -234,6 +235,13 @@ impl Writer {
             .map_err(|_| WriteError::Internal("write job failed".into()))
     }
 
+    /// Marks `id` as running, or `None` if it already is. `organize.undo` takes this on the
+    /// batch it undoes before reading the journal, so the check for an earlier undo and the
+    /// start of this one cannot interleave with another undo of the same batch.
+    pub(crate) fn claim_running(&self, id: BatchId) -> Option<RunningGuard> {
+        RunningGuard::try_new(&self.running, id)
+    }
+
     /// Runs a batch of moves and trashes: a header line, then each operation as a job of its
     /// own (so other writes interleave), then a last job that tidies up and journals the
     /// end. A dry run is one job that touches nothing. The batch runs in a task of its own
@@ -267,7 +275,7 @@ impl Writer {
         ext: Arc<dyn AppExtension>,
         kind: BatchKind,
     ) -> Result<Batch, WriteError> {
-        let (undo_of, restores) = match kind {
+        let (undo_of, restores, _claim) = match kind {
             BatchKind::DryRun => {
                 let results = self
                     .exec(move |lib, cache| {
@@ -283,8 +291,12 @@ impl Writer {
                     .await?;
                 return Ok(Batch { id: None, results });
             }
-            BatchKind::Apply => (None, None),
-            BatchKind::Undo { of, restores } => (Some(of), Some(restores)),
+            BatchKind::Apply => (None, None, None),
+            BatchKind::Undo {
+                of,
+                restores,
+                claim,
+            } => (Some(of), Some(restores), Some(claim)),
         };
 
         let id = BatchId(GrainId::random());
@@ -462,12 +474,20 @@ impl Writer {
 }
 
 /// Takes a batch out of `running` however its task ends.
-struct RunningGuard {
+pub(crate) struct RunningGuard {
     set: Arc<Mutex<HashSet<BatchId>>>,
     id: BatchId,
 }
 
 impl RunningGuard {
+    fn try_new(set: &Arc<Mutex<HashSet<BatchId>>>, id: BatchId) -> Option<RunningGuard> {
+        let fresh = set.lock().unwrap_or_else(|p| p.into_inner()).insert(id);
+        fresh.then(|| RunningGuard {
+            set: set.clone(),
+            id,
+        })
+    }
+
     fn new(set: &Arc<Mutex<HashSet<BatchId>>>, id: BatchId) -> RunningGuard {
         set.lock().unwrap_or_else(|p| p.into_inner()).insert(id);
         RunningGuard {
