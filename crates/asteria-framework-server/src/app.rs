@@ -14,8 +14,9 @@ use crate::state::AppState;
 use crate::upload_http::upload_chunk;
 
 /// Largest accepted request body. Bigger bodies get 413 before reaching `/rpc`: the only
-/// non-200 answer from `/rpc` besides the 401 of the auth layer.
-const BODY_LIMIT: usize = 64 * 1024;
+/// non-200 answer from `/rpc` besides the 401 of the auth layer. Sized so that an
+/// `organize.apply` of `MAX_OPS` operations (about 150 bytes each) fits.
+const BODY_LIMIT: usize = 4 * 1024 * 1024;
 
 /// Builds the app. The auth layer wraps every route added before it, so routes added later
 /// must be registered before the `layer` call below.

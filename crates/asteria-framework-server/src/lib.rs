@@ -10,6 +10,7 @@ pub mod ext;
 mod fsutil;
 pub mod hashing;
 mod media_http;
+pub(crate) mod organize;
 pub mod process;
 mod rpc;
 pub mod scan;
@@ -27,7 +28,7 @@ pub use cache::{
 };
 pub use config::{ServerConfig, TokenEntry, cache_dir_for, data_dir_for};
 pub use error::ServerError;
-pub use ext::{AppExtension, ExtContext, ThumbSource};
+pub use ext::{AppExtension, ExtContext, Rewrite, ThumbSource};
 pub use hashing::{RelinkReport, hash_pending, relink_orphans};
 pub use process::{Preset, ProcessError, Processor};
 pub use rpc::{media_item, rpc_error};

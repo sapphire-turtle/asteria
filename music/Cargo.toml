@@ -41,7 +41,7 @@ axum.workspace = true
 tokio = { workspace = true, features = ["net"] }
 tempfile.workspace = true
 # The stub servers in tests/support share the client crate's helpers, which want these.
-asteria-framework-api = { path = "../crates/asteria-framework-api", version = "2.2.0" }
+asteria-framework-api = { path = "../crates/asteria-framework-api", version = "2.3.0" }
 asteria-photos-api = { path = "../crates/asteria-photos-api" }
 grain-id.workspace = true
 # The fakes of the player, for the integration tests.

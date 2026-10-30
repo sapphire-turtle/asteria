@@ -420,7 +420,8 @@ impl Session {
     /// Whether the library's contents may have changed since the last call, so the listing on
     /// screen should be fetched again. Clears the mark. A `library.info` answer raises it when
     /// its epoch moved (the server rebuilt its cache), when a scan ended, or when, with no scan
-    /// before or now, the item count changed (the server's watcher found changes).
+    /// before or now, the item count or the revision changed (the server's watcher found
+    /// changes, or a write went through).
     pub fn take_refetch_listing(&mut self) -> bool {
         std::mem::take(&mut self.refetch_listing)
     }
@@ -430,7 +431,10 @@ impl Session {
             let scan_ended = library.scanning && !info.scanning;
             let idle_change =
                 !library.scanning && !info.scanning && library.item_count != info.item_count;
-            if library.epoch != info.epoch || scan_ended || idle_change {
+            // A write that keeps the count (a rating, a move) still moves the revision.
+            let idle_write =
+                !library.scanning && !info.scanning && library.revision != info.revision;
+            if library.epoch != info.epoch || scan_ended || idle_change || idle_write {
                 self.refetch_listing = true;
             }
             *library = info.clone();

@@ -142,6 +142,24 @@ async fn media_update_roundtrip() {
 }
 
 #[tokio::test]
+async fn library_info_reports_a_revision_that_moves_after_a_write() {
+    let e = env();
+    let id = item_id(&e, "a.jpg");
+    let v = call(&e.app, &e.owner_token, "library.info", json!({})).await;
+    let before = v["result"]["revision"].as_u64().unwrap();
+    let v = call(
+        &e.app,
+        &e.owner_token,
+        "media.update",
+        json!({"id": id, "rating": 4}),
+    )
+    .await;
+    assert_eq!(v["result"]["rating"], 4);
+    let v = call(&e.app, &e.owner_token, "library.info", json!({})).await;
+    assert!(v["result"]["revision"].as_u64().unwrap() > before);
+}
+
+#[tokio::test]
 async fn errors_map_to_codes() {
     let e = env();
     let t = &e.owner_token;
@@ -225,7 +243,7 @@ async fn oversized_body_is_413() {
     let e = env();
     let big = format!(
         r#"{{"jsonrpc":"2.0","id":1,"method":"server.info","params":{{"x":"{}"}}}}"#,
-        "a".repeat(70 * 1024)
+        "a".repeat(4 * 1024 * 1024 + 1024)
     );
     let (status, _) = post_raw(&e.app, Some(&format!("Bearer {}", e.owner_token)), &big).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);

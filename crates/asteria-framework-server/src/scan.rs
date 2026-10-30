@@ -17,6 +17,13 @@ use crate::ext::AppExtension;
 
 const BATCH: usize = 512;
 
+#[cfg(test)]
+thread_local! {
+    /// Runs once between the walk and the final writes, so a test can interleave an op.
+    static AFTER_WALK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ScanReport {
     pub added: usize,
@@ -91,6 +98,8 @@ pub fn scan_cancellable(
 
     let mut report = ScanReport::default();
     let mut seen: HashSet<String> = HashSet::new();
+    // Files the walk reached and turned down: their records go, whatever is on disk now.
+    let mut dropped: HashSet<String> = HashSet::new();
     // Subtrees we could not read: their cached records must not be treated as vanished.
     let mut unreadable: Vec<String> = Vec::new();
     let mut pending: Vec<ItemRecord> = Vec::new();
@@ -176,8 +185,12 @@ pub fn scan_cancellable(
             // Only links that resolve to a file inside the library are accepted.
             match entry.path().canonicalize() {
                 Ok(target) if target_allowed(&canonical_root, &target) => {}
-                Ok(_) => continue,
+                Ok(_) => {
+                    dropped.insert(rel);
+                    continue;
+                }
                 Err(e) => {
+                    dropped.insert(rel.clone());
                     report.skipped.push((rel, e.to_string()));
                     continue;
                 }
@@ -186,12 +199,17 @@ pub fn scan_cancellable(
         } else if ft.is_file() {
             entry.metadata().map_err(std::io::Error::from)
         } else {
+            dropped.insert(rel);
             continue;
         };
         let meta = match meta {
             Ok(m) if m.is_file() => m,
-            Ok(_) => continue,
+            Ok(_) => {
+                dropped.insert(rel);
+                continue;
+            }
             Err(e) => {
+                dropped.insert(rel.clone());
                 report.skipped.push((rel, e.to_string()));
                 continue;
             }
@@ -208,12 +226,14 @@ pub fn scan_cancellable(
             None => match classify(entry.path()) {
                 Ok(k) => k,
                 Err(e) => {
+                    dropped.insert(rel.clone());
                     report.skipped.push((rel, e.to_string()));
                     continue;
                 }
             },
         };
         if !ext.accepts(kind) {
+            dropped.insert(rel);
             continue;
         }
         let hash = existing
@@ -260,11 +280,17 @@ pub fn scan_cancellable(
         }
         pending.push(rec);
         if pending.len() >= BATCH {
+            retain_current(root, &mut pending, &mut pending_app);
             cache.put_many_with_app_data(&pending, &pending_app)?;
             pending.clear();
             pending_app.clear();
         }
     }
+    #[cfg(test)]
+    if let Some(hook) = AFTER_WALK.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
+    retain_current(root, &mut pending, &mut pending_app);
     if !pending.is_empty() {
         cache.put_many_with_app_data(&pending, &pending_app)?;
     }
@@ -284,6 +310,11 @@ pub fn scan_cancellable(
         .all_paths()?
         .into_iter()
         .filter(|p| !seen.contains(p) && !under_any(p, &unreadable))
+        .filter(|p| {
+            dropped.contains(p)
+                || seen_extras.contains(p)
+                || !arrived_behind_walk(root, &canonical_root, p)
+        })
         .collect();
     // Files that vanished mid-scan were skipped by path; they are gone too.
     gone.sort();
@@ -295,9 +326,74 @@ pub fn scan_cancellable(
     Ok(report)
 }
 
+/// Drops pending records whose file vanished or changed since the walk stat'd it: an
+/// organize op may have moved it meanwhile, and the cache update of that op must stand.
+/// Only new or changed files are pending, so unchanged items cost nothing here.
+fn retain_current(
+    root: &Path,
+    pending: &mut Vec<ItemRecord>,
+    pending_app: &mut Vec<(String, Option<Vec<u8>>)>,
+) {
+    let mut stale: HashSet<String> = HashSet::new();
+    pending.retain(|rec| {
+        // Follows a symlink, as the walk did for an accepted link.
+        let current = std::fs::metadata(root.join(rel_path(&rec.path))).is_ok_and(|m| {
+            m.is_file() && m.len() == rec.size && mtime_ns(&m) == rec.mtime_ns
+        });
+        if !current {
+            tracing::info!(path = %rec.path, "file changed during the scan; leaving it to the next one");
+            stale.insert(rec.path.clone());
+        }
+        current
+    });
+    if !stale.is_empty() {
+        pending_app.retain(|(p, _)| !stale.contains(p));
+    }
+}
+
+/// Whether a cached path the walk never reached is on disk now, where the walk would
+/// have looked: it was moved in behind the walk (an organize op running beside the
+/// scan), so its record stays for the next scan to judge. Under a symlinked directory
+/// the walk does not descend, so such a path does not count.
+fn arrived_behind_walk(root: &Path, canonical_root: &Path, rel: &str) -> bool {
+    let rel = rel_path(rel);
+    // A directory there now was walked as one, and an item is never a directory.
+    if !std::fs::symlink_metadata(root.join(&rel)).is_ok_and(|m| !m.is_dir()) {
+        return false;
+    }
+    let dir = rel.parent().unwrap_or(Path::new(""));
+    if !dir.as_os_str().is_empty()
+        && !root
+            .join(dir)
+            .canonicalize()
+            .is_ok_and(|c| c == canonical_root.join(dir))
+    {
+        return false;
+    }
+    // A case-insensitive filesystem finds `a.JPG` after a rename to `a.jpg`: only the
+    // exact name in its directory counts.
+    let (Some(name), Ok(entries)) = (rel.file_name(), std::fs::read_dir(root.join(dir))) else {
+        return false;
+    };
+    has_exact_name(entries.filter_map(|e| e.ok().map(|e| e.file_name())), name)
+}
+
+/// Whether `names` holds `wanted` byte for byte.
+fn has_exact_name(
+    mut names: impl Iterator<Item = std::ffi::OsString>,
+    wanted: &std::ffi::OsStr,
+) -> bool {
+    names.any(|n| n == wanted)
+}
+
+/// A `/`-joined library path as a native relative path.
+fn rel_path(rel: &str) -> std::path::PathBuf {
+    rel.split('/').collect()
+}
+
 /// A panicking extension must not wedge every later scan at the same file: the panic
 /// counts as "no app data" and the scan goes on.
-fn extract_guarded(ext: &dyn AppExtension, rel: &str, abs: &Path) -> Option<Vec<u8>> {
+pub(crate) fn extract_guarded(ext: &dyn AppExtension, rel: &str, abs: &Path) -> Option<Vec<u8>> {
     catch_unwind(AssertUnwindSafe(|| ext.extract(rel, abs))).unwrap_or_else(|_| {
         tracing::warn!(path = %rel, "app extension panicked while extracting; storing no app data");
         None
@@ -328,4 +424,87 @@ fn under_any(path: &str, dirs: &[String]) -> bool {
                 .strip_prefix(d.as_str())
                 .is_some_and(|r| r.starts_with('/'))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asteria_framework::MediaKind;
+
+    struct All;
+    impl AppExtension for All {
+        fn accepts(&self, _: MediaKind) -> bool {
+            true
+        }
+    }
+
+    fn paths(cache: &Cache) -> Vec<String> {
+        let mut p = cache.all_paths().unwrap();
+        p.sort();
+        p
+    }
+
+    #[test]
+    fn a_move_behind_the_walk_keeps_the_moved_record_and_leaves_no_stale_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        std::fs::create_dir_all(root.join("2025")).unwrap();
+        std::fs::create_dir(root.join("Unsorted")).unwrap();
+        let lib = Library::init(&root, "o")
+            .unwrap()
+            .with_state_dir(dir.path().join("state"));
+        let cache =
+            std::sync::Arc::new(Cache::open(&dir.path().join("c"), &lib.config().id).unwrap());
+        std::fs::write(root.join("Unsorted/x.bin"), "x").unwrap();
+        scan(&lib, &cache, &All).unwrap();
+        assert_eq!(paths(&cache), ["Unsorted/x.bin"]);
+        // New since the last scan: the walk queues a put for it.
+        std::fs::write(root.join("Unsorted/y.bin"), "y").unwrap();
+
+        // The walk is past `2025/` when both files move there, as an organize op would:
+        // original first, then the cache.
+        let (r, c) = (root.clone(), cache.clone());
+        AFTER_WALK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                for n in ["x.bin", "y.bin"] {
+                    std::fs::rename(r.join("Unsorted").join(n), r.join("2025").join(n)).unwrap();
+                    c.move_item(&format!("Unsorted/{n}"), &format!("2025/{n}"))
+                        .unwrap();
+                }
+            }))
+        });
+        scan(&lib, &cache, &All).unwrap();
+        assert_eq!(paths(&cache), ["2025/x.bin"]);
+
+        // The next scan picks up the file that had no record yet.
+        scan(&lib, &cache, &All).unwrap();
+        assert_eq!(paths(&cache), ["2025/x.bin", "2025/y.bin"]);
+    }
+
+    #[test]
+    fn only_the_exact_name_counts_as_present() {
+        let names = || ["a.jpg", "b.png"].map(std::ffi::OsString::from).into_iter();
+        assert!(has_exact_name(names(), "a.jpg".as_ref()));
+        // What a case-insensitive lookup of a case-only rename would find.
+        assert!(!has_exact_name(names(), "a.JPG".as_ref()));
+        assert!(!has_exact_name(names(), "c.jpg".as_ref()));
+    }
+
+    #[test]
+    fn a_file_the_walk_turned_down_still_loses_its_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        std::fs::create_dir(&root).unwrap();
+        let lib = Library::init(&root, "o")
+            .unwrap()
+            .with_state_dir(dir.path().join("state"));
+        let cache = Cache::open(&dir.path().join("c"), &lib.config().id).unwrap();
+        std::fs::write(root.join("a.bin"), "a").unwrap();
+        scan(&lib, &cache, &All).unwrap();
+        // Still on disk, but no longer a file: the walk drops it.
+        std::fs::remove_file(root.join("a.bin")).unwrap();
+        std::fs::create_dir(root.join("a.bin")).unwrap();
+        scan(&lib, &cache, &All).unwrap();
+        assert!(paths(&cache).is_empty());
+    }
 }

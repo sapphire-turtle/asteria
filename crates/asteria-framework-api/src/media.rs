@@ -50,6 +50,9 @@ pub struct LibraryInfo {
     pub epoch: String,
     pub item_count: u64,
     pub scanning: bool,
+    /// Bumped by every change to the library; 0 from servers that predate it.
+    #[serde(default)]
+    pub revision: u64,
 }
 
 /// Parameters of `folder.list`.
@@ -228,8 +231,9 @@ mod tests {
             epoch: "e1".into(),
             item_count: 42,
             scanning: true,
+            revision: 3,
         };
-        let json = r#"{"library_id":"lib-1","owner":"user-1","epoch":"e1","item_count":42,"scanning":true}"#;
+        let json = r#"{"library_id":"lib-1","owner":"user-1","epoch":"e1","item_count":42,"scanning":true,"revision":3}"#;
         assert_eq!(serde_json::to_string(&info).unwrap(), json);
         assert_eq!(serde_json::from_str::<LibraryInfo>(json).unwrap(), info);
     }

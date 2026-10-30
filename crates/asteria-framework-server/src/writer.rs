@@ -9,21 +9,26 @@
 //! (a connection task still holding the app state), [`Writer::close`] refuses new jobs and
 //! lets the task end after the queued ones.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use asteria_framework::hash::{ContentHash, HashScope};
-use asteria_framework::journal::Actor;
+use asteria_framework::journal::{Actor, BatchId};
 use asteria_framework::{Error as FwError, Library, UserId};
-use asteria_framework_api::{ItemId, MediaUpdateParams, UploadCommitParams, UploadCommitResult};
+use asteria_framework_api::{
+    ItemId, MediaUpdateParams, OpStatus, SkipReason, UploadCommitParams, UploadCommitResult,
+};
 use chrono::Utc;
+use grain_id::GrainId;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::cache::{Cache, ItemRecord, SidecarSnapshot, StoredHash};
 use crate::error::ServerError;
+use crate::ext::{AppExtension, ExtContext, Rewrite};
 use crate::hashing::{RelinkReport, relink_orphans};
+use crate::organize::{self, Batch, OpCtx, Planned, Target};
 use crate::scan::mtime_ns;
 use crate::upload::{UploadError, UploadStore};
 use crate::upload_commit::{Begun, Prepared, place, prepare_sealed, seal_group};
@@ -49,6 +54,9 @@ pub enum WriteError {
     Internal(String),
 }
 
+/// A piece of work for the queue: it gets the library and cache and reports on its own.
+type ExecFn = Box<dyn FnOnce(&Arc<Library>, &Arc<Cache>) + Send>;
+
 enum Job {
     Update {
         user: UserId,
@@ -64,14 +72,33 @@ enum Job {
         prepared: Prepared,
         reply: oneshot::Sender<Result<UploadCommitResult, UploadError>>,
     },
+    /// Any other piece of work; it reports through a channel of its own.
+    Exec(ExecFn),
     /// Refuse new jobs; finish the queued ones and end.
     Close,
+}
+
+/// How [`Writer::organize`] runs its operations.
+pub(crate) enum BatchKind {
+    Apply,
+    /// Check everything, change nothing.
+    DryRun,
+    /// A batch that undoes `of`; `restores` put playlists back after the moves. `claim`
+    /// keeps `of` marked as running until the batch has ended, so no second undo of it can
+    /// start in between.
+    Undo {
+        of: BatchId,
+        restores: Vec<Rewrite>,
+        claim: RunningGuard,
+    },
 }
 
 #[derive(Clone)]
 pub struct Writer {
     tx: mpsc::Sender<Job>,
     library: Arc<Library>,
+    /// The batches being run right now.
+    running: Arc<Mutex<HashSet<BatchId>>>,
     /// Turns for the first phase of upload commits (`COMMIT_PREPARE_JOBS`).
     prepare_permits: Arc<Semaphore>,
 }
@@ -83,6 +110,7 @@ pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHa
     let writer = Writer {
         tx,
         library: library.clone(),
+        running: Arc::default(),
         prepare_permits: Arc::new(Semaphore::new(COMMIT_PREPARE_JOBS)),
     };
     let handle = tokio::spawn(async move {
@@ -114,6 +142,13 @@ pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHa
                 } => {
                     let r = run_blocking(move || place(&lib, &cache, &store, prepared)).await;
                     let _ = reply.send(r);
+                }
+                Job::Exec(f) => {
+                    let _ = run_blocking::<(), WriteError>(move || {
+                        f(&lib, &cache);
+                        Ok(())
+                    })
+                    .await;
                 }
                 Job::Close => rx.close(),
             }
@@ -178,6 +213,196 @@ impl Writer {
     pub async fn close(&self) {
         // An error means the writer has stopped already.
         let _ = self.tx.send(Job::Close).await;
+    }
+
+    /// The batches that are running now (between their first and last journal line).
+    pub fn running(&self) -> Arc<Mutex<HashSet<BatchId>>> {
+        self.running.clone()
+    }
+
+    /// Runs `f` as one job of the queue.
+    async fn exec<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Arc<Library>, &Arc<Cache>) -> T + Send + 'static,
+    ) -> Result<T, WriteError> {
+        let (reply, rx) = oneshot::channel();
+        let job = Box::new(move |lib: &Arc<Library>, cache: &Arc<Cache>| {
+            let _ = reply.send(f(lib, cache));
+        });
+        self.tx.send(Job::Exec(job)).await.map_err(|_| stopped())?;
+        // A dropped reply means the job panicked.
+        rx.await
+            .map_err(|_| WriteError::Internal("write job failed".into()))
+    }
+
+    /// Marks `id` as running, or `None` if it already is. `organize.undo` takes this on the
+    /// batch it undoes before reading the journal, so the check for an earlier undo and the
+    /// start of this one cannot interleave with another undo of the same batch.
+    pub(crate) fn claim_running(&self, id: BatchId) -> Option<RunningGuard> {
+        RunningGuard::try_new(&self.running, id)
+    }
+
+    /// Runs a batch of moves and trashes: a header line, then each operation as a job of its
+    /// own (so other writes interleave), then a last job that tidies up and journals the
+    /// end. A dry run is one job that touches nothing. The batch runs in a task of its own
+    /// and finishes even when the caller stops waiting. The cache is updated by the
+    /// operations, so the caller need not rescan.
+    ///
+    /// An error means nothing was done: the header could not be journaled (for example the
+    /// server has no state directory), so no file was touched.
+    pub(crate) async fn organize(
+        &self,
+        actor: Actor,
+        label: Option<String>,
+        ops: Vec<Planned>,
+        ext: Arc<dyn AppExtension>,
+        kind: BatchKind,
+    ) -> Result<Batch, WriteError> {
+        let writer = self.clone();
+        let task =
+            tokio::spawn(async move { writer.run_batch(actor, label, ops, ext, kind).await });
+        task.await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "organize task failed");
+            Err(WriteError::Internal("write job failed".into()))
+        })
+    }
+
+    async fn run_batch(
+        &self,
+        actor: Actor,
+        label: Option<String>,
+        ops: Vec<Planned>,
+        ext: Arc<dyn AppExtension>,
+        kind: BatchKind,
+    ) -> Result<Batch, WriteError> {
+        let (undo_of, restores, _claim) = match kind {
+            BatchKind::DryRun => {
+                let results = self
+                    .exec(move |lib, cache| {
+                        let ctx = OpCtx {
+                            library: lib,
+                            cache,
+                            ext: ext.as_ref(),
+                            actor,
+                            batch: None,
+                        };
+                        organize::dry_run(&ctx, &ops)
+                    })
+                    .await?;
+                return Ok(Batch { id: None, results });
+            }
+            BatchKind::Apply => (None, None, None),
+            BatchKind::Undo {
+                of,
+                restores,
+                claim,
+            } => (Some(of), Some(restores), Some(claim)),
+        };
+
+        let id = BatchId(GrainId::random());
+        let _running = RunningGuard::new(&self.running, id);
+        let count = ops.len();
+        let header = {
+            let ext = ext.clone();
+            self.exec(move |lib, cache| {
+                let ctx = OpCtx {
+                    library: lib,
+                    cache,
+                    ext: ext.as_ref(),
+                    actor,
+                    batch: Some(id),
+                };
+                organize::write_header(&ctx, label.as_deref(), count, undo_of)
+            })
+            .await?
+        };
+        if let Err(e) = header {
+            tracing::error!(error = %e, "cannot journal the start of a batch; nothing was changed");
+            return Err(WriteError::Internal(e.to_string()));
+        }
+
+        let mut results = Vec::with_capacity(count);
+        // (from, to) of the completed operations; `to` is `None` for a trash.
+        let mut completed: Vec<(String, Option<String>)> = Vec::new();
+        for (i, planned) in ops.into_iter().enumerate() {
+            let op = match planned {
+                Ok(op) => op,
+                Err((path, why)) => {
+                    results.push(organize::skipped(i, &path, why));
+                    continue;
+                }
+            };
+            let (job_op, job_ext) = (op.clone(), ext.clone());
+            let outcome = self
+                .exec(move |lib, cache| {
+                    let ctx = OpCtx {
+                        library: lib,
+                        cache,
+                        ext: job_ext.as_ref(),
+                        actor,
+                        batch: Some(id),
+                    };
+                    organize::apply(&ctx, &job_op)
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!(error = %e, from = %op.from, "organize job did not run");
+                    Err(SkipReason::Io)
+                });
+            match outcome {
+                Ok(d) => {
+                    let to = match op.to {
+                        Target::Path(_) => Some(d.to.clone()),
+                        Target::Trash => None,
+                    };
+                    completed.push((op.from.clone(), to));
+                    results.push(organize::applied(i, &op, d));
+                }
+                Err(why) => results.push(organize::skipped(i, organize::reported_path(&op), why)),
+            }
+        }
+
+        let done = results
+            .iter()
+            .filter(|r| r.status == OpStatus::Done)
+            .count();
+        let skipped = results.len() - done;
+        let finished = self
+            .exec(move |lib, cache| {
+                let ctx = OpCtx {
+                    library: lib,
+                    cache,
+                    ext: ext.as_ref(),
+                    actor,
+                    batch: Some(id),
+                };
+                let rewrites = match restores {
+                    Some(restores) => restores,
+                    None => {
+                        let moves: Vec<(String, String)> = completed
+                            .iter()
+                            .filter_map(|(from, to)| Some((from.clone(), to.clone()?)))
+                            .collect();
+                        let ectx = ExtContext {
+                            library: lib.clone(),
+                            cache: cache.clone(),
+                            user: organize::actor_user(actor),
+                            owner: lib.owner(),
+                        };
+                        organize::rewrites_after(ext.as_ref(), &ectx, &moves)
+                    }
+                };
+                let sources: Vec<String> = completed.into_iter().map(|(from, _)| from).collect();
+                organize::finish(&ctx, &sources, &rewrites, done, skipped);
+            })
+            .await;
+        if let Err(e) = finished {
+            tracing::error!(error = %e, "the last job of a batch did not run");
+        }
+        Ok(Batch {
+            id: Some(id),
+            results,
+        })
     }
 
     pub async fn relink_orphans(&self) -> Result<RelinkReport, WriteError> {
@@ -245,6 +470,39 @@ impl Writer {
             .await
             .map_err(|_| upload_stopped())?;
         rx.await.map_err(|_| upload_stopped())?
+    }
+}
+
+/// Takes a batch out of `running` however its task ends.
+pub(crate) struct RunningGuard {
+    set: Arc<Mutex<HashSet<BatchId>>>,
+    id: BatchId,
+}
+
+impl RunningGuard {
+    fn try_new(set: &Arc<Mutex<HashSet<BatchId>>>, id: BatchId) -> Option<RunningGuard> {
+        let fresh = set.lock().unwrap_or_else(|p| p.into_inner()).insert(id);
+        fresh.then(|| RunningGuard {
+            set: set.clone(),
+            id,
+        })
+    }
+
+    fn new(set: &Arc<Mutex<HashSet<BatchId>>>, id: BatchId) -> RunningGuard {
+        set.lock().unwrap_or_else(|p| p.into_inner()).insert(id);
+        RunningGuard {
+            set: set.clone(),
+            id,
+        }
+    }
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id);
     }
 }
 
