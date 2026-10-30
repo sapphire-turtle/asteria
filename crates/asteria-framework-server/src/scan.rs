@@ -297,7 +297,7 @@ pub fn scan_cancellable(
 
 /// A panicking extension must not wedge every later scan at the same file: the panic
 /// counts as "no app data" and the scan goes on.
-fn extract_guarded(ext: &dyn AppExtension, rel: &str, abs: &Path) -> Option<Vec<u8>> {
+pub(crate) fn extract_guarded(ext: &dyn AppExtension, rel: &str, abs: &Path) -> Option<Vec<u8>> {
     catch_unwind(AssertUnwindSafe(|| ext.extract(rel, abs))).unwrap_or_else(|_| {
         tracing::warn!(path = %rel, "app extension panicked while extracting; storing no app data");
         None

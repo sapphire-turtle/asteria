@@ -10,6 +10,7 @@ pub mod ext;
 mod fsutil;
 pub mod hashing;
 mod media_http;
+pub(crate) mod organize;
 pub mod process;
 mod rpc;
 pub mod scan;
