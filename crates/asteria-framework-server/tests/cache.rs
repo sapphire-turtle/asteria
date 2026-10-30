@@ -512,3 +512,90 @@ fn put_many_with_app_data_commits_records_and_app_data_together() {
     assert_eq!(c.app_data("a.jpg").unwrap().as_deref(), Some(&b"tags"[..]));
     assert_eq!(c.app_data("b.jpg").unwrap(), None);
 }
+
+#[test]
+fn move_item_carries_the_record_hash_and_app_data() {
+    let d = tempfile::tempdir().unwrap();
+    let l = lib();
+    let c = Cache::open(d.path(), &l).unwrap();
+    let h = sh("abc", 10, 1);
+    let mut r = rec(&l, "a.jpg");
+    r.hash = Some(h.clone());
+    c.put_many_with_app_data(&[r], &[("a.jpg".into(), Some(b"tags".to_vec()))])
+        .unwrap();
+    let before = c.get_by_path("a.jpg").unwrap().unwrap();
+    let gen_before = c.app_generation();
+
+    let moved = c.move_item("a.jpg", "sub/c.jpg").unwrap().unwrap();
+    assert_eq!(moved.path, "sub/c.jpg");
+    assert_eq!(moved.id, item_id_for(&l, "sub/c.jpg"));
+    assert_eq!(moved.hash, before.hash);
+    assert_eq!(moved.size, before.size);
+    assert_eq!(moved.mtime_ns, before.mtime_ns);
+    assert!(c.get_by_path("a.jpg").unwrap().is_none());
+    assert!(c.get_by_id(&before.id).unwrap().is_none());
+    assert_eq!(c.get_by_id(&moved.id).unwrap().unwrap(), moved);
+    assert_eq!(
+        c.paths_with_hash(&h.hash, &h.scope).unwrap(),
+        vec!["sub/c.jpg".to_string()]
+    );
+    assert_eq!(c.app_data("sub/c.jpg").unwrap(), Some(b"tags".to_vec()));
+    assert_eq!(c.app_data("a.jpg").unwrap(), None);
+    assert!(c.app_generation() > gen_before);
+}
+
+#[test]
+fn move_item_replaces_an_existing_destination() {
+    let d = tempfile::tempdir().unwrap();
+    let l = lib();
+    let c = Cache::open(d.path(), &l).unwrap();
+    c.put(&rec(&l, "a.jpg")).unwrap();
+    let mut other = rec(&l, "b.jpg");
+    other.hash = Some(sh("old", 10, 1));
+    c.put(&other).unwrap();
+    c.move_item("a.jpg", "b.jpg").unwrap().unwrap();
+    assert_eq!(c.count().unwrap(), 1);
+    assert!(c.paths_with_hash("old", "file/1").unwrap().is_empty());
+}
+
+#[test]
+fn moving_a_missing_record_does_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let c = Cache::open(d.path(), &lib()).unwrap();
+    let r0 = c.revision();
+    assert_eq!(c.move_item("nope.jpg", "x.jpg").unwrap(), None);
+    assert_eq!(c.revision(), r0);
+}
+
+#[test]
+fn revision_moves_with_item_changes_only() {
+    let d = tempfile::tempdir().unwrap();
+    let l = lib();
+    let c = Cache::open(d.path(), &l).unwrap();
+    assert_eq!(c.revision(), 0);
+    let r0 = c.revision();
+    c.put(&rec(&l, "a.jpg")).unwrap();
+    assert_eq!(c.revision(), r0 + 1);
+    c.set_sidecar("a.jpg", SidecarSnapshot::default(), None)
+        .unwrap();
+    assert_eq!(c.revision(), r0 + 2);
+    c.set_sidecar("gone.jpg", SidecarSnapshot::default(), None)
+        .unwrap();
+    assert_eq!(c.revision(), r0 + 2);
+    c.put_extras(&[(
+        "p.m3u8".into(),
+        asteria_framework_server::ExtraRecord {
+            size: 1,
+            mtime_ns: 1,
+        },
+    )])
+    .unwrap();
+    assert_eq!(c.revision(), r0 + 2);
+    c.remove("a.jpg").unwrap();
+    assert_eq!(c.revision(), r0 + 3);
+    c.remove("a.jpg").unwrap();
+    assert_eq!(c.revision(), r0 + 3);
+    c.put(&rec(&l, "m.jpg")).unwrap();
+    c.move_item("m.jpg", "n.jpg").unwrap();
+    assert_eq!(c.revision(), r0 + 5);
+}

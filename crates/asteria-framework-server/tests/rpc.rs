@@ -142,6 +142,24 @@ async fn media_update_roundtrip() {
 }
 
 #[tokio::test]
+async fn library_info_reports_a_revision_that_moves_after_a_write() {
+    let e = env();
+    let id = item_id(&e, "a.jpg");
+    let v = call(&e.app, &e.owner_token, "library.info", json!({})).await;
+    let before = v["result"]["revision"].as_u64().unwrap();
+    let v = call(
+        &e.app,
+        &e.owner_token,
+        "media.update",
+        json!({"id": id, "rating": 4}),
+    )
+    .await;
+    assert_eq!(v["result"]["rating"], 4);
+    let v = call(&e.app, &e.owner_token, "library.info", json!({})).await;
+    assert!(v["result"]["revision"].as_u64().unwrap() > before);
+}
+
+#[tokio::test]
 async fn errors_map_to_codes() {
     let e = env();
     let t = &e.owner_token;

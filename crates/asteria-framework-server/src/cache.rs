@@ -137,6 +137,8 @@ pub struct Cache {
     library: LibraryId,
     /// Counts writes that changed `APP_DATA` or `EXTRAS`; starts at 0 on every open.
     app_generation: AtomicU64,
+    /// Counts commits that changed `ITEMS`; starts at 0 on every open.
+    revision: AtomicU64,
 }
 
 impl Cache {
@@ -217,6 +219,7 @@ impl Cache {
             epoch,
             library: *library_id,
             app_generation: AtomicU64::new(0),
+            revision: AtomicU64::new(0),
         })
     }
 
@@ -289,6 +292,9 @@ impl Cache {
         w.commit().map_err(ce)?;
         if app_changed {
             self.app_generation.fetch_add(1, Ordering::SeqCst);
+        }
+        if !recs.is_empty() {
+            self.revision.fetch_add(1, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -375,6 +381,9 @@ impl Cache {
             }
         }
         w.commit().map_err(ce)?;
+        if n > 0 {
+            self.revision.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(n)
     }
 
@@ -386,6 +395,7 @@ impl Cache {
     pub fn remove_many(&self, rels: &[String]) -> Result<(), ServerError> {
         let w = self.write_txn()?;
         let mut app_changed = false;
+        let mut items_changed = false;
         {
             let mut items = w.open_table(ITEMS).map_err(ce)?;
             let mut ids = w.open_table(IDS).map_err(ce)?;
@@ -400,6 +410,7 @@ impl Cache {
                     .map_err(ce)?
                     .map(|v| v.value().to_vec());
                 if let Some(old) = old {
+                    items_changed = true;
                     self.drop_old_id(&mut ids, rel, &old)?;
                     drop_old_hash(&mut hashes, rel, &old)?;
                 }
@@ -409,7 +420,67 @@ impl Cache {
         if app_changed {
             self.app_generation.fetch_add(1, Ordering::SeqCst);
         }
+        if items_changed {
+            self.revision.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(())
+    }
+
+    /// Moves the record at `from` to `to` in one transaction: the new id, the hash index
+    /// and the app data follow it, and a record already at `to` is replaced. Returns the
+    /// new record, or `None` (changing nothing) if `from` has none.
+    pub fn move_item(&self, from: &str, to: &str) -> Result<Option<ItemRecord>, ServerError> {
+        if from == to {
+            return self.get_by_path(from);
+        }
+        let w = self.write_txn()?;
+        let app_changed;
+        let moved;
+        {
+            let mut items = w.open_table(ITEMS).map_err(ce)?;
+            let mut ids = w.open_table(IDS).map_err(ce)?;
+            let mut hashes = w.open_table(HASHES).map_err(ce)?;
+            let mut app = w.open_table(APP_DATA).map_err(ce)?;
+            let old = items.remove(from).map_err(ce)?.map(|v| v.value().to_vec());
+            let Some(old) = old else { return Ok(None) };
+            let mut rec: ItemRecord = serde_json::from_slice(&old).map_err(ce)?;
+            self.drop_old_id(&mut ids, from, &old)?;
+            drop_old_hash(&mut hashes, from, &old)?;
+            if let Some(replaced) = items.get(to).map_err(ce)?.map(|v| v.value().to_vec()) {
+                self.drop_old_id(&mut ids, to, &replaced)?;
+                drop_old_hash(&mut hashes, to, &replaced)?;
+            }
+            rec.path = to.to_string();
+            rec.id = item_id_for(&self.library, to);
+            let bytes = serde_json::to_vec(&rec).map_err(ce)?;
+            items.insert(to, bytes.as_slice()).map_err(ce)?;
+            ids.insert(rec.id.0.as_str(), to).map_err(ce)?;
+            if let Some(h) = &rec.hash {
+                hashes
+                    .insert(hash_key(&h.scope, &h.hash, to).as_str(), ())
+                    .map_err(ce)?;
+            }
+            // Whatever app data `to` had is replaced along with its record.
+            let data = app.remove(from).map_err(ce)?.map(|v| v.value().to_vec());
+            let replaced = match &data {
+                Some(d) => app.insert(to, d.as_slice()).map_err(ce)?.is_some(),
+                None => app.remove(to).map_err(ce)?.is_some(),
+            };
+            app_changed = data.is_some() || replaced;
+            moved = rec;
+        }
+        w.commit().map_err(ce)?;
+        if app_changed {
+            self.app_generation.fetch_add(1, Ordering::SeqCst);
+        }
+        self.revision.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(moved))
+    }
+
+    /// Moves with every commit that changed an item; 0 right after `open`. Lets a client
+    /// notice that a listing it fetched earlier is stale.
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::SeqCst)
     }
 
     /// Stores (`Some`) or deletes (`None`) the app data of each path in one transaction.

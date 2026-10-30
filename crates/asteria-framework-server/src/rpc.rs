@@ -190,7 +190,8 @@ async fn dispatch(
         }
         LIBRARY_INFO => {
             let cache = state.cache().clone();
-            let (epoch, item_count) = blocking(move || Ok((cache.epoch(), cache.count()?))).await?;
+            let (epoch, item_count, revision) =
+                blocking(move || Ok((cache.epoch(), cache.count()?, cache.revision()))).await?;
             let lib = state.library();
             let owner_name = lib
                 .users()
@@ -204,7 +205,7 @@ async fn dispatch(
                 epoch,
                 item_count,
                 scanning: state.scanning().load(Ordering::Relaxed),
-                revision: 0,
+                revision,
             })
         }
         LIBRARY_RESCAN => {
