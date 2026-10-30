@@ -2,6 +2,7 @@
 //!
 //! Pure functions only; nothing here touches the filesystem.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 /// The most entries read from one playlist; the rest are dropped.
@@ -151,6 +152,83 @@ pub fn library_relative(playlist_rel: &str, raw: &str, roots: &Roots) -> Option<
         return None;
     }
     Some(parts.join("/"))
+}
+
+/// Rewrites the entries of `text` (the playlist at `playlist_rel`) that name a moved item.
+/// `moves` maps old library-relative paths to new ones. `None` when no line changes.
+///
+/// An absolute entry stays absolute (under the root spelling it matched), a relative one stays
+/// relative to the playlist's folder, and `\` stays the separator if the line used one. Line
+/// endings, a BOM, comments and untouched lines are kept as they are.
+pub fn rewrite(
+    text: &str,
+    playlist_rel: &str,
+    roots: &Roots,
+    moves: &HashMap<String, String>,
+) -> Option<String> {
+    let (bom, body) = match text.strip_prefix('\u{feff}') {
+        Some(rest) => ("\u{feff}", rest),
+        None => ("", text),
+    };
+    let mut out = String::with_capacity(text.len());
+    out.push_str(bom);
+    let mut changed = false;
+    for line in body.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let content = content.strip_suffix('\r').unwrap_or(content);
+        let ending = &line[content.len()..];
+        match rewrite_line(content.trim(), playlist_rel, roots, moves) {
+            Some(new) => {
+                out.push_str(&new);
+                out.push_str(ending);
+                changed = true;
+            }
+            None => out.push_str(line),
+        }
+    }
+    changed.then_some(out)
+}
+
+/// The new spelling of one entry line, or `None` to leave it alone.
+fn rewrite_line(
+    entry: &str,
+    playlist_rel: &str,
+    roots: &Roots,
+    moves: &HashMap<String, String>,
+) -> Option<String> {
+    if entry.is_empty() || entry.starts_with('#') {
+        return None;
+    }
+    let new_rel = moves.get(&library_relative(playlist_rel, entry, roots)?)?;
+    let slashed = entry.replace('\\', "/");
+    let new = if slashed.starts_with('/') || has_drive(&slashed) {
+        let root = roots.0.iter().find(|r| under_root(&slashed, r).is_some())?;
+        format!("{root}/{new_rel}")
+    } else {
+        let dir = playlist_rel.rsplit_once('/').map_or("", |(dir, _)| dir);
+        relative_from(dir, new_rel)
+    };
+    Some(if entry.contains('\\') {
+        new.replace('/', "\\")
+    } else {
+        new
+    })
+}
+
+/// `target` (library-relative) as a path relative to the folder `dir`, with `..` as needed.
+fn relative_from(dir: &str, target: &str) -> String {
+    let dir: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
+    let target: Vec<&str> = target.split('/').collect();
+    // The file name always stays, so the common prefix never swallows it.
+    let common = dir
+        .iter()
+        .zip(&target[..target.len() - 1])
+        .take_while(|(a, b)| a == b)
+        .count();
+    let ups = std::iter::repeat_n("..", dir.len() - common);
+    ups.chain(target[common..].iter().copied())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The part of the absolute `path` below `root` (both with `/` separators, `root` without a
@@ -468,5 +546,60 @@ mod tests {
             resolve("x.m3u8", &url, &root_dir(), |_| true, |_| vec![]),
             Resolved::Missing
         );
+    }
+
+    #[test]
+    fn rewrites_relative_entries_from_the_playlist_folder() {
+        let moves = HashMap::from([("Music/A/1.flac".to_string(), "Music/B/1.flac".to_string())]);
+        let text = "#EXTM3U\n#EXTINF:1,One\n#ASTERIA-HASH:blake3:00\n../A/1.flac\nother.flac\n";
+        let out = rewrite(text, "Music/lists/p.m3u8", &root_dir(), &moves).unwrap();
+        assert_eq!(
+            out,
+            "#EXTM3U\n#EXTINF:1,One\n#ASTERIA-HASH:blake3:00\n../B/1.flac\nother.flac\n"
+        );
+    }
+
+    #[test]
+    fn keeps_absolute_backslash_crlf_and_bom() {
+        let moves = HashMap::from([("A/1.flac".to_string(), "B/C/1.flac".to_string())]);
+        let text = "\u{feff}C:\\lib\\A\\1.flac\r\n";
+        let out = rewrite(text, "p.m3u", &roots("C:/lib"), &moves).unwrap();
+        assert_eq!(out, "\u{feff}C:\\lib\\B\\C\\1.flac\r\n");
+    }
+
+    #[test]
+    fn nothing_to_change_is_none() {
+        assert_eq!(
+            rewrite("x.flac\n", "p.m3u8", &root_dir(), &HashMap::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn same_folder_entry() {
+        let moves = HashMap::from([("1.flac".to_string(), "2.flac".to_string())]);
+        let out = rewrite("  1.flac  \nlast.flac", "p.m3u8", &root_dir(), &moves).unwrap();
+        assert_eq!(out, "2.flac\nlast.flac");
+    }
+
+    #[test]
+    fn moving_out_of_a_deeper_folder() {
+        let moves = HashMap::from([("a/b/c.flac".to_string(), "c.flac".to_string())]);
+        let out = rewrite("b/c.flac\n", "a/p.m3u8", &root_dir(), &moves).unwrap();
+        assert_eq!(out, "../c.flac\n");
+    }
+
+    #[test]
+    fn absolute_entries_keep_the_root_spelling_they_matched() {
+        let moves = HashMap::from([("A/1.flac".to_string(), "B/1.flac".to_string())]);
+        let out = rewrite("/lib/A/1.flac\n", "Lists/p.m3u8", &root_dir(), &moves).unwrap();
+        assert_eq!(out, "/lib/B/1.flac\n");
+    }
+
+    #[test]
+    fn urls_and_missing_entries_are_left_alone() {
+        let moves = HashMap::from([("A/1.flac".to_string(), "B/1.flac".to_string())]);
+        let text = "http://x/A/1.flac\nGone/2.flac\n../../A/1.flac\n";
+        assert_eq!(rewrite(text, "p.m3u8", &root_dir(), &moves), None);
     }
 }

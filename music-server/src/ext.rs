@@ -1,10 +1,13 @@
 //! The music app's plug-in for the shared server.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use asteria_framework::MediaKind;
-use asteria_framework_server::{AppExtension, ExtContext, ItemRecord, ServerError, ThumbSource};
+use asteria_framework_server::{
+    AppExtension, ExtContext, ItemRecord, Rewrite, ServerError, ThumbSource,
+};
 use asteria_music_api::{
     ALBUM_GET, ALBUM_LIST, ARTIST_GET, ARTIST_LIST, PLAYLIST_GET, PLAYLIST_LIST, RpcError,
     TrackTags,
@@ -12,6 +15,7 @@ use asteria_music_api::{
 
 use crate::cover::FolderImages;
 use crate::index::Index;
+use crate::playlist::{self, Roots};
 use crate::{cover, rpc, tags};
 
 /// The index built at one cache generation, and the extra files of that moment.
@@ -143,5 +147,46 @@ impl AppExtension for MusicExtension {
             _ => return None,
         };
         Some(handler(self, ctx, params))
+    }
+
+    fn after_moves(&self, ctx: &ExtContext, moves: &[(String, String)]) -> Vec<Rewrite> {
+        let moves: HashMap<String, String> = moves.iter().cloned().collect();
+        let extras = match ctx.cache.extras() {
+            Ok(extras) => extras,
+            Err(e) => {
+                tracing::warn!(error = %e, "extras unavailable; playlists are not rewritten");
+                return Vec::new();
+            }
+        };
+        let root = ctx.library.root();
+        let roots = Roots::new(root, root.canonicalize().ok().as_deref());
+        let mut rewrites = Vec::new();
+        for (rel, _) in extras {
+            if !is_playlist(&rel) {
+                continue;
+            }
+            // Same rule as reading a playlist: only a file inside the library, in full.
+            let Some((bytes, cut)) = cover::canonical_in_library(root, &rel)
+                .and_then(|canon| rpc::read_playlist(&canon).ok())
+            else {
+                continue;
+            };
+            if cut {
+                tracing::info!(playlist = %rel, "playlist is too large; not rewritten");
+                continue;
+            }
+            let Ok(before) = String::from_utf8(bytes) else {
+                tracing::info!(playlist = %rel, "playlist is not UTF-8; not rewritten");
+                continue;
+            };
+            if let Some(after) = playlist::rewrite(&before, &rel, &roots, &moves) {
+                rewrites.push(Rewrite {
+                    path: rel,
+                    before,
+                    after,
+                });
+            }
+        }
+        rewrites
     }
 }

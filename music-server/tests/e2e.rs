@@ -450,4 +450,97 @@ mod linux {
         meta.sort();
         assert_eq!(meta, ["library.toml", "users.toml"]);
     }
+
+    #[test]
+    fn organize_moves_a_track_and_its_playlist_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = Env {
+            home: tmp.path().join("home"),
+            logs: tmp.path().join("logs"),
+        };
+        std::fs::create_dir_all(&env.home).unwrap();
+        std::fs::create_dir_all(&env.logs).unwrap();
+        let lib = tmp.path().join("lib");
+        std::fs::create_dir_all(lib.join("A")).unwrap();
+        let tags = Tags {
+            title: "One",
+            artist: "Artist",
+            album: "Album",
+            track: 1,
+            picture: false,
+        };
+        tagged_copy(
+            "sine440.flac",
+            &lib.join("A/1.flac"),
+            TagType::VorbisComments,
+            &tags,
+        );
+        let list = lib.join("A/list.m3u8");
+        std::fs::write(&list, "#EXTM3U\n1.flac\n").unwrap();
+        let config = tmp.path().join("conf/server.toml");
+        let out = env
+            .command()
+            .args(["init", "--owner", "me", "--library"])
+            .arg(&lib)
+            .arg("--config")
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let token = String::from_utf8(out.stdout).unwrap().trim().to_owned();
+        let listen = format!("127.0.0.1:{}", free_port());
+        let api = Api {
+            client: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap(),
+            base: format!("http://{listen}"),
+            token,
+        };
+        let mut server = Server::start(&env, &config, &listen);
+        api.wait_ready(&mut server);
+        api.wait_scanned(1);
+
+        let found = |api: &Api| {
+            let lists: PlaylistListing = api.typed("playlist.list", json!({}));
+            let list: Playlist = api.typed(
+                "playlist.get",
+                json!(PlaylistGetParams {
+                    id: PlaylistId(lists.playlists[0].id.0.clone())
+                }),
+            );
+            list.entries.iter().map(|e| e.status).collect::<Vec<_>>()
+        };
+        assert_eq!(found(&api), [EntryStatus::Found]);
+
+        let albums: AlbumListing = api.typed("album.list", json!({}));
+        let album: Album = api.typed(
+            "album.get",
+            json!(AlbumGetParams {
+                id: albums.albums[0].id.clone()
+            }),
+        );
+        let item_id = album.tracks[0].item.id.0.to_string();
+        let applied = api.call(
+            "organize.apply",
+            json!({"ops": [{"item_id": item_id, "kind": "move", "to": "B/1.flac"}]}),
+        );
+        assert_eq!(applied["results"][0]["status"], "done", "{applied}");
+        assert_eq!(
+            std::fs::read_to_string(&list).unwrap(),
+            "#EXTM3U\n../B/1.flac\n"
+        );
+        assert_eq!(found(&api), [EntryStatus::Found]);
+
+        let batch_id = applied["batch_id"].as_str().unwrap();
+        api.call("organize.undo", json!({"batch_id": batch_id}));
+        assert_eq!(std::fs::read_to_string(&list).unwrap(), "#EXTM3U\n1.flac\n");
+        assert!(lib.join("A/1.flac").exists());
+        assert_eq!(found(&api), [EntryStatus::Found]);
+        server.stop();
+    }
 }

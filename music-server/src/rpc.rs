@@ -40,7 +40,7 @@ const MAX_PLAYLIST_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Reads at most [`MAX_PLAYLIST_BYTES`] of the file at `canon`. Returns the bytes and whether
 /// the file was longer; a cut file ends at its last whole line, so no entry is half-read.
-fn read_playlist(canon: &Path) -> std::io::Result<(Vec<u8>, bool)> {
+pub(crate) fn read_playlist(canon: &Path) -> std::io::Result<(Vec<u8>, bool)> {
     let mut bytes = Vec::new();
     std::fs::File::open(canon)?
         .take(MAX_PLAYLIST_BYTES + 1)
