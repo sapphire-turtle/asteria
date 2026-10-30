@@ -551,11 +551,31 @@ async fn undo_leaves_an_edited_playlist_alone() {
     );
 }
 
-/// Sleeps in `after_moves` (an apply) and, once `armed`, in `extract` (which
-/// restoring a file from the trash calls), so a batch outlasts a short wait.
+/// Blocks in `after_moves` (an apply) and in `extract` (which restoring a file from the
+/// trash calls) while its gate is closed, so a batch outlasts a short wait for exactly as
+/// long as the test wants. The gate starts open.
 #[derive(Default)]
 struct Slow {
-    armed: AtomicBool,
+    closed: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+impl Slow {
+    fn close(&self) {
+        *self.closed.lock().unwrap() = true;
+    }
+    fn open(&self) {
+        *self.closed.lock().unwrap() = false;
+        self.cv.notify_all();
+    }
+    /// Waits for the gate to open (a stuck test gives up after a while instead of hanging).
+    fn pass(&self) {
+        let guard = self.closed.lock().unwrap();
+        let _ = self
+            .cv
+            .wait_timeout_while(guard, Duration::from_secs(30), |closed| *closed)
+            .unwrap();
+    }
 }
 
 impl AppExtension for Slow {
@@ -563,9 +583,7 @@ impl AppExtension for Slow {
         matches!(kind, MediaKind::Image)
     }
     fn extract(&self, _rel: &str, _abs: &Path) -> Option<Vec<u8>> {
-        if self.armed.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(500));
-        }
+        self.pass();
         None
     }
     fn after_moves(
@@ -573,22 +591,26 @@ impl AppExtension for Slow {
         _ctx: &ExtContext,
         _moves: &[(String, String)],
     ) -> Vec<asteria_framework_server::Rewrite> {
-        std::thread::sleep(Duration::from_millis(500));
+        self.pass();
         Vec::new()
     }
+}
+
+async fn status_of(e: &common::Env, id: &str) -> Value {
+    common::call(
+        &e.app,
+        &e.owner_token,
+        "organize.status",
+        json!({"batch_id": id}),
+    )
+    .await
 }
 
 /// Polls `organize.status` until the batch is no longer running (generous deadline).
 async fn finished_status(e: &common::Env, id: &str) -> Value {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
-        let s = common::call(
-            &e.app,
-            &e.owner_token,
-            "organize.status",
-            json!({"batch_id": id}),
-        )
-        .await;
+        let s = status_of(e, id).await;
         if s["result"]["running"] == false {
             return s;
         }
@@ -599,24 +621,21 @@ async fn finished_status(e: &common::Env, id: &str) -> Value {
 
 #[tokio::test]
 async fn a_slow_batch_returns_running_and_finishes() {
-    let e = common::env_ext(Arc::new(Slow::default()));
+    let slow = Arc::new(Slow::default());
+    let e = common::env_ext(slow.clone());
     e.state.set_organize_wait(Duration::from_millis(100));
+    slow.close();
     let v = move_a_to_c(&e).await;
     let r = &v["result"];
     assert_eq!(r["running"], true, "{v}");
     assert!(r["results"].as_array().unwrap().is_empty());
     let id = r["batch_id"].as_str().unwrap().to_string();
 
-    let now = common::call(
-        &e.app,
-        &e.owner_token,
-        "organize.status",
-        json!({"batch_id": id}),
-    )
-    .await;
+    let now = status_of(&e, &id).await;
     assert_eq!(now["result"]["running"], true, "{now}");
     assert_eq!(now["result"]["complete"], false);
 
+    slow.open();
     let s = finished_status(&e, &id).await;
     assert_eq!(s["result"]["complete"], true, "{s}");
     assert_eq!(s["result"]["done"], 1);
@@ -626,22 +645,21 @@ async fn a_slow_batch_returns_running_and_finishes() {
     assert!(e.root.join("c.jpg").exists() && !e.root.join("a.jpg").exists());
 }
 
-#[tokio::test]
-async fn a_slow_undo_returns_running() {
-    let slow = Arc::new(Slow::default());
-    let e = common::env_ext(slow.clone());
-    // Only restoring from the trash extracts, so that is what gets undone.
+/// Trashes `a.jpg` (only restoring from the trash extracts, so that is what gets undone),
+/// then starts an undo that blocks at the closed gate. Returns the trash batch and the
+/// undo's answer.
+async fn blocked_undo(e: &common::Env, slow: &Slow) -> (String, Value) {
     let first = common::call(
         &e.app,
         &e.owner_token,
         "organize.apply",
-        json!({"ops": [{"item_id": common::item_id(&e, "a.jpg"), "kind": "trash"}]}),
+        json!({"ops": [{"item_id": common::item_id(e, "a.jpg"), "kind": "trash"}]}),
     )
     .await;
     assert_eq!(first["result"]["running"], false, "{first}");
     let of = first["result"]["batch_id"].as_str().unwrap().to_string();
 
-    slow.armed.store(true, Ordering::SeqCst);
+    slow.close();
     e.state.set_organize_wait(Duration::from_millis(100));
     let v = common::call(
         &e.app,
@@ -650,10 +668,46 @@ async fn a_slow_undo_returns_running() {
         json!({"batch_id": of}),
     )
     .await;
+    (of, v)
+}
+
+#[tokio::test]
+async fn a_slow_undo_returns_running() {
+    let slow = Arc::new(Slow::default());
+    let e = common::env_ext(slow.clone());
+    let (_, v) = blocked_undo(&e, &slow).await;
     assert_eq!(v["result"]["running"], true, "{v}");
     let id = v["result"]["batch_id"].as_str().unwrap().to_string();
+    let now = status_of(&e, &id).await;
+    assert_eq!(now["result"]["running"], true, "{now}");
+
+    slow.open();
     let s = finished_status(&e, &id).await;
     assert_eq!(s["result"]["complete"], true, "{s}");
     assert_eq!(s["result"]["results"][0]["status"], "done", "{s}");
+    assert!(e.root.join("a.jpg").exists());
+}
+
+#[tokio::test]
+async fn a_second_undo_is_busy_while_the_first_runs() {
+    let slow = Arc::new(Slow::default());
+    let e = common::env_ext(slow.clone());
+    let (of, v) = blocked_undo(&e, &slow).await;
+    assert_eq!(v["result"]["running"], true, "{v}");
+    let id = v["result"]["batch_id"].as_str().unwrap().to_string();
+
+    let second = common::call(
+        &e.app,
+        &e.owner_token,
+        "organize.undo",
+        json!({"batch_id": of}),
+    )
+    .await;
+    assert_eq!(second["error"]["code"], codes::BUSY, "{second}");
+
+    slow.open();
+    let s = finished_status(&e, &id).await;
+    assert_eq!(s["result"]["complete"], true, "{s}");
+    assert_eq!(s["result"]["done"], 1, "{s}");
     assert!(e.root.join("a.jpg").exists());
 }
