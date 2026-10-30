@@ -1,6 +1,6 @@
 use std::fs;
 
-use asteria_framework::journal::{Actor, Journal, JournalEntry, OpId, OpKind, PlanId};
+use asteria_framework::journal::{Actor, BatchId, Journal, JournalEntry, OpId, OpKind};
 use asteria_framework::{Error, Library};
 use chrono::{TimeZone, Utc};
 use grain_id::GrainId;
@@ -9,7 +9,7 @@ use serde_json::json;
 fn entry(lib: &Library, at: chrono::DateTime<Utc>, before: serde_json::Value) -> JournalEntry {
     JournalEntry {
         op_id: OpId(GrainId::random()),
-        plan_id: Some(PlanId(GrainId::random())),
+        plan_id: Some(BatchId(GrainId::random())),
         actor: Actor::User(lib.owner()),
         at,
         kind: OpKind::Move,
@@ -194,4 +194,25 @@ fn op_kind_upload_wire() {
         serde_json::to_value(OpKind::Upload).unwrap(),
         json!("upload")
     );
+}
+
+#[test]
+fn new_kinds_round_trip() {
+    for (kind, text) in [
+        (OpKind::Batch, "batch"),
+        (OpKind::BatchEnd, "batch_end"),
+        (OpKind::RewritePlaylist, "rewrite_playlist"),
+    ] {
+        assert_eq!(serde_json::to_value(kind).unwrap(), json!(text));
+    }
+}
+
+#[test]
+fn batch_id_is_written_under_plan_id() {
+    let (_d, lib, _j) = setup();
+    let mut e = entry(&lib, day(10, 1), json!(1));
+    let id = BatchId(GrainId::random());
+    e.plan_id = Some(id);
+    let v = serde_json::to_value(&e).unwrap();
+    assert_eq!(v["plan_id"], json!(id.0.to_string()));
 }

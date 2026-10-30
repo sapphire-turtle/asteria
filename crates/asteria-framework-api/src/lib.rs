@@ -3,10 +3,12 @@
 use std::fmt;
 
 mod media;
+mod organize;
 mod rpc;
 mod upload;
 
 pub use media::*;
+pub use organize::*;
 pub use rpc::*;
 pub use upload::*;
 

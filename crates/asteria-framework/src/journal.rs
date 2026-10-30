@@ -21,7 +21,7 @@ pub struct OpId(pub GrainId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct PlanId(pub GrainId);
+pub struct BatchId(pub GrainId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "ActorRepr", into = "ActorRepr")]
@@ -66,12 +66,15 @@ pub enum OpKind {
     RelinkSidecar,
     WriteSidecar,
     Upload,
+    Batch,
+    BatchEnd,
+    RewritePlaylist,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JournalEntry {
     pub op_id: OpId,
-    pub plan_id: Option<PlanId>,
+    pub plan_id: Option<BatchId>,
     pub actor: Actor,
     pub at: DateTime<Utc>,
     pub kind: OpKind,

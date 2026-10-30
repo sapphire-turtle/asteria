@@ -53,6 +53,7 @@ pub mod codes {
     pub const QUOTA: i32 = -32006;
     pub const UPLOAD_INCOMPLETE: i32 = -32007;
     pub const HASH_MISMATCH: i32 = -32008;
+    pub const ALREADY_UNDONE: i32 = -32009;
 }
 
 pub const SERVER_INFO: &str = "server.info";
@@ -66,6 +67,9 @@ pub const UPLOAD_BEGIN: &str = "upload.begin";
 pub const UPLOAD_STATUS: &str = "upload.status";
 pub const UPLOAD_COMMIT: &str = "upload.commit";
 pub const UPLOAD_ABORT: &str = "upload.abort";
+pub const ORGANIZE_APPLY: &str = "organize.apply";
+pub const ORGANIZE_UNDO: &str = "organize.undo";
+pub const ORGANIZE_HISTORY: &str = "organize.history";
 
 #[cfg(test)]
 mod tests {

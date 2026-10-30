@@ -204,6 +204,7 @@ async fn dispatch(
                 epoch,
                 item_count,
                 scanning: state.scanning().load(Ordering::Relaxed),
+                revision: 0,
             })
         }
         LIBRARY_RESCAN => {
