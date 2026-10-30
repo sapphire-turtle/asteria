@@ -208,6 +208,17 @@ impl ImageLoader {
     /// in this egui pass. Call it for every image drawn, every frame; the first call in a pass
     /// also uploads the images that have arrived since the previous pass.
     pub fn request(&mut self, item: &MediaItem, preset: Preset) -> ImageState {
+        self.request_with(&item.id, item.file_hash.as_deref(), preset)
+    }
+
+    /// Like [`request`](Self::request), for an image known only by its item id, such as an
+    /// album's cover. Without a `file_hash` the disk cache is neither read nor written, and
+    /// the entry is the one `request` would use for the same id, with no `file_hash`.
+    pub fn request_id(&mut self, id: &ItemId, preset: Preset) -> ImageState {
+        self.request_with(id, None, preset)
+    }
+
+    fn request_with(&mut self, id: &ItemId, file_hash: Option<&str>, preset: Preset) -> ImageState {
         let frame = self.ctx.cumulative_pass_nr();
         if self.frame != Some(frame) {
             self.frame = Some(frame);
@@ -215,9 +226,9 @@ impl ImageLoader {
             self.poll();
         }
         self.touch += 1;
-        let key = (item.id.clone(), preset);
+        let key = (id.clone(), preset);
         if let Some(entry) = self.entries.get_mut(&key)
-            && entry.file_hash == item.file_hash
+            && entry.file_hash.as_deref() == file_hash
         {
             entry.last_frame = frame;
             entry.last_touch = self.touch;
@@ -240,7 +251,7 @@ impl ImageLoader {
         // New, or the file changed since it was loaded.
         let ticket = self.next_ticket;
         self.next_ticket += 1;
-        let state = if safe_id(&item.id.0) {
+        let state = if safe_id(&id.0) {
             self.held.push(key.clone());
             EntryState::Held
         } else {
@@ -253,7 +264,7 @@ impl ImageLoader {
             key.clone(),
             Entry {
                 ticket,
-                file_hash: item.file_hash.clone(),
+                file_hash: file_hash.map(str::to_owned),
                 state,
                 last_frame: frame,
                 last_touch: self.touch,

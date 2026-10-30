@@ -18,16 +18,16 @@ use asteria_framework_api::ItemId;
 use asteria_framework_client::errors::{error_detail, error_text};
 use asteria_framework_client::profiles::{ProfileId, Profiles};
 use asteria_framework_client::profiles::{ServerProfile, Token};
+use asteria_framework_client::saver::Saver;
 use asteria_framework_client::session::{SessionDirs, SessionState};
 use asteria_framework_client::settings::servers::{ServersChange, ServersPage};
+use asteria_framework_client::widgets::server_switcher::{ServerSwitcher, SwitcherAction};
 use corundum_framework::egui;
 use corundum_framework::gui::settings::{ListItem, SettingsLayout, SettingsSection};
-use corundum_framework::gui::theme::{Swatch, Tone};
 use corundum_framework::gui::{COMPACT_WIDTH, Destination, Shell, ShellApp, Side, icons, tr};
 
 pub use crate::connection::Connection;
 use crate::detail::{DetailView, Edit};
-use crate::saver::Saver;
 use crate::viewer;
 
 /// The screens: the library on the rail, Settings at its foot.
@@ -73,7 +73,7 @@ struct State {
     settings: SettingsLayout<Page>,
     /// `None` when `servers.toml` could not be read (saving would overwrite it) or the save
     /// thread could not start; [`State::save_blocked`] says why.
-    saver: Option<Saver>,
+    saver: Option<Saver<Profiles>>,
     save_blocked: Option<String>,
     /// A screen to open after this frame (from the status bar's menu, say).
     open_screen: Option<Screen>,
@@ -105,7 +105,7 @@ impl PhotosApp {
                 None,
                 Some(tr!(ctx, "asteria-photos-load-failed", reason = e)),
             ),
-            None => match Saver::spawn(paths.servers.clone(), ctx.clone()) {
+            None => match spawn_saver(paths.servers.clone(), ctx.clone()) {
                 Ok(s) => (Some(s), None),
                 Err(e) => (
                     None,
@@ -334,7 +334,7 @@ impl State {
 
     fn save(&mut self) {
         match &self.saver {
-            Some(saver) => saver.save(&self.profiles),
+            Some(saver) => saver.save(self.profiles.clone()),
             None => {
                 if let Some(why) = &self.save_blocked {
                     self.servers_page.show_error(why.clone());
@@ -346,7 +346,7 @@ impl State {
     /// Takes in what arrived: save failures, and the session's replies.
     fn poll(&mut self) {
         if let Some(saver) = &self.saver {
-            for e in saver.errors() {
+            while let Some(e) = saver.take_error() {
                 let why = tr!(self.ctx, "asteria-photos-save-failed", reason = e);
                 self.servers_page.show_error(why);
             }
@@ -576,111 +576,33 @@ impl State {
     /// The server in use and its state, with a menu of the servers to switch to. `compact`
     /// shows only the state's icon (the bottom bar has little room).
     fn switcher_ui(&mut self, ui: &mut egui::Ui, compact: bool) {
-        let session = self.connection.as_ref().map(|c| &c.session);
-        let degraded = session.and_then(|s| s.degraded());
-        let detail = match (session.map(|s| s.state()), degraded) {
-            (Some(SessionState::Failed(e)), _) | (_, Some(e)) => error_detail(e),
-            _ => None,
-        };
-        let (icon, swatch, status) = match session.map(|s| s.state()) {
-            None => (
-                icons::cloud_off(),
-                Swatch::Neutral,
-                tr!(ui, "asteria-photos-status-none"),
-            ),
-            Some(SessionState::Connecting) => (
-                icons::refresh_cw(),
-                Swatch::Yellow,
-                tr!(ui, "asteria-photos-status-connecting"),
-            ),
-            Some(SessionState::Ready { .. }) => match degraded {
-                // Connected, but the latest request found the server gone or the token refused.
-                Some(e) => {
-                    let reason = error_text(ui.ctx(), e);
-                    (
-                        icons::cloud_off(),
-                        Swatch::Orange,
-                        tr!(ui, "asteria-photos-status-degraded", reason = reason),
-                    )
-                }
-                None => (
-                    icons::circle_check(),
-                    Swatch::Green,
-                    tr!(ui, "asteria-photos-status-connected"),
-                ),
-            },
-            Some(SessionState::Failed(e)) => {
-                let reason = error_text(ui.ctx(), e);
-                (
-                    icons::circle_x(),
-                    Swatch::Red,
-                    tr!(ui, "asteria-photos-status-failed", reason = reason),
-                )
-            }
-        };
-        let dot = icons::image_as(ui, icon, 14.0, Tone::Text, swatch);
-        let name = match self.profiles.active() {
-            Some(p) => p.name.clone(),
-            None => tr!(ui, "asteria-photos-status-none"),
-        };
-        let button = if compact {
-            egui::Button::image(dot)
-        } else {
-            egui::Button::image_and_text(dot, name.as_str())
-        };
-        let active = self.profiles.active().map(|p| p.id);
-        let servers: Vec<(ProfileId, String)> = self
-            .profiles
-            .servers
-            .iter()
-            .map(|p| (p.id, p.name.clone()))
-            .collect();
-        let menu =
-            egui::containers::menu::MenuButton::from_button(button.frame(false)).ui(ui, |ui| {
-                ui.strong(name.as_str());
-                ui.weak(status.as_str());
-                ui.separator();
-                let mut picked = None;
-                for (id, server) in &servers {
-                    if ui.radio(active == Some(*id), server.as_str()).clicked() {
-                        picked = Some(*id);
-                        ui.close();
-                    }
-                }
-                if !servers.is_empty() {
-                    ui.separator();
-                }
-                let manage = ui.button(tr!(ui, "asteria-photos-status-manage")).clicked();
-                if manage {
-                    ui.close();
-                }
-                (picked, manage)
-            });
-        let mut hover = tr!(
-            ui,
-            "asteria-photos-status-hover",
-            name = name.as_str(),
-            status = status.as_str()
-        );
-        if let Some(detail) = detail {
-            hover.push('\n');
-            hover.push_str(&detail);
+        let action = ServerSwitcher {
+            profiles: &self.profiles,
+            session: self.connection.as_ref().map(|c| &c.session),
+            compact,
         }
-        menu.0.on_hover_text(hover);
-        if let Some(inner) = menu.1 {
-            let (picked, manage) = inner.inner;
-            if let Some(id) = picked {
-                self.switch_to(id);
-            }
-            if manage {
-                self.open_servers_settings();
-            }
+        .show(ui);
+        match action {
+            Some(SwitcherAction::Switch(id)) => self.switch_to(id),
+            Some(SwitcherAction::Manage) => self.open_servers_settings(),
+            None => {}
         }
     }
 }
 
 /// How long the status bar keeps a notice.
 const NOTICE_FOR: Duration = Duration::from_secs(8);
+
+/// A saver that writes `servers.toml` on the thread `photos-servers-save`.
+fn spawn_saver(path: PathBuf, ctx: egui::Context) -> std::io::Result<Saver<Profiles>> {
+    Saver::spawn("photos-servers-save", ctx, move |profiles: &Profiles| {
+        // The error never holds the file's contents, so no token.
+        profiles.save(&path).map_err(|e| {
+            tracing::warn!(path = %path.display(), error = %e, "saving servers.toml failed");
+            e.to_string()
+        })
+    })
+}
 
 /// What a connection depends on: the server, its address and its token (not its name).
 fn endpoint(p: Option<&ServerProfile>) -> Option<(ProfileId, String, Token)> {

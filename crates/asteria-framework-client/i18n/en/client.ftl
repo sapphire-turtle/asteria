@@ -42,3 +42,12 @@ asteria-client-servers-error-library-changed = the server now serves a different
 asteria-client-servers-error-server = the server reported an error
 asteria-client-servers-error-protocol = the server's answer could not be understood
 asteria-client-servers-error-local = something went wrong on this device
+
+# The server switcher in the status bar.
+asteria-client-status-none = No server
+asteria-client-status-connected = Connected
+asteria-client-status-connecting = Connecting
+asteria-client-status-failed = Not connected: { $reason }
+asteria-client-status-degraded = Not responding: { $reason }
+asteria-client-status-manage = Manage servers...
+asteria-client-status-hover = { $name }: { $status }

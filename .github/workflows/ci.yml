@@ -8,8 +8,8 @@ jobs:
     uses: sapphire-turtle/.github/.github/workflows/rust-ci.yml@v1
     with:
       # libvips-tools and ffmpeg: the server's tests. The rest: the window system
-      # libraries eframe (winit, wgpu) builds against.
-      linux-packages: libvips-tools ffmpeg libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev
+      # libraries eframe (winit, wgpu) builds against. libasound2-dev: cpal's ALSA.
+      linux-packages: libvips-tools ffmpeg libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev libasound2-dev
 
   # The client library must keep building for iOS: a dependency or feature that
   # does not support it should fail on the pull request, not when the iOS app is

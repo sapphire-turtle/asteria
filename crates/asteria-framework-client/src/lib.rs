@@ -7,6 +7,7 @@ pub mod images;
 pub mod media_cache;
 pub mod profiles;
 pub mod rpc;
+pub mod saver;
 pub mod session;
 pub mod settings;
 pub mod upload;

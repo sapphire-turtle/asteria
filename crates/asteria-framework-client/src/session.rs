@@ -59,6 +59,12 @@ pub enum Request {
     MediaGet(MediaGetParams),
     /// `media.update`.
     MediaUpdate(MediaUpdateParams),
+    /// Any other method, such as an app's own: `method` called with `params`. The result comes
+    /// back as it is, in [`Response::Value`]; decoding it is up to the app.
+    Call {
+        method: String,
+        params: serde_json::Value,
+    },
 }
 
 /// The successful result of a [`Request`], in the same variant order.
@@ -69,6 +75,8 @@ pub enum Response {
     FolderList(FolderListing),
     /// From `media.get` and `media.update`.
     Media(MediaItem),
+    /// From [`Request::Call`]: the method's result, undecoded.
+    Value(serde_json::Value),
 }
 
 /// The outcome of one request, handed out by [`Session::poll`].
@@ -525,5 +533,6 @@ fn run(rpc: &RpcClient, request: Request) -> Result<Response, ClientError> {
         Request::FolderList(p) => Response::FolderList(rpc.call(FOLDER_LIST, &p)?),
         Request::MediaGet(p) => Response::Media(rpc.call(MEDIA_GET, &p)?),
         Request::MediaUpdate(p) => Response::Media(rpc.call(MEDIA_UPDATE, &p)?),
+        Request::Call { method, params } => Response::Value(rpc.call(&method, &params)?),
     })
 }
