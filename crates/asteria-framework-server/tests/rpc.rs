@@ -243,7 +243,7 @@ async fn oversized_body_is_413() {
     let e = env();
     let big = format!(
         r#"{{"jsonrpc":"2.0","id":1,"method":"server.info","params":{{"x":"{}"}}}}"#,
-        "a".repeat(70 * 1024)
+        "a".repeat(4 * 1024 * 1024 + 1024)
     );
     let (status, _) = post_raw(&e.app, Some(&format!("Bearer {}", e.owner_token)), &big).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);

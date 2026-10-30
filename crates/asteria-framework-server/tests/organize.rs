@@ -5,7 +5,7 @@ mod common;
 use std::fs;
 
 use asteria_framework::journal::{JournalEntry, OpKind};
-use asteria_framework_api::codes;
+use asteria_framework_api::{MAX_OPS, codes};
 use common::{Env, call, env, item_id};
 use serde_json::{Value, json};
 
@@ -130,22 +130,30 @@ async fn one_bad_op_does_not_stop_the_batch() {
 async fn request_errors_change_nothing() {
     let e = env();
     let n = journal(&e).len();
-    let a = item_id(&e, "a.jpg");
-    let cases: Vec<(Vec<Value>, i32)> = vec![
+    let cases: Vec<(Vec<Value>, i32, &str)> = vec![
         (
             vec![mv(&e, "a.jpg", "p.jpg"), mv(&e, "a.jpg", "q.jpg")],
             codes::INVALID_PARAMS,
+            "item 1 appears twice",
         ),
-        (vec![mv(&e, "a.jpg", "../x.jpg")], codes::INVALID_PATH),
-        (vec![mv(&e, "a.jpg", "x.png")], codes::INVALID_PARAMS),
+        (vec![mv(&e, "a.jpg", "../x.jpg")], codes::INVALID_PATH, ""),
+        (
+            vec![mv(&e, "sub/b.jpg", "ok.jpg"), mv(&e, "a.jpg", "x.png")],
+            codes::INVALID_PARAMS,
+            "operation 1 changes the extension",
+        ),
         (
             vec![mv(&e, "a.jpg", "same.jpg"), mv(&e, "sub/b.jpg", "same.jpg")],
             codes::INVALID_PARAMS,
+            "operations 0 and 1 have the same target",
         ),
     ];
-    for (ops, code) in cases {
+    for (ops, code, message) in cases {
         let v = apply(&e, ops, false, None).await;
         assert_eq!(v["error"]["code"], code, "{v}");
+        if !message.is_empty() {
+            assert_eq!(v["error"]["message"], message, "{v}");
+        }
     }
     // The extension may differ in ASCII case only.
     let ok = apply(&e, vec![mv(&e, "a.jpg", "A.JPG")], true, None).await;
@@ -157,7 +165,6 @@ async fn request_errors_change_nothing() {
     assert_eq!(v["error"]["code"], codes::INVALID_PARAMS);
     assert!(e.root.join("a.jpg").exists() && e.root.join("sub/b.jpg").exists());
     assert_eq!(journal(&e).len(), n);
-    assert!(!a.is_empty());
 }
 
 #[tokio::test]
@@ -226,4 +233,33 @@ async fn revision_moves_after_apply() {
     apply(&e, vec![mv(&e, "a.jpg", "c.jpg")], false, None).await;
     let b = call(&e.app, &e.owner_token, "library.info", json!({})).await;
     assert!(rev(&b) > rev(&a));
+}
+
+fn unknown_ops(n: usize) -> Vec<Value> {
+    (0..n)
+        .map(|i| json!({"item_id": format!("unknown-{i:08}-aaaaaaaa-bbbbbbbb-cccccccc"), "kind": "move", "to": format!("folder/sub{i}/file{i}.jpg")}))
+        .collect()
+}
+
+#[tokio::test]
+async fn max_ops_fit_in_a_request_and_one_more_is_refused() {
+    let e = env();
+    let v = apply(&e, unknown_ops(MAX_OPS), true, None).await;
+    let rs = v["result"]["results"].as_array().unwrap();
+    assert_eq!(rs.len(), MAX_OPS);
+    assert!(
+        rs.iter()
+            .all(|r| r["status"] == "skipped" && r["reason"] == "missing")
+    );
+    let v = apply(&e, unknown_ops(MAX_OPS + 1), true, None).await;
+    assert_eq!(v["error"]["code"], codes::INVALID_PARAMS);
+    assert_eq!(v["error"]["message"], "at most 10000 operations per batch");
+}
+
+#[tokio::test]
+async fn a_folder_that_still_holds_a_file_stays() {
+    let e = env();
+    fs::write(e.root.join("sub/other.jpg"), "x").unwrap();
+    apply(&e, vec![mv(&e, "sub/b.jpg", "b2.jpg")], false, None).await;
+    assert!(e.root.join("sub/other.jpg").exists());
 }

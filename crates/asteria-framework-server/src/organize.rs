@@ -975,4 +975,20 @@ mod tests {
         assert_eq!(err.code, codes::INVALID_PARAMS);
         assert_eq!(err.message, "at most 10000 operations per batch");
     }
+
+    #[test]
+    fn cleanup_never_removes_the_root_meta_or_trash_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".asteria/trash/op1")).unwrap();
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        remove_emptied_folders(
+            root,
+            &[".asteria/trash/op1/x.jpg".into(), "a/b/y.jpg".into()],
+        );
+        assert!(!root.join(".asteria/trash/op1").exists());
+        assert!(root.join(".asteria/trash").is_dir());
+        assert!(!root.join("a").exists());
+        assert!(root.is_dir());
+    }
 }
