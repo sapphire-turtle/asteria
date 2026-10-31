@@ -71,3 +71,5 @@ asteria-music-playback-title = 再生
 asteria-music-playback-low-quality = 低音質で再生する
 asteria-music-playback-low-quality-hint = 次の曲から効きます。回線が細いときに、サーバーのオフライン用の小さな音声で再生します。
 asteria-music-playback-save-failed = 再生の設定を保存できませんでした: { $reason }
+
+asteria-music-side-nothing = 再生中の曲はありません。

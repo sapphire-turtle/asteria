@@ -65,16 +65,19 @@ fn restrict_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `<cache_dir>/<app>/<library id>/`; falls back to `$HOME/.cache` when the platform has no cache dir.
+/// `<the app's cache>/<library id>/`: `<cache_dir>/<app>` on Linux and macOS, `<app>\cache` on
+/// Windows, where the cache root is the data root (corundum's `AppDirs::cache`). Falls back to
+/// `$HOME/.cache/<app>` when the platform has no cache dir.
 pub fn cache_dir_for(app: &str, library: &LibraryId) -> Result<PathBuf> {
-    let base = corundum_framework::platform::dirs::cache_dir()
+    let base = corundum_framework::platform::dirs::AppDirs::new(app)
+        .map(|d| d.cache().to_path_buf())
         .or_else(|| {
             std::env::var_os("HOME")
                 .filter(|h| !h.is_empty())
-                .map(|h| PathBuf::from(h).join(".cache"))
+                .map(|h| PathBuf::from(h).join(".cache").join(app))
         })
         .ok_or_else(|| ServerError::Cache("cannot determine a cache directory".into()))?;
-    Ok(base.join(app).join(library.0.hyphenated().to_string()))
+    Ok(base.join(library.0.hyphenated().to_string()))
 }
 
 /// `<data_dir>/<app>/<library id>/`, where this instance keeps its own state (journal, upload

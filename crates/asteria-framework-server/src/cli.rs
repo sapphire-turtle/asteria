@@ -153,11 +153,18 @@ pub fn main(spec: AppSpec) -> ! {
     let matches = command(&spec).get_matches();
     // Before any data or cache directory is opened: on Windows they move from Roaming to Local.
     let migrated = asteria_framework::dirs::migrate_dirs(spec.app, |a| {
-        corundum_framework::platform::dirs::AppDirs::migrate_from_roaming(a).map(drop)
+        use corundum_framework::platform::dirs::{AppDirs, Migrated};
+        AppDirs::migrate_from_roaming(a).map(|m| match m {
+            Migrated::Moved { left } | Migrated::Merged { left } => left,
+            Migrated::Nothing => Vec::new(),
+        })
     });
-    if let Err(e) = migrated {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+    match migrated {
+        Ok(left) => asteria_framework::dirs::report_left(spec.app, &left),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
     }
     if let Err(e) = dispatch(&spec, &matches) {
         eprintln!("error: {e}");

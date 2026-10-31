@@ -77,3 +77,5 @@ asteria-music-playback-title = Playback
 asteria-music-playback-low-quality = Play in low quality
 asteria-music-playback-low-quality-hint = Takes effect from the next track. For a slow connection, tracks are streamed from the server's offline rendition, which is smaller.
 asteria-music-playback-save-failed = The playback settings could not be saved: { $reason }
+
+asteria-music-side-nothing = Nothing is playing.

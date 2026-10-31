@@ -59,7 +59,14 @@ fn tokens_are_distinct_and_long() {
 fn cache_dir_is_per_app_and_library() {
     let id = asteria_framework::LibraryId(uuid::Uuid::nil());
     let dir = asteria_framework_server::cache_dir_for("asteria-photos", &id).unwrap();
-    assert!(dir.ends_with("asteria-photos/00000000-0000-0000-0000-000000000000"));
+    assert!(dir.ends_with("00000000-0000-0000-0000-000000000000"));
+    // Inside the app's own cache: `<app>\cache` on Windows, where the cache root is the data
+    // root, so the cache never shares a directory with the server's state.
+    let app = corundum_framework::platform::dirs::AppDirs::new("asteria-photos").unwrap();
+    assert_eq!(
+        dir,
+        app.cache().join("00000000-0000-0000-0000-000000000000")
+    );
 }
 
 #[test]

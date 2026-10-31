@@ -824,6 +824,13 @@ impl ShellApp<Screen> for State {
         }
     }
 
+    /// The side pane shows what is playing, whichever screen is open.
+    fn side_ui(&mut self, ui: &mut egui::Ui, _screen: Screen, _side: &mut Side) {
+        let state = self.player.state();
+        let images = self.connection.as_mut().map(|c| c.session.images());
+        now_playing::side(ui, &state, images);
+    }
+
     /// Wide, the status bar holds the switcher ([`status_ui`](Self::status_ui)); narrow
     /// there is no status bar, so it sits at the bottom bar's end.
     fn foot_ui(&mut self, ui: &mut egui::Ui) -> Option<Screen> {
