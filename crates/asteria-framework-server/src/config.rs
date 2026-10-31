@@ -81,9 +81,9 @@ pub fn cache_dir_for(app: &str, library: &LibraryId) -> Result<PathBuf> {
 /// sessions) apart from the shared workspace; falls back to `$HOME/.local/share` when the
 /// platform has no data dir.
 ///
-/// On Windows this is the roaming `%APPDATA%`, where per-host state and large upload
-/// sessions do not really belong; corundum's `platform::dirs` has no local (non-roaming)
-/// data dir to use instead, so this stays until it gains one.
+/// On Windows this is the local `%LOCALAPPDATA%` (corundum 0.4.0 and later), so per-host state
+/// and upload sessions do not roam; `cli::main` moves an earlier version's Roaming directory
+/// there before anything opens it.
 pub fn data_dir_for(app: &str, library: &LibraryId) -> Result<PathBuf> {
     let base = corundum_framework::platform::dirs::data_dir()
         .or_else(|| {

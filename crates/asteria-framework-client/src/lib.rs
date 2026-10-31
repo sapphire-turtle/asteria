@@ -13,3 +13,12 @@ pub mod settings;
 pub mod upload;
 pub mod widgets;
 mod worker;
+
+/// Moves `app`'s settings, data and cache from Windows' Roaming directories to Local (a no-op
+/// elsewhere). A client calls this first, before anything opens its settings; on `Err` it
+/// reports the message and exits without reading them.
+pub fn migrate_dirs(app: &str) -> Result<(), String> {
+    asteria_framework::dirs::migrate_dirs(app, |a| {
+        corundum_framework::platform::dirs::AppDirs::migrate_from_roaming(a).map(drop)
+    })
+}
