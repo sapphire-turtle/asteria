@@ -163,8 +163,7 @@ impl MusicApp {
             Screen::Settings,
             icons::settings(),
             "asteria-music-screen-settings",
-        )])
-        .with_status_bar();
+        )]);
         let mut state = State {
             ctx: ctx.clone(),
             paths,
