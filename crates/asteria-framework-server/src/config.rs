@@ -65,25 +65,28 @@ fn restrict_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `<cache_dir>/<app>/<library id>/`; falls back to `$HOME/.cache` when the platform has no cache dir.
+/// `<the app's cache>/<library id>/`: `<cache_dir>/<app>` on Linux and macOS, `<app>\cache` on
+/// Windows, where the cache root is the data root (corundum's `AppDirs::cache`). Falls back to
+/// `$HOME/.cache/<app>` when the platform has no cache dir.
 pub fn cache_dir_for(app: &str, library: &LibraryId) -> Result<PathBuf> {
-    let base = corundum_framework::platform::dirs::cache_dir()
+    let base = corundum_framework::platform::dirs::AppDirs::new(app)
+        .map(|d| d.cache().to_path_buf())
         .or_else(|| {
             std::env::var_os("HOME")
                 .filter(|h| !h.is_empty())
-                .map(|h| PathBuf::from(h).join(".cache"))
+                .map(|h| PathBuf::from(h).join(".cache").join(app))
         })
         .ok_or_else(|| ServerError::Cache("cannot determine a cache directory".into()))?;
-    Ok(base.join(app).join(library.0.hyphenated().to_string()))
+    Ok(base.join(library.0.hyphenated().to_string()))
 }
 
 /// `<data_dir>/<app>/<library id>/`, where this instance keeps its own state (journal, upload
 /// sessions) apart from the shared workspace; falls back to `$HOME/.local/share` when the
 /// platform has no data dir.
 ///
-/// On Windows this is the roaming `%APPDATA%`, where per-host state and large upload
-/// sessions do not really belong; corundum's `platform::dirs` has no local (non-roaming)
-/// data dir to use instead, so this stays until it gains one.
+/// On Windows this is the local `%LOCALAPPDATA%` (corundum 0.4.0 and later), so per-host state
+/// and upload sessions do not roam; `cli::main` moves an earlier version's Roaming directory
+/// there before anything opens it.
 pub fn data_dir_for(app: &str, library: &LibraryId) -> Result<PathBuf> {
     let base = corundum_framework::platform::dirs::data_dir()
         .or_else(|| {

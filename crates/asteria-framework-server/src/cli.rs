@@ -147,10 +147,25 @@ fn dispatch(spec: &AppSpec, matches: &ArgMatches) -> AnyResult<()> {
     }
 }
 
-/// Parses the command line (init / token add / serve) and runs it; exits the process with 1
-/// on error.
+/// Parses the command line (init / token add / serve), moves the app's directories from
+/// Roaming to Local on Windows, and runs it; exits the process with 1 on error.
 pub fn main(spec: AppSpec) -> ! {
     let matches = command(&spec).get_matches();
+    // Before any data or cache directory is opened: on Windows they move from Roaming to Local.
+    let migrated = asteria_framework::dirs::migrate_dirs(spec.app, |a| {
+        use corundum_framework::platform::dirs::{AppDirs, Migrated};
+        AppDirs::migrate_from_roaming(a).map(|m| match m {
+            Migrated::Moved { left } | Migrated::Merged { left } => left,
+            Migrated::Nothing => Vec::new(),
+        })
+    });
+    match migrated {
+        Ok(left) => asteria_framework::dirs::report_left(spec.app, &left),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
     if let Err(e) = dispatch(&spec, &matches) {
         eprintln!("error: {e}");
         std::process::exit(1);

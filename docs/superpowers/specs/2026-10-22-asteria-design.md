@@ -29,29 +29,46 @@ AIエージェントに整理を手伝ってもらえる、セルフホストの
 ### 想定する運用
 
 - サーバーは自宅で動かし、LAN か VPN（Tailscale など）経由でアクセスする。
-- `~/Vault/Pictures` を asteria-photos-server が、`~/Vault/Music` を asteria-music-server が公開する。
+- `~/Vault/Pictures` を `asteria-photos serve` が、`~/Vault/Music` を `asteria-music serve` が公開する。
 - 改修したらすぐ本番に投入する。問題が起きたらキャッシュを消して作り直す。
 
 ## 2. 全体構成
 
-1つの git リポジトリ（`sapphire-turtle/project-asteria`）に、Cargo ワークスペースとして次のクレートを置く。
+1つの git リポジトリ（`sapphire-turtle/asteria`）に、Cargo ワークスペースとして次のクレートを置く（2026-10-31 改訂。Plan 8b で今の配置から移す）。
 
 ```
-project-asteria/
-├─ crates/                              ライブラリクレート
+asteria/
+├─ crates/                                   framework（将来 asteria-framework リポジトリに切り出せる）
 │  ├─ asteria-framework-api/     MIT OR Apache-2.0  共通の wire 型
-│  ├─ asteria-photos-api/        MIT OR Apache-2.0  photos の wire 型（framework-api を re-export）
-│  ├─ asteria-music-api/         MIT OR Apache-2.0  music の wire 型（framework-api を re-export）
 │  ├─ asteria-framework/         GPL-3.0-or-later   コア（ライブラリ、XMP、ハッシュ、ジャーナル、ファイル操作と取り消し、操作ログのマージ）
-│  ├─ asteria-framework-server/  GPL-3.0-or-later   HTTP（JSON-RPC＋バイナリ）、認証、DB キャッシュ、MCP、メディア処理
+│  ├─ asteria-framework-server/  GPL-3.0-or-later   HTTP（JSON-RPC＋バイナリ）、認証、DB キャッシュ、MCP、メディア処理、サーバーの CLI の共通部分
 │  └─ asteria-framework-client/  GPL-3.0-or-later   接続、オフラインキャッシュ、操作キュー、egui の共通部品
-├─ photos-server/   asteria-photos-server  GPL-3.0-or-later  bin
-├─ photos/          asteria-photos         GPL-3.0-or-later  bin（デスクトップと iOS。Xcode ラッパーは ios/ に置く）
-├─ music-server/    asteria-music-server   GPL-3.0-or-later  bin
-└─ music/           asteria-music          GPL-3.0-or-later  bin（デスクトップと iOS。Xcode ラッパーは ios/ に置く）
+├─ photos/                                   photos（将来 asteria-photos リポジトリの root）
+│  ├─ crates/
+│  │  ├─ asteria-photos-api/     MIT OR Apache-2.0  photos の wire 型（framework-api を re-export）
+│  │  ├─ asteria-photos-server/  GPL-3.0-or-later   lib：サーバーと CLI（`serve`、`init`、トークンなど）
+│  │  └─ asteria-photos-gui/     GPL-3.0-or-later   lib：画面とクライアントの処理（サーバーに依存しない）
+│  ├─ headless/   asteria-photos-headless  bin `asteria-photos`
+│  ├─ desktop/    asteria-photos-desktop   bin `asteria-photos-desktop`（Velopack のパッケージでは `asteria-photos` に改名）
+│  └─ mobile/     asteria-photos-mobile    lib（staticlib / cdylib。iOS と Android のアプリの入口）
+└─ music/                                    music（将来 asteria-music リポジトリの root）
+   ├─ crates/  asteria-music-api/  asteria-music-server/  asteria-music-gui/（再生エンジンは gui に入る）
+   ├─ headless/   asteria-music-headless   bin `asteria-music`
+   ├─ desktop/    asteria-music-desktop    bin `asteria-music-desktop`（Velopack のパッケージでは `asteria-music` に改名）
+   └─ mobile/     asteria-music-mobile     lib
 ```
 
-ライブラリクレートは `crates/` にクレート名のまま置き、バイナリクレートはリポジトリ直下に `asteria-` を除いた短い名前のディレクトリで置く（パッケージ名は `asteria-` 付き）。
+- `photos/` と `music/` の中は、sapphire の各アプリのリポジトリと同じ形（`crates/`、`headless/`、`desktop/`、`mobile/`）にする。framework の API が落ち着いたら、`git subtree split` などで `crates/`（framework）、`photos/`、`music/` を別のリポジトリに切り出せるようにするため。それまではワークスペースを1つにし、アプリから framework へはパスで依存する（2026-10-31 決定）。
+- リリースはアプリごとにタグを分ける（`photos-v*`、`music-v*`）。headless と desktop は同じタグで一緒に出す。
+
+### 配布形態（2026-10-31 決定）
+
+- **desktop**：GUI のある環境向け。headless の上位互換で、サブコマンドなしで起動するとウィンドウを開き、サブコマンドを付けると headless と同じ CLI を実行する（サーバーの起動 `serve` を含む）。Velopack で配布する（Plan 8c）。
+- **headless**：GUI のない環境（LAN の Linux ホストなど）向けのサーバーと CLI。
+- **mobile**：純粋なクライアント。サーバーにも Velopack にも依存しない。
+- 利用者から見えるコマンド名は、headless も desktop も `asteria-photos` / `asteria-music` に揃える。ドキュメントや MCP クライアントの設定を1つにするため。cargo のバイナリ名は分ける（同じワークスペースで同じ名前にすると出力ファイルが衝突し、`CARGO_BIN_EXE_` を使う結合テストが別のバイナリを起動して失敗する。cargo#6313）。desktop は Velopack のパッケージを作るときに改名し、PATH にも `asteria-<app>` を置く（#41、corundum-framework#75、sapphire-framework#383）。corundum 0.5.0 では、macOS と Linux はパッケージの中の実行ファイルを `asteria-<app>` にでき、Windows は GUI の実行ファイルが cargo の名前のまま、その横に `asteria-<app>.exe` のシムを置く。
+- アプリはあくまでクライアントとサーバーの形で、ウィンドウはサーバーにつなぐだけ。desktop の中でサーバーを動かすことはしない。ローカルにサーバーを置くときは `asteria-<app> serve` を常駐させる。サービスとしての登録（ログイン時の起動）は corundum 0.5.0 の `service` を使い、Plan 8c で設定画面と初回起動の画面から行えるようにする。それまでは手で `serve` を起動する。
+- Web の画面を持たず専用のクライアントが要るメディアサーバーは導入のハードルが高い。desktop にサーバーを同梱し、単体でも使えるようにして間口を広げる。
 
 ### 依存の向き
 
@@ -449,7 +466,7 @@ framework-server の RPC メソッドとキャッシュは、アプリに共通�
 
 ### 4.9 music-server（2026-10-27 決定）
 
-music-server は photos-server と同じ形のバイナリで、`AppExtension` を実装する。対象は `classify` が Audio と判定するファイル。タグは読むだけで、書き換え（§3.6）は Plan 7 の後に入れる。
+music-server は photos-server と同じ形（Plan 8b からはライブラリの `asteria-music-server` と、それを呼ぶ headless と desktop）で、`AppExtension` を実装する。対象は `classify` が Audio と判定するファイル。タグは読むだけで、書き換え（§3.6）は Plan 7 の後に入れる。
 
 **タグの読み取り**
 - `extract` は lofty でタグを読み、`TrackTags` を返す。中身は曲名、アーティスト（複数値）、アルバム、アルバムアーティスト、ソート用のタグ（アーティスト、アルバムアーティスト、アルバム）、トラック番号、ディスク番号、年、ジャンル、長さ（ms）、埋め込み画像の有無。
@@ -486,7 +503,7 @@ music-server は photos-server と同じ形のバイナリで、`AppExtension` �
 - `album.get` は、ジャケットを持つ最初の曲の ID（`cover_item`）を返す。クライアントはその曲の `thumb` を使う。
 
 **offline-audio**
-- プリセット `offline-audio` は Audio のアイテムだけが対象で、要求されたときに作る。先に作っておくのは、オフラインの対象を選べるようになる Plan 8 から。
+- プリセット `offline-audio` は Audio のアイテムだけが対象で、要求されたときに作る。先に作っておくのは、オフラインの対象を選べるようになる Plan 9 から。
 - ffmpeg で、最初の音声ストリームだけを Ogg Opus 96 kbps（VBR）に変換する。メタデータと埋め込み画像は落とす（`-map 0:a:0 -map_metadata -1`）。
 - キーは（ファイル全体のハッシュ、`offline-audio`）。`Content-Type: audio/ogg` で返し、Range に対応する。
 - タイムアウトはプリセットごとに持つ。サムネイルは今の値、`offline-audio` は10分。
@@ -494,7 +511,7 @@ music-server は photos-server と同じ形のバイナリで、`AppExtension` �
 - 再生用の原本は、今の `/media/{id}/original`（Range 対応）をそのまま使う。
 
 **プレイリスト（読むだけ）**
-- 編集は操作キューと一緒に Plan 8 で入れる。
+- 編集は操作キューと一緒に Plan 9 で入れる。
 - 例外として、ファイル操作（§4.6）で曲を移動・リネームしたときは、`after_moves` で、その曲を指す行を新しい場所に書き換える（2026-10-30 決定）。元の書き方（相対パスか絶対パスか、区切り文字）を保ち、一時ファイル → rename で書く。ジャーナルには `rewrite_playlist` として、書き換える前と後の中身を記録する。ゴミ箱に入れた曲の行は残す。
 - `playlist.list`：`EXTRAS` の `.m3u8` と `.m3u` を返す。ID はライブラリ ID を名前空間とし、パスから作る UUID v5。名前はファイル名から拡張子を除いたもの。
 - `playlist.get`：ファイルを読み、エントリごとに曲を探す。
@@ -563,7 +580,7 @@ music-server は photos-server と同じ形のバイナリで、`AppExtension` �
 - エンジンはセッションではなくアプリに1つ持つ。サーバーを切り替えたら、再生を止め、キューを空にし、取得中の一時ファイルを消す。キューの曲 ID は前のサーバーのものだから。URL とトークンは、いまのセッションのプロファイルから受け取る。トークンはヘッダーにだけ載せ、ログには出さない。
 
 **音源**
-- 再生するのは、オンラインなら原本（`/media/{id}/original`）、オフラインならキャッシュした低音質版（Plan 8）。
+- 再生するのは、オンラインなら原本（`/media/{id}/original`）、オフラインならキャッシュした低音質版（Plan 9）。
 - 設定の「低音質で再生する」をオンにすると、オンラインでも `offline-audio`（Ogg Opus 96 kbps）を取って再生する。アプリ全体で1つの設定とする。回線の細い場所ではローカルのキャッシュを使う想定なので、手で切り替えるスイッチで足りる。
 - デコードは symphonia（FLAC、MP3、AAC/ALAC、Vorbis）。Opus は symphonia の Ogg のデマルチプレクサーと opus-pure（BSD-3-Clause、Plan 3 の試作で合格）で行う。
 - 出力デバイスのサンプルレートが曲と違えば、rubato で変換する。
@@ -618,10 +635,10 @@ music-server は photos-server と同じ形のバイナリで、`AppExtension` �
 
 ### 5.5 プラットフォーム差
 
-- 1つのアプリにつき1クレートとする。
+- 画面とクライアントの処理は `asteria-<app>-gui` に置き、desktop と mobile が共有する。gui はサーバーに依存しない。ファイルダイアログやドラッグ＆ドロップなどデスクトップだけの処理は desktop に置く。
 - プラットフォーム固有の処理は `#[cfg(target_os = "ios")]` のモジュールに隔離する。
 - 画面幅に応じて、レイアウトをタッチ向けに切り替える。
-- iOS 向けには staticlib をビルドし、`<アプリ>/ios/` の Xcode プロジェクトで包む。
+- iOS 向けには `asteria-<app>-mobile` を staticlib でビルドし、`<app>/mobile/ios/` の Xcode プロジェクトで包む。
 
 ### 5.6 共通の UI 部品（asteria-framework-client）
 
@@ -638,14 +655,15 @@ music-server は photos-server と同じ形のバイナリで、`AppExtension` �
 - **アーティスト**：名前とアルバム数の一覧。開くと、本人のアルバムと「参加している」アルバムを、それぞれジャケットで出す。
 - **プレイリスト**：一覧と、開いたときのエントリ。見つからないエントリは薄く出して元のパスを添え、移動済みのものには印を付ける。キューに入れるときは、見つからないエントリを飛ばす。
 - **再生キュー**：いまの曲を強調する。削除と、上下への移動ができる。ドラッグ＆ドロップでの並べ替えは後で入れる。
+- **サイドペイン**：どの画面でも、再生中の曲（大きなジャケット、曲名、アーティスト、アルバム）を出す。何も再生していなければ、そう書く。corundum 0.4.0 から、サイドペインはどのアプリにもあるため（2026-10-31）。
 - **再生バー**：ステータスバーの上に置く。ジャケット、曲名、アーティスト、前／再生／次、時刻つきのシークバー、音量、読み込み中か準備中の表示。狭い画面では、ジャケット、曲名、再生／一時停止の1行にする。
 - **曲をクリックしたとき**：その一覧（アルバム、アーティストのアルバム、プレイリスト）でキューを置き換え、クリックした曲から再生する。右クリックのメニューに「次に再生」と「キューの最後に追加」。
 - **設定**：サーバー（共通の部品）と、再生の「低音質で再生する」。この設定と音量は、アプリの設定ディレクトリの `playback.toml` に残す（corundum の `corundum.toml` は corundum 自身の項目だけを持つため）。低音質の切り替えは、次に開く曲から効く。
 - 翻訳は en と ja。
 - 入れないもの
   - フォルダ表示（#20）。整理用と割り切ってファイルブラウザー寄りにし、曲もファイル名で出す。汎用のウィジェットは corundum 側に作る（sapphire-turtle/corundum-framework#49）。フォルダの曲をキューに入れるための `track.get` も、そのときに足す。
-  - 評価（#19）。操作キュー（Plan 8）と一緒に入れる。
-  - 検索、タグの編集（Plan 7）、プレイリストの編集（Plan 8）。
+  - 評価（#19）。操作キュー（Plan 9）と一緒に入れる。
+  - 検索、タグの編集（Plan 7）、プレイリストの編集（別の計画）。
 
 ## 6. エラー処理
 
@@ -709,13 +727,17 @@ music-server は photos-server と同じ形のバイナリで、`AppExtension` �
    - MCP（読み取り、サムネイル、直接実行、`dry_run` 付きのファイル操作）と、長いまとまりの `organize.status`（#37）。（Plan 7b）
    - プレイリストの作成と編集（RPC と MCP ツール）は別の計画にする。
    - music の埋め込みタグの書き換え（§3.6、#30）と、サイドカーの曖昧・衝突を画面で解決する仕組み（#31）は、Plan 7 の後に回す。クライアントでのユーザー自身のファイル操作の画面と Ctrl-Z も後で入れる。
-9. オフラインキャッシュと操作キュー。（Plan 8）
-10. payload ハッシュの第2段階。（Plan 9）
-11. iOS のクライアント（photos のアップロード、music のバックグラウンド再生）。corundum-framework が iOS のウィンドウに対応してから始める。
+9. 配布形態とクレート構成（§2）。3つの計画に分ける（2026-10-31 決定）。
+   - corundum-framework 0.2.0 → 0.5.0。破壊的変更への対応（Windows の Roaming から Local への移行を含む）だけで、新しい機能は使わない。（Plan 8a）
+   - クレートの分割と移動：`asteria-<app>-server` をライブラリにし、`-headless`、`-gui`、`-desktop`、`-mobile`（骨組み）を作る。desktop は CLI を兼ね、`asteria-<app>-desktop serve` でサーバーを立てられる。CI の iOS チェックを mobile に広げる。（Plan 8b）
+   - desktop の Velopack 配布（改名、PATH、更新）、ローカルサーバーの接続先への自動登録とトークンの発行、外部ツール（`vipsthumbnail`、`ffmpeg`）の扱い、設定画面と初回起動の画面からのサービス登録（corundum 0.5.0 の `service` / `gui-service`、`first_run::ServicePage`、`settings::ServiceRow`）。今の `users.toml` のトークンを corundum の `keys`（`KeyStore`、`KeysPage`）に置き換えるかもここで決める。（Plan 8c）
+10. オフラインキャッシュと操作キュー。（Plan 9）
+11. payload ハッシュの第2段階。（Plan 10）
+12. iOS のクライアント（photos のアップロード、music のバックグラウンド再生）。corundum-framework が iOS のウィンドウに対応してから始める。
 
 デスクトップ向けに進める間も、iOS に戻れるように次を守る。
 
 - OS 固有の処理は `#[cfg]` のモジュールに分ける。ファイルダイアログやドラッグ＆ドロップは、デスクトップ側のモジュールにだけ置く。
 - ディレクトリは `corundum_framework::dirs` を通してだけ取る。
 - 画面は corundum の Shell に乗せ、狭い幅でも使えるようにする。
-- `asteria-framework-client` は eframe に依存しない（egui だけ）。CI の macOS ジョブで、このクレートを `aarch64-apple-ios` 向けに `cargo check` する。
+- `asteria-framework-client` は eframe に依存しない（egui だけ）。CI の macOS ジョブで、このクレートと `asteria-<app>-mobile` を `aarch64-apple-ios` 向けに `cargo check` する（mobile は Plan 8b から）。

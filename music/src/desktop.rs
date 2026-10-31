@@ -41,6 +41,8 @@ pub fn init_logging() {
 /// Open the window and run the app until it closes.
 pub fn run() -> Result<(), Box<dyn Error>> {
     init_logging();
+    // Before anything opens the settings: on Windows they move from Roaming to Local.
+    asteria_framework_client::migrate_dirs(APP_NAME)?;
     let dirs = AppDirs::new(APP_NAME).ok_or("this system has no config or cache directory")?;
     let paths = paths(&dirs);
     let options = WindowOptions::new(APP_NAME).remember(Store::new(&dirs));

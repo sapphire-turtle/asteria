@@ -136,9 +136,7 @@ impl PhotosApp {
             Screen::Settings,
             icons::settings(),
             "asteria-photos-screen-settings",
-        )])
-        .with_status_bar()
-        .with_side_pane();
+        )]);
         let mut state = State {
             ctx: ctx.clone(),
             paths,

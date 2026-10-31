@@ -163,8 +163,7 @@ impl MusicApp {
             Screen::Settings,
             icons::settings(),
             "asteria-music-screen-settings",
-        )])
-        .with_status_bar();
+        )]);
         let mut state = State {
             ctx: ctx.clone(),
             paths,
@@ -823,6 +822,13 @@ impl ShellApp<Screen> for State {
             }
             Screen::Settings => self.settings_ui(ui),
         }
+    }
+
+    /// The side pane shows what is playing, whichever screen is open.
+    fn side_ui(&mut self, ui: &mut egui::Ui, _screen: Screen, _side: &mut Side) {
+        let state = self.player.state();
+        let images = self.connection.as_mut().map(|c| c.session.images());
+        now_playing::side(ui, &state, images);
     }
 
     /// Wide, the status bar holds the switcher ([`status_ui`](Self::status_ui)); narrow

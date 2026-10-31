@@ -4,6 +4,8 @@
 //! Wide, it has everything; narrow (a phone) it is one row of cover, title and play/pause.
 //! It draws nothing for an empty queue. It only reports what the user asked for
 //! ([`BarAction`]); the app turns that into a [`Command`](crate::player::Command).
+//!
+//! The side pane beside every screen shows the same track, larger ([`side`]).
 
 use asteria_framework_client::images::{ImageLoader, Preset};
 use corundum_framework::egui::{self, Align, Layout, Sense, vec2};
@@ -16,6 +18,8 @@ use crate::tracks::format_duration;
 const COVER: f32 = 48.0;
 const COVER_COMPACT: f32 = 36.0;
 const ICON: f32 = 20.0;
+/// The largest the side pane draws the cover.
+const COVER_SIDE: f32 = 240.0;
 
 /// What the user asked of the bar.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77,6 +81,31 @@ pub(crate) fn show(
         };
     });
     action
+}
+
+/// What the side pane says: the current track's title, artists and album (either may be
+/// empty), or `None` when nothing is current.
+pub(crate) fn side_text(state: &PlayerState) -> Option<(&str, &str, &str)> {
+    current(state).map(|e| (e.title.as_str(), e.artist.as_str(), e.album.as_str()))
+}
+
+/// Fills the side pane: the current track's cover, title, artists and album, or a word that
+/// nothing is playing.
+pub(crate) fn side(ui: &mut egui::Ui, state: &PlayerState, images: Option<&mut ImageLoader>) {
+    let Some((title, artist, album)) = side_text(state) else {
+        ui.weak(tr!(ui, "asteria-music-side-nothing"));
+        return;
+    };
+    let size = ui.available_width().min(COVER_SIDE);
+    cover(ui, state, images, size);
+    ui.add_space(8.0);
+    ui.heading(title);
+    if !artist.is_empty() {
+        ui.label(artist);
+    }
+    if !album.is_empty() {
+        ui.weak(album);
+    }
 }
 
 fn current(state: &PlayerState) -> Option<&crate::player::QueueEntry> {
@@ -224,4 +253,37 @@ fn seek_ui(ui: &mut egui::Ui, state: &PlayerState, seeking: &mut Option<f64>) ->
         }
     }
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::player::fakes::entry;
+
+    fn state(queue: Vec<crate::player::QueueEntry>, current: Option<usize>) -> PlayerState {
+        PlayerState {
+            queue,
+            current,
+            status: Status::Paused,
+            position_ms: 0,
+            duration_ms: None,
+            volume: 1.0,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn the_side_pane_shows_the_current_track() {
+        let mut b = entry("b");
+        b.artist = "Artist".into();
+        b.album = "Album".into();
+        let s = state(vec![entry("a"), b], Some(1));
+        assert_eq!(side_text(&s), Some(("b", "Artist", "Album")));
+    }
+
+    #[test]
+    fn with_nothing_current_the_side_pane_says_so() {
+        assert_eq!(side_text(&state(vec![], None)), None);
+        assert_eq!(side_text(&state(vec![entry("a")], None)), None);
+    }
 }
