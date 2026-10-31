@@ -66,8 +66,8 @@ asteria/
 - **desktop**：GUI のある環境向け。headless の上位互換で、サブコマンドなしで起動するとウィンドウを開き、サブコマンドを付けると headless と同じ CLI を実行する（サーバーの起動 `serve` を含む）。Velopack で配布する（Plan 8c）。
 - **headless**：GUI のない環境（LAN の Linux ホストなど）向けのサーバーと CLI。
 - **mobile**：純粋なクライアント。サーバーにも Velopack にも依存しない。
-- 利用者から見えるコマンド名は、headless も desktop も `asteria-photos` / `asteria-music` に揃える。ドキュメントや MCP クライアントの設定を1つにするため。cargo のバイナリ名は分ける（同じワークスペースで同じ名前にすると出力ファイルが衝突し、`CARGO_BIN_EXE_` を使う結合テストが別のバイナリを起動して失敗する。cargo#6313）。desktop は Velopack のパッケージを作るときに改名し、PATH にも `asteria-<app>` を置く（#41、corundum-framework#75、sapphire-framework#383）。
-- アプリはあくまでクライアントとサーバーの形で、ウィンドウはサーバーにつなぐだけ。desktop の中でサーバーを動かすことはしない。ローカルにサーバーを置くときは `asteria-<app> serve` を常駐させる。サービスとしての登録（ログイン時の起動）は corundum が実装中なので、それまでは手で `serve` を起動する（Plan 8c で、設定画面からの登録を足す）。
+- 利用者から見えるコマンド名は、headless も desktop も `asteria-photos` / `asteria-music` に揃える。ドキュメントや MCP クライアントの設定を1つにするため。cargo のバイナリ名は分ける（同じワークスペースで同じ名前にすると出力ファイルが衝突し、`CARGO_BIN_EXE_` を使う結合テストが別のバイナリを起動して失敗する。cargo#6313）。desktop は Velopack のパッケージを作るときに改名し、PATH にも `asteria-<app>` を置く（#41、corundum-framework#75、sapphire-framework#383）。corundum 0.5.0 では、macOS と Linux はパッケージの中の実行ファイルを `asteria-<app>` にでき、Windows は GUI の実行ファイルが cargo の名前のまま、その横に `asteria-<app>.exe` のシムを置く。
+- アプリはあくまでクライアントとサーバーの形で、ウィンドウはサーバーにつなぐだけ。desktop の中でサーバーを動かすことはしない。ローカルにサーバーを置くときは `asteria-<app> serve` を常駐させる。サービスとしての登録（ログイン時の起動）は corundum 0.5.0 の `service` を使い、Plan 8c で設定画面と初回起動の画面から行えるようにする。それまでは手で `serve` を起動する。
 - Web の画面を持たず専用のクライアントが要るメディアサーバーは導入のハードルが高い。desktop にサーバーを同梱し、単体でも使えるようにして間口を広げる。
 
 ### 依存の向き
@@ -727,9 +727,9 @@ music-server は photos-server と同じ形（Plan 8b からはライブラリ�
    - プレイリストの作成と編集（RPC と MCP ツール）は別の計画にする。
    - music の埋め込みタグの書き換え（§3.6、#30）と、サイドカーの曖昧・衝突を画面で解決する仕組み（#31）は、Plan 7 の後に回す。クライアントでのユーザー自身のファイル操作の画面と Ctrl-Z も後で入れる。
 9. 配布形態とクレート構成（§2）。3つの計画に分ける（2026-10-31 決定）。
-   - corundum-framework 0.2.0 → 0.4.0。破壊的変更への対応だけで、新しい機能は使わない。（Plan 8a）
+   - corundum-framework 0.2.0 → 0.5.0。破壊的変更への対応（Windows の Roaming から Local への移行を含む）だけで、新しい機能は使わない。（Plan 8a）
    - クレートの分割と移動：`asteria-<app>-server` をライブラリにし、`-headless`、`-gui`、`-desktop`、`-mobile`（骨組み）を作る。desktop は CLI を兼ね、`asteria-<app>-desktop serve` でサーバーを立てられる。CI の iOS チェックを mobile に広げる。（Plan 8b）
-   - desktop の Velopack 配布（改名、PATH、更新）、ローカルサーバーの接続先への自動登録とトークンの発行、外部ツール（`vipsthumbnail`、`ffmpeg`）の扱い、corundum のサービス登録が入ったら設定画面からの常駐。（Plan 8c）
+   - desktop の Velopack 配布（改名、PATH、更新）、ローカルサーバーの接続先への自動登録とトークンの発行、外部ツール（`vipsthumbnail`、`ffmpeg`）の扱い、設定画面と初回起動の画面からのサービス登録（corundum 0.5.0 の `service` / `gui-service`、`first_run::ServicePage`、`settings::ServiceRow`）。今の `users.toml` のトークンを corundum の `keys`（`KeyStore`、`KeysPage`）に置き換えるかもここで決める。（Plan 8c）
 10. オフラインキャッシュと操作キュー。（Plan 9）
 11. payload ハッシュの第2段階。（Plan 10）
 12. iOS のクライアント（photos のアップロード、music のバックグラウンド再生）。corundum-framework が iOS のウィンドウに対応してから始める。
