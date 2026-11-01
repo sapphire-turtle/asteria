@@ -70,7 +70,7 @@ cargo run -p asteria-photos-desktop --release -- serve --config ~/.config/asteri
 ```
 
 - The client browses a library served by `asteria-photos serve`; it does not need libvips or ffmpeg (the server makes the thumbnails).
-- On first start there is no server yet and Settings opens on the Servers page with the add form. Enter a name, the address (such as `http://192.168.1.10:7810`) and the access token that `init` (or `api-key add`) printed, press "Test connection" to check them, then Save. Open Library on the rail to see the photos.
+- On first start there is no server yet, and the window asks where your library is: on this computer (see [A server on this computer](#a-server-on-this-computer)), on another server, or later. For another server (or later), Settings opens on the Servers page with the add form. Enter a name, the address (such as `http://192.168.1.10:7810`) and the access token that `init` (or `api-key add`) printed, press "Test connection" to check them, then Save. Open Library on the rail to see the photos.
 - You can register several servers. The status bar (bottom right; on a narrow window only its icon) shows which one is in use and whether it is connected; pick another one from its menu to switch, or choose "Manage servers..." (Settings › Servers) to add, edit or delete. The server in use is remembered for the next start, and switching always starts at the library's root.
 - If the server cannot be reached, rejects the token or speaks an incompatible version, the library shows the reason with a "Try again" button; there is no offline cache yet.
 - Servers and tokens are stored in `servers.toml` in the app's config directory (`~/.config/asteria-photos/` on Linux, `~/Library/Application Support/asteria-photos/` on macOS, `%LOCALAPPDATA%\asteria-photos\` on Windows; an earlier version's settings under `%APPDATA%` move there on the first start). On Unix the file is readable only by you (mode 0600); the tokens are not stored in the OS keychain. Downloaded thumbnails are cached under the app's cache directory (`~/.cache/asteria-photos/` on Linux) and can be deleted safely.
@@ -88,10 +88,21 @@ cargo run -p asteria-music-desktop --release -- serve --config ~/.config/asteria
 ```
 
 - The client plays a library served by `asteria-music serve`; it does not need libvips or ffmpeg (the server makes the covers and the low-quality copies).
-- On first start there is no server yet and Settings opens on the Servers page with the add form. Enter a name, the address (such as `http://192.168.1.10:7811`) and the access token that `init` (or `api-key add`) printed, press "Test connection" to check them, then Save. Servers are registered, switched and stored as in the photos client (in `servers.toml`, under `asteria-music` in place of `asteria-photos`).
+- On first start the window asks where your library is, as in the photos client. For another server (or later), Settings opens on the Servers page with the add form. Enter a name, the address (such as `http://192.168.1.10:7811`) and the access token that `init` (or `api-key add`) printed, press "Test connection" to check them, then Save. Servers are registered, switched and stored as in the photos client (in `servers.toml`, under `asteria-music` in place of `asteria-photos`).
 - Pick an album, an artist or a playlist to see its tracks and play them. Playback starts before the file has been fully downloaded, and seeking to a position that has not arrived yet waits for that part.
 - "Play in low quality" is one setting for the whole app, saved in `playback.toml` in the app's config directory along with the volume. When it is on, the server converts each track to low-bitrate Ogg Opus (the offline copy, which needs `ffmpeg` with libopus on the server) and the client plays that; it is meant for slow connections. The first play of a track can show "Preparing" while the server converts it. A change takes effect from the next track you open.
 - Not there yet: showing the library by folder (#20), ratings (#19), shuffle and repeat (#17), gapless playback (#18), and the media keys (`sapphire-turtle/corundum-framework#50`).
+
+## A server on this computer
+
+The desktop apps can set up a server for a folder on this computer, so one machine needs nothing else. The window still only connects to the server; the server is `asteria-photos serve` (or `asteria-music serve`) running in the background.
+
+- On first start, when no server is registered, choose "This computer" and pick the library's folder (a folder that is already a library is used as it is). The app writes the server's config to its default place, creates an API key named `desktop`, and registers the server as "This computer" (`http://127.0.0.1:7810`, or `:7811` for music) and uses it. It then offers to keep the server running in the background: a systemd user unit on Linux, a LaunchAgent on macOS, a logon task in the Task Scheduler on Windows. If you decline, start it yourself with `asteria-photos serve`. Last, it shows which external tools it found.
+- Settings › Local server shows the library and the address the server listens on, registers, starts, stops or removes the background service, manages the library's API keys (add one for each phone or other computer, retire one you no longer use), and shows the external tools. Without a local server yet, its "Set up a local server" button runs the first-start steps again.
+- The server makes thumbnails and smaller copies with external tools; without them it still runs, just without those. Install them where the server runs:
+  - `vipsthumbnail` (from libvips), for image thumbnails and covers: `sudo apt install libvips-tools` (Debian/Ubuntu; other distributions name the package similarly), `brew install vips` on macOS, or on Windows the libvips build from github.com/libvips/build-win64-mxe/releases with its `bin` folder added to `PATH`.
+  - `ffmpeg`, for video thumbnails and music's smaller offline copies (built with libopus): `sudo apt install ffmpeg`, `brew install ffmpeg`, or on Windows a build from ffmpeg.org/download.html with its `bin` folder added to `PATH`.
+  - Or point `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` at the programs. "Check again" on the page looks for them again.
 
 ## Uploading from the photos client
 

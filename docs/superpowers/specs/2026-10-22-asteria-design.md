@@ -746,7 +746,7 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
    - corundum-framework 0.2.0 → 0.5.0。破壊的変更への対応（Windows の Roaming から Local への移行を含む）だけで、新しい機能は使わない。（Plan 8a）
    - クレートの分割と移動：`asteria-<app>-server` をライブラリにし、`-headless`、`-gui`、`-desktop`、`-mobile`（骨組み）を作る。desktop は CLI を兼ね、`asteria-<app>-desktop serve` でサーバーを立てられる。CI の iOS チェックを mobile に広げる。（Plan 8b、済）
    - corundum-framework 0.6.0 に上げた（コードの変更なし、2026-11-01）。
-   - ローカルサーバー（§5.8）：認証を corundum の API キーに置き換え、設定ファイルの既定の場所を決め、desktop の初回起動の流れ（ライブラリを選ぶ、`init`、キーの発行と接続先への自動登録、サービス登録、外部ツールの確かめ）と、設定の「ローカルサーバー」ページを足す。cargo で入れた版でも使える。（Plan 8c）
+   - ローカルサーバー（§5.8）：認証を corundum の API キーに置き換え、設定ファイルの既定の場所を決め、desktop の初回起動の流れ（ライブラリを選ぶ、`init`、キーの発行と接続先への自動登録、サービス登録、外部ツールの確かめ）と、設定の「ローカルサーバー」ページを足す。cargo で入れた版でも使える。（Plan 8c、済）
    - desktop の Velopack 配布（改名、PATH、packId、アイコンとランチャー、更新パネル、リリースの CI）、単一起動（`acquire_or_activate_with`、`WindowOptions::on_activate`）、外部ツールの同梱を決める。desktop は今「引数が1つでもあれば CLI」なので、Velopack のフック（`--veloapp-*`）はその判定より前に `package::start` で処理すること。（Plan 8d）
 10. オフラインキャッシュと操作キュー。（Plan 9）
 11. payload ハッシュの第2段階。（Plan 10）

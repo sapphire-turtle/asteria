@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use asteria_framework::Library;
+use asteria_framework_client::settings::ExtraSettingsPage;
 use asteria_framework_server::ServerConfig;
 use corundum_framework::egui;
 use corundum_framework::gui::first_run::FirstRun;
@@ -14,6 +15,32 @@ use corundum_framework::gui::settings::ServiceRow;
 use corundum_framework::gui::tr;
 
 use crate::{LocalPaths, LocalServerSpec, tools_ui};
+
+/// Where the "set up" request waits in the context's memory for the desktop to take it.
+fn setup_request_id() -> egui::Id {
+    // `unique` hashes its source: the same id every time.
+    egui::Id::unique("asteria_desktop_setup_request")
+}
+
+/// Show the first-run flow again: forget that it was finished, and ask the desktop (through
+/// [`take_setup_request`]) to bring it back now, whatever servers it has. The page's "Set up"
+/// button does this.
+pub fn request_setup(ctx: &egui::Context) {
+    FirstRun::reset(ctx);
+    ctx.data_mut(|d| d.insert_temp(setup_request_id(), true));
+    ctx.request_repaint();
+}
+
+/// Whether the "Local server" page asked to set the server up since this was last asked: the
+/// desktop then draws a new first-run flow in place of the app. Only the first call after
+/// the request answers `true`.
+///
+/// [`FirstRun::reset`] alone would not do: a desktop that never showed the flow (it had a
+/// server already) cannot tell the reset from the flow never having been finished.
+pub fn take_setup_request(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|d| d.remove_temp::<bool>(setup_request_id()))
+        .unwrap_or(false)
+}
 
 /// What the page found in the config file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,7 +150,7 @@ impl LocalServerPage {
             PageState::NotSetUp => {
                 ui.label(tr!(ui, "asteria-desktop-page-not-set-up"));
                 if ui.button(tr!(ui, "asteria-desktop-page-set-up")).clicked() {
-                    FirstRun::reset(ui.ctx());
+                    request_setup(ui.ctx());
                 }
             }
             PageState::Unreadable(error) => {
@@ -188,5 +215,15 @@ impl LocalServerPage {
                 );
             }
         }
+    }
+}
+
+impl ExtraSettingsPage for LocalServerPage {
+    fn label(&self, ctx: &egui::Context) -> String {
+        LocalServerPage::label(self, ctx)
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui) {
+        LocalServerPage::ui(self, ui);
     }
 }

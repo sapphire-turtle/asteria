@@ -435,6 +435,7 @@ name = "asteria-music-desktop"
 version = "0.1.0"
 dependencies = [
  "asteria-framework-client",
+ "asteria-framework-desktop",
  "asteria-framework-server",
  "asteria-music-gui",
  "asteria-music-server",
@@ -526,6 +527,7 @@ name = "asteria-photos-desktop"
 version = "0.1.0"
 dependencies = [
  "asteria-framework-client",
+ "asteria-framework-desktop",
  "asteria-framework-server",
  "asteria-photos-gui",
  "asteria-photos-server",

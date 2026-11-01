@@ -15,7 +15,7 @@ mod tools;
 
 pub use first_run::{first_run_pages, first_run_pages_with};
 pub use i18n::{RESOURCES, register};
-pub use local_page::{LocalServerPage, PageState};
+pub use local_page::{LocalServerPage, PageState, request_setup, take_setup_request};
 pub use paths::LocalPaths;
 pub use service::service_spec;
 pub use tools::tools_ui;

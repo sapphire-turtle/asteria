@@ -2,9 +2,11 @@
 
 mod support;
 
-use asteria_framework_desktop::{LocalPaths, LocalServerPage, PageState};
+use asteria_framework_client::settings::ExtraSettingsPage;
+use asteria_framework_desktop::{LocalPaths, LocalServerPage, PageState, take_setup_request};
 use asteria_framework_server::ServerConfig;
-use support::{SPEC, context, frame, shows};
+use corundum_framework::gui::first_run::FirstRun;
+use support::{SPEC, click, context, frame, shows};
 
 fn paths(dir: &tempfile::TempDir) -> LocalPaths {
     LocalPaths {
@@ -53,4 +55,27 @@ fn an_unreadable_config_says_why() {
     std::fs::write(&paths.config, "not toml [").unwrap();
     let page = LocalServerPage::with_paths(&SPEC, paths);
     assert!(matches!(page.state(), PageState::Unreadable(_)));
+}
+
+#[test]
+fn it_is_a_settings_page_for_the_apps() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut page: Box<dyn ExtraSettingsPage> =
+        Box::new(LocalServerPage::with_paths(&SPEC, paths(&dir)));
+    let ctx = context();
+    assert_eq!(page.label(&ctx), "Local server");
+    let output = frame(&ctx, Vec::new(), |ui| page.ui(ui));
+    assert!(shows(&output, "No local server is set up yet."));
+}
+
+#[test]
+fn setting_up_asks_the_desktop_for_the_first_run_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut page = LocalServerPage::with_paths(&SPEC, paths(&dir));
+    let ctx = context();
+    assert!(!take_setup_request(&ctx));
+    click(&ctx, "Set up a local server", |ui| page.ui(ui));
+    assert!(take_setup_request(&ctx), "the click asks for the first run");
+    assert!(!take_setup_request(&ctx), "the request is taken once");
+    assert!(!FirstRun::done(&ctx));
 }
