@@ -39,6 +39,7 @@ asteria-desktop-tools-vips-purpose = Image thumbnails.
 asteria-desktop-tools-ffmpeg-purpose = Video thumbnails, and smaller copies of music for offline use.
 asteria-desktop-tools-found = Found: { $path }
 asteria-desktop-tools-missing = Not found.
+asteria-desktop-tools-sips = Not installed: images are made with sips, which macOS has built in.
 asteria-desktop-tools-linux = Install the package { $package } with your distribution's package manager.
 asteria-desktop-tools-macos = Install it with Homebrew: brew install { $package }
 asteria-desktop-tools-windows-vips = Download libvips for Windows (github.com/libvips/build-win64-mxe/releases), and add its bin folder to PATH.

@@ -39,6 +39,7 @@ asteria-desktop-tools-vips-purpose = 画像のサムネイル。
 asteria-desktop-tools-ffmpeg-purpose = 動画のサムネイルと、オフライン用の音楽の小さい版。
 asteria-desktop-tools-found = 見つかりました：{ $path }
 asteria-desktop-tools-missing = 見つかりません。
+asteria-desktop-tools-sips = 入っていません。画像は macOS に入っている sips で作ります。
 asteria-desktop-tools-linux = ディストリビューションのパッケージマネージャーで、パッケージ { $package } を入れてください。
 asteria-desktop-tools-macos = Homebrew で入れてください：brew install { $package }
 asteria-desktop-tools-windows-vips = Windows 版の libvips（github.com/libvips/build-win64-mxe/releases）をダウンロードし、その bin フォルダを PATH に足してください。

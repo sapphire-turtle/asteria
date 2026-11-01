@@ -3,14 +3,18 @@
 
 use std::path::PathBuf;
 
-use asteria_framework_server::{Tool, find_tool};
+use asteria_framework_server::{ImageTool, Tool, find_image_tool, find_tool};
 use corundum_framework::egui;
 use corundum_framework::gui::tr;
 
 /// Where each tool was found, as last looked up: kept in the context's memory, so a frame
 /// does not search `PATH` again.
 #[derive(Clone, Default)]
-struct Found(Vec<Option<PathBuf>>);
+struct Found {
+    paths: Vec<Option<PathBuf>>,
+    /// Whether images are made with macOS's `sips` (no `vipsthumbnail`).
+    sips: bool,
+}
 
 const TOOLS: [Tool; 2] = [Tool::Vipsthumbnail, Tool::Ffmpeg];
 
@@ -19,7 +23,10 @@ fn found_id() -> egui::Id {
 }
 
 fn look_up() -> Found {
-    Found(TOOLS.iter().map(|&tool| find_tool(tool)).collect())
+    Found {
+        paths: TOOLS.iter().map(|&tool| find_tool(tool)).collect(),
+        sips: matches!(find_image_tool(), Some(ImageTool::Sips(_))),
+    }
 }
 
 /// The program's name, the variable naming another path, and the message saying what the
@@ -76,7 +83,7 @@ pub fn tools_ui(ui: &mut egui::Ui) {
     };
     ui.label(tr!(ui, "asteria-desktop-tools-intro"));
     ui.add_space(8.0);
-    for (&tool, path) in TOOLS.iter().zip(&found.0) {
+    for (&tool, path) in TOOLS.iter().zip(&found.paths) {
         let (name, var, purpose) = about(tool);
         ui.strong(name);
         ui.label(tr!(ui, purpose));
@@ -87,6 +94,9 @@ pub fn tools_ui(ui: &mut egui::Ui) {
                     "asteria-desktop-tools-found",
                     path = path.display().to_string()
                 ));
+            }
+            None if tool == Tool::Vipsthumbnail && found.sips => {
+                ui.label(tr!(ui, "asteria-desktop-tools-sips"));
             }
             None => {
                 ui.colored_label(

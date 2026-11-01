@@ -30,6 +30,8 @@ axum.workspace = true
 tower-http.workspace = true
 tower = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
+image = { workspace = true, features = ["jpeg"] }
+webp.workspace = true
 
 [dev-dependencies]
 blake3.workspace = true
