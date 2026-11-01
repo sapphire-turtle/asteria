@@ -14,10 +14,14 @@ asteria-desktop-where-later-note = あとで設定から用意します。
 # 初回起動：このコンピューターのサーバーを用意する。
 asteria-desktop-setup-title = このコンピューターにライブラリを用意する
 asteria-desktop-setup-intro = ライブラリのフォルダを選んでください。既にライブラリならそのまま使い、そうでなければライブラリにします。
+asteria-desktop-setup-owner = あなたのユーザー名
+asteria-desktop-setup-owner-note = ここで作るライブラリの持ち主です。アプリでの操作はこのユーザーとして記録されます。
+asteria-desktop-setup-owner-invalid = 半角英数字と - _ で 1〜{ $max } 文字にしてください。
+asteria-desktop-setup-existing-owner = このフォルダは既にライブラリだったので、持ち主 { $owner } のままです。
 asteria-desktop-setup-choose = フォルダを選ぶ…
 asteria-desktop-setup-picker-title = ライブラリのフォルダ
 asteria-desktop-setup-running = { $path } を用意しています…
-asteria-desktop-setup-done = { $path } のライブラリを用意しました。アプリは { $url } でつなぎます。
+asteria-desktop-setup-done = { $path } のライブラリを用意しました（持ち主：{ $owner }）。アプリは { $url } でつなぎます。
 asteria-desktop-setup-failed = ライブラリを用意できませんでした：{ $error }
 asteria-desktop-setup-stopped = 用意の途中で止まりました
 asteria-desktop-setup-try-again = もう一度

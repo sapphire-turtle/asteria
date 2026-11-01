@@ -98,10 +98,7 @@ fn in_file(path: &Path, e: impl std::fmt::Display) -> ServerError {
 /// rewritten (a read-only file), that is only a warning: the keys are imported, and a later
 /// run finds them there and imports nothing again.
 pub fn load_and_migrate(app: &str, path: &Path) -> Result<ServerConfig> {
-    migrate(app, path, |cfg| {
-        let library = Library::open(&cfg.library.canonicalize()?)?;
-        keys_dir_for(app, &library.config().id)
-    })
+    migrate(app, path, |library| keys_dir_for(app, &library.config().id))
 }
 
 /// [`load_and_migrate`] with the keys in `keys_dir` instead of the library's own directory.
@@ -115,7 +112,7 @@ pub fn load_and_migrate_in(keys_dir: &Path, app: &str, path: &Path) -> Result<Se
 fn migrate(
     app: &str,
     path: &Path,
-    keys_dir: impl FnOnce(&ServerConfig) -> Result<PathBuf>,
+    keys_dir: impl FnOnce(&Library) -> Result<PathBuf>,
 ) -> Result<ServerConfig> {
     let raw = read_raw(path)?;
     let cfg = ServerConfig {
@@ -142,7 +139,10 @@ fn migrate(
             })
         })
         .collect::<Result<Vec<KeyHash>>>()?;
-    let mut keys = KeyStore::open(&keys_dir(&cfg)?)?.token_prefix(&format!("{app}-"));
+    // The tokens were the owner's or another user's; every one acts as the owner now.
+    let library = Library::open(&cfg.library.canonicalize()?)?;
+    let owner = crate::profile::owner_profile(&library)?;
+    let mut keys = open_keys_in(&keys_dir(&library)?, app, &library)?;
     let mut names = Vec::new();
     for hash in hashes {
         // Imported by an earlier run whose save failed (and maybe retired since): not again.
@@ -154,7 +154,7 @@ fn migrate(
             id: KeyId::generate(),
             name: name.clone(),
             description: None,
-            profile: crate::profile::owner(),
+            profile: owner.clone(),
             hash,
             created_at: Utc::now(),
             rotated_at: None,
@@ -210,11 +210,14 @@ pub fn keys_dir_for(app: &str, library: &LibraryId) -> Result<PathBuf> {
 }
 
 /// The store of the library's API keys (created if absent); new tokens start with `<app>-`.
-/// A key added before keys had profiles is given the owner's first.
-pub fn open_keys(app: &str, library: &LibraryId) -> Result<KeyStore> {
-    let dir = keys_dir_for(app, library)?;
-    crate::profile::adopt_keys_without_profile(&dir)?;
-    Ok(KeyStore::open(&dir)?.token_prefix(&format!("{app}-")))
+pub fn open_keys(app: &str, library: &Library) -> Result<KeyStore> {
+    open_keys_in(&keys_dir_for(app, &library.config().id)?, app, library)
+}
+
+/// [`open_keys`] in `dir`. A key added before keys had profiles is given the owner's first.
+pub fn open_keys_in(dir: &Path, app: &str, library: &Library) -> Result<KeyStore> {
+    crate::profile::adopt_keys_without_profile(dir, &crate::profile::owner_profile(library)?)?;
+    Ok(KeyStore::open(dir)?.token_prefix(&format!("{app}-")))
 }
 
 /// Makes sure `path` exists with mode 0600 so `atomic_write` (which keeps the target's

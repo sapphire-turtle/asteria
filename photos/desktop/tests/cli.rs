@@ -123,7 +123,7 @@ fn api_key_add_prints_only_the_token_and_list_shows_the_keys() {
             "add",
             "laptop",
             "--profile",
-            "owner",
+            "me",
             "--config",
             config,
         ],

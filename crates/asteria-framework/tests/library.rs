@@ -106,3 +106,34 @@ fn users_file_without_users_is_empty_list() {
     std::fs::write(dir.path().join(".asteria/users.toml"), "").unwrap();
     assert!(Library::open(dir.path()).unwrap().users().user.is_empty());
 }
+
+#[test]
+fn usernames_are_ascii_letters_digits_hyphens_and_underscores() {
+    use asteria_framework::library::is_valid_username;
+    for good in ["fluo10", "a", "Taro_Yamada", "x-1", &"a".repeat(32)] {
+        assert!(is_valid_username(good), "{good:?}");
+    }
+    for bad in ["", "a b", "太郎", "a.b", "a@b", " a", &"a".repeat(33)] {
+        assert!(!is_valid_username(bad), "{bad:?}");
+    }
+}
+
+#[test]
+fn init_refuses_an_invalid_owner_name() {
+    let dir = tempfile::tempdir().unwrap();
+    match Library::init(dir.path(), "a b") {
+        Err(Error::InvalidUsername(name)) => assert_eq!(name, "a b"),
+        other => panic!("{other:?}"),
+    }
+    assert!(!dir.path().join(".asteria/library.toml").exists());
+}
+
+#[test]
+fn users_are_found_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::init(dir.path(), "fluo10").unwrap();
+    let user = lib.user_by_name("fluo10").unwrap();
+    assert_eq!(user.id, lib.owner());
+    assert!(lib.user_by_name("Fluo10").is_none());
+    assert!(lib.user_by_name("nobody").is_none());
+}

@@ -267,7 +267,7 @@ mod linux {
         // api-key add: a second key, whose token alone goes to stdout; a taken name is refused.
         let key_add = |name: &str| {
             env.command()
-                .args(["api-key", "add", "--profile", "owner", "--config"])
+                .args(["api-key", "add", "--profile", "me", "--config"])
                 .arg(&config)
                 .arg(name)
                 .output()

@@ -8,6 +8,11 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("not an asteria library: {0}")]
     NotALibrary(PathBuf),
+    #[error(
+        "invalid user name {0:?}: use 1 to {max} ASCII letters, digits, `-` or `_`",
+        max = crate::library::USERNAME_MAX
+    )]
+    InvalidUsername(String),
     #[error("library already initialized: {0}")]
     AlreadyInitialized(PathBuf),
     #[error("temporary file already exists (concurrent writer or crash leftover): {0}")]

@@ -17,6 +17,8 @@ use corundum_framework::egui;
 use corundum_framework::gui::first_run::{FirstRunPage, PageAction, ServicePage};
 use corundum_framework::gui::{platform, store, tr};
 
+use asteria_framework::library::{USERNAME_MAX, is_valid_username};
+
 use crate::{LocalPaths, LocalServerSpec, tools_ui};
 
 /// The answer to "Where is your library?".
@@ -230,14 +232,28 @@ fn not_running(ui: &mut egui::Ui, app: &str) {
     ui.code(format!("{app} serve"));
 }
 
-/// The OS user's name, the library's owner: `USER` (`USERNAME` on Windows), else "me".
-fn owner() -> String {
+/// The OS user's name: `USER` (`USERNAME` on Windows).
+fn os_user() -> Option<String> {
     ["USER", "USERNAME"]
         .iter()
         .filter_map(|var| std::env::var(var).ok())
-        .map(|name| name.trim().to_owned())
-        .find(|name| !name.is_empty())
-        .unwrap_or_else(|| "me".to_owned())
+        .find(|name| !name.trim().is_empty())
+}
+
+/// The owner's user name to suggest: `os_user` without the characters a user name cannot
+/// have, cut to the longest one; "me" when nothing is left.
+fn suggest_owner(os_user: Option<String>) -> String {
+    let name: String = os_user
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(USERNAME_MAX)
+        .collect();
+    if name.is_empty() {
+        "me".to_owned()
+    } else {
+        name
+    }
 }
 
 /// Where the setup page is.
@@ -248,17 +264,24 @@ enum Setup {
     Running {
         library: PathBuf,
         /// The address the app reaches the server at, or why it could not be set up.
-        job: mpsc::Receiver<Result<String, String>>,
+        job: mpsc::Receiver<Result<(String, String), String>>,
     },
-    /// `library` is served, and the app connects to it at `url`.
-    Done { library: PathBuf, url: String },
+    /// `library` is served, and the app connects to it at `url` as the library's `owner`.
+    Done {
+        library: PathBuf,
+        url: String,
+        owner: String,
+    },
     /// Setting up `library` failed, for the reason given.
     Failed { library: PathBuf, error: String },
 }
 
-/// Asks for a folder, sets the local server up for it, and registers it as "This computer".
+/// Asks for the owner's user name and a folder, sets the local server up for it, and
+/// registers it as "This computer".
 struct SetupPage {
     spec: &'static LocalServerSpec,
+    /// The owner's user name, for a library created here.
+    owner: String,
     servers: PathBuf,
     paths: Result<LocalPaths, String>,
     /// Asks the person for a folder: corundum's dialog, or a stand-in in the tests.
@@ -274,6 +297,7 @@ impl SetupPage {
     ) -> SetupPage {
         SetupPage {
             spec,
+            owner: suggest_owner(os_user()),
             servers,
             paths,
             pick: Box::new(platform::pick_folder),
@@ -297,7 +321,7 @@ impl SetupPage {
         let spec = self.spec;
         let servers = self.servers.clone();
         let name = tr!(ctx, "asteria-desktop-this-computer");
-        let owner = owner();
+        let owner = self.owner.clone();
         let folder = library.clone();
         let ctx = ctx.clone();
         std::thread::Builder::new()
@@ -335,7 +359,8 @@ fn local_url(listen: SocketAddr) -> String {
 /// Sets up the server for `library` and makes it the app's server: a profile named `name`
 /// at the address the server listens on (an existing config's, else the app's default) with
 /// a new key's token, chosen. A profile at that address already (from an earlier first run)
-/// is given the new token rather than added again. The address, when done.
+/// is given the new token rather than added again. The address and the owner's user name,
+/// when done.
 fn set_up(
     spec: &LocalServerSpec,
     paths: &LocalPaths,
@@ -343,10 +368,10 @@ fn set_up(
     library: &Path,
     owner: &str,
     name: &str,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     let server = (spec.server)();
-    let local = setup_local_at(&server, &paths.config, library, owner, "desktop", |id| {
-        paths.open_keys(spec.app, id)
+    let local = setup_local_at(&server, &paths.config, library, owner, "desktop", |lib| {
+        paths.open_keys(spec.app, lib)
     })
     .map_err(|e| e.to_string())?;
     let mut profiles = Profiles::load(servers).map_err(|e| e.to_string())?;
@@ -369,7 +394,7 @@ fn set_up(
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     profiles.save(servers).map_err(|e| e.to_string())?;
-    Ok(address)
+    Ok((address, local.owner))
 }
 
 impl FirstRunPage for SetupPage {
@@ -389,7 +414,11 @@ impl FirstRunPage for SetupPage {
             if let Some(answer) = answer {
                 let library = library.clone();
                 self.setup = match answer {
-                    Ok(url) => Setup::Done { library, url },
+                    Ok((url, owner)) => Setup::Done {
+                        library,
+                        url,
+                        owner,
+                    },
                     Err(error) => Setup::Failed { library, error },
                 };
             }
@@ -397,9 +426,27 @@ impl FirstRunPage for SetupPage {
         ui.label(tr!(ui, "asteria-desktop-setup-intro"));
         ui.add_space(12.0);
         let ctx = ui.ctx().clone();
+        let valid = is_valid_username(&self.owner);
+        if matches!(self.setup, Setup::Idle | Setup::Failed { .. }) {
+            ui.label(tr!(ui, "asteria-desktop-setup-owner"));
+            ui.text_edit_singleline(&mut self.owner);
+            let note = if valid {
+                egui::RichText::new(tr!(ui, "asteria-desktop-setup-owner-note")).weak()
+            } else {
+                egui::RichText::new(tr!(
+                    ui,
+                    "asteria-desktop-setup-owner-invalid",
+                    max = USERNAME_MAX
+                ))
+                .color(ui.visuals().error_fg_color)
+            };
+            ui.label(note);
+            ui.add_space(12.0);
+        }
         match &self.setup {
             Setup::Idle => {
-                if ui.button(tr!(ui, "asteria-desktop-setup-choose")).clicked() {
+                let choose = egui::Button::new(tr!(ui, "asteria-desktop-setup-choose"));
+                if ui.add_enabled(valid, choose).clicked() {
                     self.choose(&ctx);
                 }
             }
@@ -413,13 +460,25 @@ impl FirstRunPage for SetupPage {
                     ));
                 });
             }
-            Setup::Done { library, url } => {
+            Setup::Done {
+                library,
+                url,
+                owner,
+            } => {
                 ui.label(tr!(
                     ui,
                     "asteria-desktop-setup-done",
                     path = library.display().to_string(),
-                    url = url.as_str()
+                    url = url.as_str(),
+                    owner = owner.as_str()
                 ));
+                if *owner != self.owner {
+                    ui.label(tr!(
+                        ui,
+                        "asteria-desktop-setup-existing-owner",
+                        owner = owner.as_str()
+                    ));
+                }
             }
             Setup::Failed { library, error } => {
                 ui.colored_label(
@@ -431,10 +490,16 @@ impl FirstRunPage for SetupPage {
                 let (mut again, mut other) = (false, false);
                 ui.horizontal(|ui| {
                     again = ui
-                        .button(tr!(ui, "asteria-desktop-setup-try-again"))
+                        .add_enabled(
+                            valid,
+                            egui::Button::new(tr!(ui, "asteria-desktop-setup-try-again")),
+                        )
                         .clicked();
                     other = ui
-                        .button(tr!(ui, "asteria-desktop-setup-other-folder"))
+                        .add_enabled(
+                            valid,
+                            egui::Button::new(tr!(ui, "asteria-desktop-setup-other-folder")),
+                        )
                         .clicked();
                 });
                 if again {
@@ -518,6 +583,7 @@ mod tests {
     fn a_folder_is_set_up_and_chosen_as_this_computer() {
         let mut f = Fixture::new();
         assert!(!f.page.can_continue());
+        f.page.owner = "taro".into();
         f.click("Choose a folder…");
         let output = f.settle();
         assert!(
@@ -529,7 +595,9 @@ mod tests {
         assert!(shows(&output, "is ready"), "{:?}", support::labels(&output));
 
         let lib = f.dir.path().join("lib");
-        assert!(lib.join(".asteria/library.toml").is_file());
+        let library = asteria_framework::Library::open(&lib).unwrap();
+        assert_eq!(library.user_by_name("taro").unwrap().id, library.owner());
+        assert!(!shows(&output, "so its owner"));
         let cfg = ServerConfig::load(&f.dir.path().join("conf/server.toml")).unwrap();
         assert_eq!(cfg.library, lib.canonicalize().unwrap());
 
@@ -543,6 +611,63 @@ mod tests {
             .authenticate(active.token.expose())
             .expect("the token is a key's");
         assert_eq!(key.name, "desktop");
+        assert_eq!(key.profile.as_str(), "taro");
+    }
+
+    #[test]
+    fn an_invalid_user_name_is_explained_and_holds_the_folder_choice() {
+        let mut f = Fixture::new();
+        f.page.owner = "a b".into();
+        f.click("Choose a folder…");
+        let page = &mut f.page;
+        let output = frame(&f.ctx, Vec::new(), |ui| {
+            page.ui(ui);
+        });
+        assert!(matches!(f.page.setup, Setup::Idle));
+        assert!(
+            shows(&output, "ASCII letters, digits"),
+            "{:?}",
+            support::labels(&output)
+        );
+        assert!(!f.dir.path().join("lib").exists());
+    }
+
+    #[test]
+    fn an_existing_library_keeps_its_owner() {
+        let mut f = Fixture::new();
+        let lib = f.dir.path().join("lib");
+        asteria_framework::Library::init(&lib, "hanako").unwrap();
+        f.page.owner = "taro".into();
+        f.click("Choose a folder…");
+        let output = f.settle();
+        assert!(matches!(f.page.setup, Setup::Done { .. }));
+        assert!(
+            shows(&output, "already a library, so its owner hanako is kept"),
+            "{:?}",
+            support::labels(&output)
+        );
+        let library = asteria_framework::Library::open(&lib).unwrap();
+        assert!(library.user_by_name("taro").is_none());
+        let profiles = Profiles::load(&f.servers()).unwrap();
+        let keys = KeyStore::open(&f.dir.path().join("keys")).unwrap();
+        let key = keys
+            .authenticate(profiles.active().unwrap().token.expose())
+            .unwrap();
+        assert_eq!(key.profile.as_str(), "hanako");
+    }
+
+    #[test]
+    fn the_suggested_user_name_is_valid() {
+        for (os, suggested) in [
+            ("fluo10", "fluo10"),
+            ("Taro Yamada", "TaroYamada"),
+            ("太郎", "me"),
+            ("", "me"),
+        ] {
+            assert_eq!(suggest_owner(Some(os.to_owned())), suggested, "{os:?}");
+        }
+        assert_eq!(suggest_owner(None), "me");
+        assert_eq!(suggest_owner(Some("a".repeat(40))), "a".repeat(32));
     }
 
     #[test]
@@ -673,10 +798,5 @@ mod tests {
                 "{label}"
             );
         }
-    }
-
-    #[test]
-    fn the_owner_is_never_empty() {
-        assert!(!owner().is_empty());
     }
 }

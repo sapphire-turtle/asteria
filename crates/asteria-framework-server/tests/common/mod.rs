@@ -109,13 +109,21 @@ fn env_full(
     let keys_dir = dir.path().join("keys");
     let mut keys = key_store(&keys_dir);
     let owner_token = keys
-        .add("owner", None, asteria_framework_server::profile::owner())
+        .add(
+            "owner",
+            None,
+            asteria_framework_server::keys::ProfileId::new("owner").unwrap(),
+        )
         .unwrap()
         .1
         .expose()
         .to_owned();
     let other_token = keys
-        .add("other", None, asteria_framework_server::profile::owner())
+        .add(
+            "other",
+            None,
+            asteria_framework_server::keys::ProfileId::new("owner").unwrap(),
+        )
         .unwrap()
         .1
         .expose()

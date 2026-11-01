@@ -86,7 +86,7 @@ fn api_key_add_prints_only_the_token_and_list_shows_the_keys() {
             "add",
             "laptop",
             "--profile",
-            "owner",
+            "me",
             "--config",
             config,
         ],
@@ -120,7 +120,7 @@ fn token_points_to_api_key() {
         assert!(
             err.contains(
                 "`token` was replaced by `api-key`: run `asteria-photos api-key add <name> \
-                 --profile owner`"
+                 --profile <user name>`"
             ),
             "{args:?}: {err}"
         );

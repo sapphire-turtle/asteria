@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use asteria_framework::{Library, LibraryId};
+use asteria_framework::Library;
 use corundum_framework::keys::KeyStore;
 
 use crate::cli::AppSpec;
@@ -18,6 +18,9 @@ use crate::{ServerConfig, default_config_path, open_keys};
 pub struct LocalServer {
     pub config: PathBuf,
     pub listen: SocketAddr,
+    /// The library owner's user name: the one asked for when the library was created here,
+    /// an existing library's own otherwise. The key acts as this user.
+    pub owner: String,
     /// Shown once; only its hash is kept.
     pub token: String,
 }
@@ -28,6 +31,7 @@ impl std::fmt::Debug for LocalServer {
         f.debug_struct("LocalServer")
             .field("config", &self.config)
             .field("listen", &self.listen)
+            .field("owner", &self.owner)
             .field("token", &"…")
             .finish()
     }
@@ -65,7 +69,7 @@ pub fn setup_local_at(
     library: &Path,
     owner: &str,
     key_name: &str,
-    keys: impl FnOnce(&LibraryId) -> Result<KeyStore>,
+    keys: impl FnOnce(&Library) -> Result<KeyStore>,
 ) -> Result<LocalServer> {
     let (lib, listen) = if config.exists() {
         let cfg = crate::load_and_migrate(spec.app, config)?;
@@ -106,12 +110,14 @@ pub fn setup_local_at(
         .save(config)?;
         (lib, listen)
     };
-    let mut keys = keys(&lib.config().id)?;
+    let mut keys = keys(&lib)?;
     let name = unique_name(&keys, key_name);
-    let (_, token) = keys.add(&name, None, crate::profile::owner())?;
+    let owner = crate::profile::owner_profile(&lib)?;
+    let (_, token) = keys.add(&name, None, owner.clone())?;
     Ok(LocalServer {
         config: config.to_path_buf(),
         listen,
+        owner: owner.as_str().to_owned(),
         token: token.expose().to_owned(),
     })
 }

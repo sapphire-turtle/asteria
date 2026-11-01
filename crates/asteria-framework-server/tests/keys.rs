@@ -48,7 +48,11 @@ async fn a_new_key_works_without_a_restart() {
     call(&e.app, &e.owner_token, "server.info", json!({})).await;
     let mut keys = key_store(&e.keys_dir);
     let (_, token) = keys
-        .add("later", None, asteria_framework_server::profile::owner())
+        .add(
+            "later",
+            None,
+            asteria_framework_server::keys::ProfileId::new("owner").unwrap(),
+        )
         .unwrap();
     assert!(token.expose().starts_with("asteria-photos-"));
     let (status, _, _) = info(&e, Some(&format!("Bearer {}", token.expose()))).await;
@@ -177,10 +181,18 @@ fn imported_keys_take_free_names() {
     let (_, path) = old_config(dir.path(), &["first-token", "second-token"]);
     let keys_dir = dir.path().join("keys");
     let mut keys = key_store(&keys_dir);
-    keys.add("token-1", None, asteria_framework_server::profile::owner())
-        .unwrap();
-    keys.add("token-2", None, asteria_framework_server::profile::owner())
-        .unwrap();
+    keys.add(
+        "token-1",
+        None,
+        asteria_framework_server::keys::ProfileId::new("owner").unwrap(),
+    )
+    .unwrap();
+    keys.add(
+        "token-2",
+        None,
+        asteria_framework_server::keys::ProfileId::new("owner").unwrap(),
+    )
+    .unwrap();
     keys.retire("token-2").unwrap();
     load_and_migrate_in(&keys_dir, APP, &path).unwrap();
     let keys = key_store(&keys_dir);
