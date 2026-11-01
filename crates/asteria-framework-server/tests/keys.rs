@@ -1,5 +1,6 @@
-//! API keys: every key acts as the library's owner, keys added or retired while the server
-//! runs take effect, and an older config's `[[token]]` entries become keys.
+//! API keys: an owner key acts as the library's owner and another profile is forbidden,
+//! keys added or retired while the server runs take effect, and an older config's
+//! `[[token]]` entries become keys.
 
 mod common;
 
@@ -46,7 +47,13 @@ async fn a_new_key_works_without_a_restart() {
     // The verifier has read the store once already.
     call(&e.app, &e.owner_token, "server.info", json!({})).await;
     let mut keys = key_store(&e.keys_dir);
-    let (_, token) = keys.add("later", None, None).unwrap();
+    let (_, token) = keys
+        .add(
+            "later",
+            None,
+            asteria_framework_server::keys::ProfileId::new("owner").unwrap(),
+        )
+        .unwrap();
     assert!(token.expose().starts_with("asteria-photos-"));
     let (status, _, _) = info(&e, Some(&format!("Bearer {}", token.expose()))).await;
     assert_eq!(status, StatusCode::OK);
@@ -62,6 +69,17 @@ async fn a_retired_key_stops_working() {
     // The other key is untouched.
     let owner = format!("Bearer {}", e.owner_token);
     assert_eq!(info(&e, Some(&owner)).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_key_of_another_profile_is_forbidden() {
+    let e = env();
+    let mut keys = key_store(&e.keys_dir);
+    let reader = asteria_framework_server::keys::ProfileId::new("reader").unwrap();
+    let (_, token) = keys.add("pad", None, reader).unwrap();
+    let (status, _, body) = info(&e, Some(&format!("Bearer {}", token.expose()))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.is_empty());
 }
 
 #[tokio::test]
@@ -163,8 +181,18 @@ fn imported_keys_take_free_names() {
     let (_, path) = old_config(dir.path(), &["first-token", "second-token"]);
     let keys_dir = dir.path().join("keys");
     let mut keys = key_store(&keys_dir);
-    keys.add("token-1", None, None).unwrap();
-    keys.add("token-2", None, None).unwrap();
+    keys.add(
+        "token-1",
+        None,
+        asteria_framework_server::keys::ProfileId::new("owner").unwrap(),
+    )
+    .unwrap();
+    keys.add(
+        "token-2",
+        None,
+        asteria_framework_server::keys::ProfileId::new("owner").unwrap(),
+    )
+    .unwrap();
     keys.retire("token-2").unwrap();
     load_and_migrate_in(&keys_dir, APP, &path).unwrap();
     let keys = key_store(&keys_dir);

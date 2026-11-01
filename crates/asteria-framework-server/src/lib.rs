@@ -15,6 +15,7 @@ mod mcp;
 mod media_http;
 pub(crate) mod organize;
 pub mod process;
+pub mod profile;
 mod rpc;
 pub mod scan;
 pub mod state;
@@ -30,7 +31,7 @@ pub use cache::{
 };
 pub use config::{
     ServerConfig, cache_dir_for, data_dir_for, default_config_path, keys_dir_for, load_and_migrate,
-    load_and_migrate_in, open_keys,
+    load_and_migrate_in, open_keys, open_keys_in,
 };
 /// corundum's API keys: the store, its verifier and its command line.
 pub use corundum_framework::keys;

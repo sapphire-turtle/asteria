@@ -3,10 +3,10 @@
 
 use std::path::PathBuf;
 
-use asteria_framework::LibraryId;
+use asteria_framework::Library;
 use asteria_framework_server::error::Result;
 use asteria_framework_server::keys::KeyStore;
-use asteria_framework_server::{default_config_path, open_keys};
+use asteria_framework_server::{default_config_path, open_keys, open_keys_in};
 
 /// The local server's config file and the library's API keys.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,10 +29,10 @@ impl LocalPaths {
     }
 
     /// The store of `library`'s keys (created if absent); new tokens start with `<app>-`.
-    pub(crate) fn open_keys(&self, app: &str, library: &LibraryId) -> Result<KeyStore> {
+    pub(crate) fn open_keys(&self, app: &str, library: &Library) -> Result<KeyStore> {
         match &self.keys {
             None => open_keys(app, library),
-            Some(dir) => Ok(KeyStore::open(dir)?.token_prefix(&format!("{app}-"))),
+            Some(dir) => open_keys_in(dir, app, library),
         }
     }
 }

@@ -27,6 +27,18 @@ struct FormatOnly {
     format: u32,
 }
 
+/// The longest user name, in characters.
+pub const USERNAME_MAX: usize = 32;
+
+/// Whether `name` may name a new user: 1 to [`USERNAME_MAX`] ASCII letters, digits, `-`
+/// or `_`. It is what an API key's profile names, so it is typed on command lines.
+pub fn is_valid_username(name: &str) -> bool {
+    (1..=USERNAME_MAX).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     pub id: UserId,
@@ -50,7 +62,12 @@ pub struct Library {
 }
 
 impl Library {
+    /// Creates the library at `root`, owned by a new user named `owner_name`, which must be
+    /// a [valid user name](is_valid_username).
     pub fn init(root: &Path, owner_name: &str) -> Result<Library> {
+        if !is_valid_username(owner_name) {
+            return Err(Error::InvalidUsername(owner_name.to_owned()));
+        }
         let meta = root.join(META_DIR);
         // library.toml is written last, so its presence means a complete init; a directory left
         // behind by a failed init can be initialized again.
@@ -138,6 +155,12 @@ impl Library {
 
     pub fn owner(&self) -> UserId {
         self.config.owner
+    }
+
+    /// The user called exactly `name`. A library made before user names were checked may
+    /// have a name [`is_valid_username`] refuses; it is found all the same.
+    pub fn user_by_name(&self, name: &str) -> Option<&User> {
+        self.users.user.iter().find(|u| u.name == name)
     }
 
     /// Sets the directory this instance keeps its own state in. Writes that journal (sidecar

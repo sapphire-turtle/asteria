@@ -14,10 +14,14 @@ asteria-desktop-where-later-note = Set it up later, in Settings.
 # First run: setting up the server on this computer.
 asteria-desktop-setup-title = Set up a library on this computer
 asteria-desktop-setup-intro = Choose the library's folder. A folder that is already a library is used as it is; any other becomes one.
+asteria-desktop-setup-owner = Your user name
+asteria-desktop-setup-owner-note = The library's owner, for a library made here. What you do in the app is recorded as this user.
+asteria-desktop-setup-owner-invalid = Use 1 to { $max } ASCII letters, digits, - or _.
+asteria-desktop-setup-existing-owner = The folder was already a library, so its owner { $owner } is kept.
 asteria-desktop-setup-choose = Choose a folder…
 asteria-desktop-setup-picker-title = The library's folder
 asteria-desktop-setup-running = Setting up { $path }…
-asteria-desktop-setup-done = The library at { $path } is ready. The app connects to it at { $url }.
+asteria-desktop-setup-done = The library at { $path } is ready, owned by { $owner }. The app connects to it at { $url }.
 asteria-desktop-setup-failed = The library could not be set up: { $error }
 asteria-desktop-setup-stopped = the setup stopped unexpectedly
 asteria-desktop-setup-try-again = Try again

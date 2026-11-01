@@ -362,7 +362,7 @@ fn other_library_identity_aborts_without_removing() {
     // Another library mounted at the same place.
     fs::remove_file(e.root.join("a.jpg")).unwrap();
     fs::remove_dir_all(e.root.join(".asteria")).unwrap();
-    Library::init(&e.root, "someone else").unwrap();
+    Library::init(&e.root, "someone-else").unwrap();
     assert!(scan(&e.lib, &e.cache, &Photos).is_err());
     assert_eq!(paths(&e), ["a.jpg"]);
 }

@@ -10,12 +10,12 @@
 # Create the library (or adopt an existing one) and a config; prints the token of the key `owner` once.
 asteria-photos init --library ~/Pictures --owner me
 # Add a key (and print its token once) for another device.
-asteria-photos api-key add laptop
+asteria-photos api-key add laptop --profile me
 # Serve (Ctrl-C stops it cleanly).
 asteria-photos serve
 ```
 
-- The config is `<config dir>/asteria-photos/server.toml` unless `--config <file>` names another place (every command takes it). `api-key list|retire|restore|rotate` manage the keys; every key acts as the library's owner.
+- The config is `<config dir>/asteria-photos/server.toml` unless `--config <file>` names another place (every command takes it). `api-key list|retire|restore|rotate` manage the keys. A key's profile is a user name, and the key acts as that user. For now the only user is the owner, whose name `--owner` sets: 1 to 32 ASCII letters, digits, `-` or `_`.
 - `init` refuses to overwrite an existing config unless you pass `--force`. Only the token goes to stdout.
 - The default address is `127.0.0.1:7810` (`init --listen` sets it; `serve --listen` overrides it).
 - The cache (index and thumbnails) lives in `$XDG_CACHE_HOME/asteria-photos/<library-id>/` (usually `~/.cache/...`) and can be deleted safely; ratings and tags live in the library's sidecar files.
@@ -23,7 +23,7 @@ asteria-photos serve
 - Keys are files in the data directory, so a key added with `api-key add` works without restarting a running server. `init --force` writes a new config and retires every existing key.
 - Tokens travel in clear text (plain HTTP). Expose the server only on a LAN or a VPN such as Tailscale, never directly on the internet.
 - One server per library on a host: `serve` holds a lock on `server.lock` in its data directory, and a second one on the same host exits with an error.
-- Upgrading from a version with `[[token]]` entries in the config: the first command that opens it imports them as API keys `token-1`, `token-2`… and rewrites the config without them (comments in the file are lost; if the file is read-only, the server warns and you remove the `[[token]]` entries by hand). The tokens keep working, but a token that was issued for another user now acts as the owner too.
+- Upgrading from a version with `[[token]]` entries in the config: the first command that opens it imports them as API keys `token-1`, `token-2`… and rewrites the config without them (comments in the file are lost; if the file is read-only, the server warns and you remove the `[[token]]` entries by hand). The tokens keep working, but a token that was issued for another user now acts as the owner too. Keys added before profiles existed (asteria with corundum 0.6) are given the owner's user name the first time a command opens the keys.
 - Servers on different hosts may share one library (over NFS, say), such as a production server and a test server. Each has its own journal, cache and unfinished uploads. File watching does not see changes made from another NFS host; they appear after the periodic rescan (every 15 minutes) or `library.rescan`. The duplicate check on upload knows only what this server has scanned. Two servers of the same library on one host are not supported, since they would share the cache and data directories.
 - Thumbnails need `vipsthumbnail` (libvips-tools) and, for videos, `ffmpeg`, found on `PATH` or named in `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG`. Set `RUST_LOG` to change log verbosity (default `info`).
 
@@ -35,7 +35,7 @@ asteria-photos serve
 # Create the library (or adopt an existing one) and a config; prints the token of the key `owner` once.
 asteria-music init --library ~/Music --owner me
 # Add a key (and print its token once) for another device.
-asteria-music api-key add laptop
+asteria-music api-key add laptop --profile me
 # Serve (Ctrl-C stops it cleanly).
 asteria-music serve
 ```
@@ -98,7 +98,7 @@ cargo run -p asteria-music-desktop --release -- serve
 
 The desktop apps can set up a server for a folder on this computer, so one machine needs nothing else. The window still only connects to the server; the server is `asteria-photos serve` (or `asteria-music serve`) running in the background.
 
-- On first start, when no server is registered, choose "This computer" and pick the library's folder (a folder that is already a library is used as it is). The app writes the server's config to its default place, creates an API key named `desktop`, and registers the server as "This computer" (`http://127.0.0.1:7810`, or `:7811` for music) and uses it. It then offers to keep the server running in the background: a systemd user unit on Linux, a LaunchAgent on macOS, a logon task in the Task Scheduler on Windows. If you decline, start it yourself with `asteria-photos serve`. Last, it shows which external tools it found.
+- On first start, when no server is registered, choose "This computer", enter your user name (the OS user's is suggested; it becomes the owner of a library created here), and pick the library's folder (a folder that is already a library is used as it is, with its own owner). The app writes the server's config to its default place, creates an API key named `desktop` that acts as the owner, and registers the server as "This computer" (`http://127.0.0.1:7810`, or `:7811` for music) and uses it. It then offers to keep the server running in the background: a systemd user unit on Linux, a LaunchAgent on macOS, a logon task in the Task Scheduler on Windows. If you decline, start it yourself with `asteria-photos serve`. Last, it shows which external tools it found.
 - Settings › Local server shows the library and the address the server listens on, registers, starts, stops or removes the background service, manages the library's API keys (add one for each phone or other computer, retire one you no longer use), and shows the external tools. Without a local server yet, its "Set up a local server" button runs the first-start steps again.
 - The server makes thumbnails and smaller copies with external tools; without them it still runs, just without those. Install them where the server runs:
   - `vipsthumbnail` (from libvips), for image thumbnails and covers: `sudo apt install libvips-tools` (Debian/Ubuntu; other distributions name the package similarly), `brew install vips` on macOS, or on Windows the libvips build from github.com/libvips/build-win64-mxe/releases with its `bin` folder added to `PATH`.

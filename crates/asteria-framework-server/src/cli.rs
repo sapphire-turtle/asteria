@@ -13,7 +13,7 @@ use asteria_framework::Library;
 use asteria_framework::fsutil::cleanup_tmp_files;
 use asteria_framework::paths::META_DIR;
 use clap::{Arg, ArgAction, ArgMatches, Command, FromArgMatches, Subcommand, value_parser};
-use corundum_framework::keys::{KeyCommand, KeyId, KeyStore, KeyVerifier, Token};
+use corundum_framework::keys::{KeyCommand, KeyId, KeyStore, KeyVerifier, ProfileId, Token};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +35,15 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// How often stale upload sessions are looked for.
 const PURGE_PERIOD: Duration = Duration::from_secs(60 * 60);
 const LOCK_FILE: &str = "server.lock";
+/// `--owner`: a valid user name.
+fn username(s: &str) -> Result<String, String> {
+    if asteria_framework::library::is_valid_username(s) {
+        Ok(s.to_owned())
+    } else {
+        Err(asteria_framework::Error::InvalidUsername(s.to_owned()).to_string())
+    }
+}
+
 /// The key `init` makes for the owner.
 const OWNER_KEY: &str = "owner";
 
@@ -80,9 +89,10 @@ fn command(spec: &AppSpec) -> Command {
                 )
                 .arg(
                     Arg::new("owner")
-                        .long("owner").value_name("OWNER")
+                        .long("owner").value_name("USER")
                         .required(true)
-                        .help("Owner's name, used when the library is created"),
+                        .value_parser(username)
+                        .help("The owner's user name (ASCII letters, digits, - and _), used when the library is created"),
                 )
                 .arg(config())
                 .arg(
@@ -101,7 +111,7 @@ fn command(spec: &AppSpec) -> Command {
         )
         .subcommand(KeyCommand::augment_subcommands(
             Command::new("api-key")
-                .about("Manage the API keys; every key acts as the library's owner")
+                .about("Manage the API keys; a key acts as the user its profile names")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .arg(config().global(true)),
@@ -171,8 +181,8 @@ fn dispatch(spec: &AppSpec, matches: &ArgMatches) -> AnyResult<i32> {
         ),
         Some(("token", _)) => {
             eprintln!(
-                "error: `token` was replaced by `api-key`: run `{} api-key add <name>` (every \
-                 key acts as the library owner)",
+                "error: `token` was replaced by `api-key`: run `{} api-key add <name> --profile \
+                 <user name>`",
                 program_name(spec)
             );
             Ok(2)
@@ -241,8 +251,8 @@ fn init(
     if let Some(parent) = config_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    let mut keys = open_keys(spec.app, &lib.config().id)?;
-    let token = owner_key(&mut keys, force)?;
+    let mut keys = open_keys(spec.app, &lib)?;
+    let token = owner_key(&mut keys, crate::profile::owner_profile(&lib)?, force)?;
     let cfg = ServerConfig {
         library: root,
         listen,
@@ -257,7 +267,7 @@ fn init(
 /// new one works (as `--force` replaced every token when they were in the config; an older
 /// config's `[[token]]` entries are not imported, and go with the file). Without it no key is
 /// touched: when `owner` is taken, the new key is `owner-2`, `owner-3`…
-fn owner_key(keys: &mut KeyStore, force: bool) -> AnyResult<Token> {
+fn owner_key(keys: &mut KeyStore, owner: ProfileId, force: bool) -> AnyResult<Token> {
     if force {
         let live: Vec<KeyId> = keys
             .list()
@@ -277,15 +287,15 @@ fn owner_key(keys: &mut KeyStore, force: bool) -> AnyResult<Token> {
     if name != OWNER_KEY {
         eprintln!("a key `{OWNER_KEY}` exists already; the new key is `{name}`");
     }
-    Ok(keys.add(&name, None, None)?.1)
+    Ok(keys.add(&name, None, owner)?.1)
 }
 
 /// Runs `command` on the API keys of the library the config at `config_path` names.
 fn api_key(spec: &AppSpec, config_path: &Path, command: KeyCommand) -> AnyResult<i32> {
     let cfg = load_and_migrate(spec.app, config_path)?;
     let lib = Library::open(&library_root(&cfg, config_path)?)?;
-    let mut keys = open_keys(spec.app, &lib.config().id)?;
-    Ok(command.run(&mut keys)?)
+    let mut keys = open_keys(spec.app, &lib)?;
+    Ok(command.run(&mut keys, &crate::profile::profiles(&lib))?)
 }
 
 /// The library the config names, as an absolute path; an error names both.
@@ -345,9 +355,11 @@ fn serve(spec: &AppSpec, config_path: &Path, listen: Option<SocketAddr>) -> AnyR
     processor.sweep_tmp();
     // Created when absent, so the verifier finds a directory; keys added to it later (by
     // `api-key add`, another host, a sync) work without a restart.
-    let keys = open_keys(spec.app, &library.config().id)?;
+    let keys = open_keys(spec.app, &library)?;
     if !keys.list().iter().any(|k| !k.is_retired()) {
-        tracing::warn!("there are no API keys yet; add one with `api-key add <name>`");
+        tracing::warn!(
+            "there are no API keys yet; add one with `api-key add <name> --profile <user name>`"
+        );
     }
     let keys = Arc::new(KeyVerifier::new(&keys_dir_for(
         spec.app,
@@ -586,10 +598,26 @@ mod tests {
         (dir, keys)
     }
 
+    fn me() -> ProfileId {
+        ProfileId::new("me").unwrap()
+    }
+
+    #[test]
+    fn owner_must_be_a_user_name() {
+        let spec = spec();
+        let args = |owner: &'static str| ["x", "init", "--library", "/l", "--owner", owner];
+        assert!(command(&spec).try_get_matches_from(args("fluo10")).is_ok());
+        let err = command(&spec)
+            .try_get_matches_from(args("a b"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid user name \"a b\""), "{err}");
+    }
+
     #[test]
     fn init_makes_the_owner_key() {
         let (_dir, mut keys) = store();
-        let token = owner_key(&mut keys, false).unwrap();
+        let token = owner_key(&mut keys, me(), false).unwrap();
         assert_eq!(keys.authenticate(token.expose()).unwrap().name, OWNER_KEY);
     }
 
@@ -597,9 +625,9 @@ mod tests {
     #[test]
     fn init_without_force_keeps_every_key() {
         let (_dir, mut keys) = store();
-        let first = owner_key(&mut keys, false).unwrap();
-        let second = owner_key(&mut keys, false).unwrap();
-        let third = owner_key(&mut keys, false).unwrap();
+        let first = owner_key(&mut keys, me(), false).unwrap();
+        let second = owner_key(&mut keys, me(), false).unwrap();
+        let third = owner_key(&mut keys, me(), false).unwrap();
         let name = |t: &Token| keys.authenticate(t.expose()).unwrap().name.clone();
         assert_eq!(name(&first), "owner");
         assert_eq!(name(&second), "owner-2");
@@ -610,13 +638,16 @@ mod tests {
     #[test]
     fn init_with_force_retires_every_key() {
         let (dir, mut keys) = store();
-        let old = owner_key(&mut keys, false).unwrap();
-        let (_, phone) = keys.add("phone", None, None).unwrap();
+        let old = owner_key(&mut keys, me(), false).unwrap();
+        let (_, phone) = keys.add("phone", None, me()).unwrap();
         let config = dir.path().join("server.toml");
+        let lib = dir.path().join("lib");
+        Library::init(&lib, "me").unwrap();
         std::fs::write(
             &config,
             format!(
-                "library = \"/srv/lib\"\nlisten = \"127.0.0.1:7810\"\n\n[[token]]\nuser = \"123abcd\"\nhash = \"{}\"\n",
+                "library = {:?}\nlisten = \"127.0.0.1:7810\"\n\n[[token]]\nuser = \"123abcd\"\nhash = \"{}\"\n",
+                lib.display().to_string(),
                 corundum_framework::keys::KeyHash::of_blake3("old-token")
             ),
         )
@@ -625,7 +656,7 @@ mod tests {
         let mut keys = KeyStore::open(&dir.path().join("keys")).unwrap();
         assert!(keys.authenticate("old-token").is_some());
 
-        let new = owner_key(&mut keys, true).unwrap();
+        let new = owner_key(&mut keys, me(), true).unwrap();
         for refused in [old.expose(), phone.expose(), "old-token"] {
             assert!(keys.authenticate(refused).is_none());
         }
@@ -638,8 +669,26 @@ mod tests {
     fn api_key_takes_config_on_either_side() {
         let spec = spec();
         for args in [
-            ["x", "api-key", "--config", "/c.toml", "add", "phone"],
-            ["x", "api-key", "add", "phone", "--config", "/c.toml"],
+            [
+                "x",
+                "api-key",
+                "--config",
+                "/c.toml",
+                "add",
+                "phone",
+                "--profile",
+                "owner",
+            ],
+            [
+                "x",
+                "api-key",
+                "add",
+                "phone",
+                "--profile",
+                "owner",
+                "--config",
+                "/c.toml",
+            ],
         ] {
             let m = command(&spec).try_get_matches_from(args).unwrap();
             let (name, m) = m.subcommand().unwrap();

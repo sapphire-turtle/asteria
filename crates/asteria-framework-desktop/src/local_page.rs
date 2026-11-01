@@ -134,9 +134,12 @@ impl LocalServerPage {
         let root = library.canonicalize().map_err(|e| e.to_string())?;
         let library = Library::open(&root).map_err(|e| e.to_string())?;
         let store = paths
-            .open_keys(self.spec.app, &library.config().id)
+            .open_keys(self.spec.app, &library)
             .map_err(|e| e.to_string())?;
-        Ok(KeysPage::new(Box::new(LocalKeys::new(store))))
+        let profiles = asteria_framework_server::profile::profiles(&library);
+        Ok(KeysPage::new(Box::new(LocalKeys::new(store, move || {
+            profiles.clone()
+        }))))
     }
 
     /// Draw the page.

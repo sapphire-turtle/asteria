@@ -81,7 +81,15 @@ fn api_key_add_prints_only_the_token_and_list_shows_the_keys() {
     assert!(out.status.success(), "{out:?}");
     let out = run(
         home.path(),
-        &["api-key", "add", "laptop", "--config", config],
+        &[
+            "api-key",
+            "add",
+            "laptop",
+            "--profile",
+            "me",
+            "--config",
+            config,
+        ],
     );
     assert!(out.status.success(), "{out:?}");
     let token = String::from_utf8(out.stdout).unwrap();
