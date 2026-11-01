@@ -6,10 +6,10 @@ mod support;
 use std::time::Duration;
 
 use asteria_framework_client::rpc::ClientError;
-use asteria_music::app::{MusicApp, Screen};
-use asteria_music::library::TrackList;
-use asteria_music::player::Command;
 use asteria_music_api::{AlbumId, ArtistId, PlaylistId};
+use asteria_music_gui::app::{MusicApp, Screen};
+use asteria_music_gui::library::TrackList;
+use asteria_music_gui::player::Command;
 use corundum_framework::egui;
 
 use support::*;
@@ -26,7 +26,7 @@ fn album_ids(app: &MusicApp) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn titles(entries: &[asteria_music::player::QueueEntry]) -> Vec<String> {
+fn titles(entries: &[asteria_music_gui::player::QueueEntry]) -> Vec<String> {
     entries.iter().map(|e| e.title.clone()).collect()
 }
 

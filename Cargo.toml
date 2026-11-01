@@ -7,12 +7,14 @@ members = [
     "crates/asteria-framework-client",
     "photos/crates/asteria-photos-api",
     "photos/crates/asteria-photos-server",
+    "photos/crates/asteria-photos-gui",
     "photos/headless",
-    "photos",
+    "photos/desktop",
     "music/crates/asteria-music-api",
     "music/crates/asteria-music-server",
+    "music/crates/asteria-music-gui",
     "music/headless",
-    "music",
+    "music/desktop",
 ]
 
 [workspace.package]

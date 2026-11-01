@@ -3,9 +3,9 @@
 use std::fs::File;
 use std::path::PathBuf;
 
-use asteria_music::player::decode::{self, TrackDecoder};
-use asteria_music::player::engine::OutputConfig;
-use asteria_music::player::resample::Converter;
+use asteria_music_gui::player::decode::{self, TrackDecoder};
+use asteria_music_gui::player::engine::OutputConfig;
+use asteria_music_gui::player::resample::Converter;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

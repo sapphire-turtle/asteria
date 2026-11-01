@@ -63,7 +63,9 @@ claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Beare
 ```sh
 # Linux では eframe のためにいくつかのシステムパッケージが要る（Debian/Ubuntu の名前）。
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev
-cargo run -p asteria-photos --release
+cargo run -p asteria-photos-desktop --release
+# 引数を付けると、同じバイナリがサーバーの CLI になる（`asteria-photos serve` と同じ）。
+cargo run -p asteria-photos-desktop --release -- serve --config ~/.config/asteria/photos.toml
 ```
 
 - クライアントは `asteria-photos serve` が配信するライブラリを見るもの。サムネイルはサーバーが作るので、libvips や ffmpeg は要らない。
@@ -79,7 +81,9 @@ cargo run -p asteria-photos --release
 ```sh
 # Linux では eframe のためにいくつかのシステムパッケージと、音の出力のための ALSA が要る（Debian/Ubuntu の名前）。
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev libasound2-dev
-cargo run -p asteria-music --release
+cargo run -p asteria-music-desktop --release
+# 引数を付けると、同じバイナリがサーバーの CLI になる（`asteria-music serve` と同じ）。
+cargo run -p asteria-music-desktop --release -- serve --config ~/.config/asteria/music.toml
 ```
 
 - クライアントは `asteria-music serve` が配信するライブラリを再生するもの。カバーと低音質のコピーはサーバーが作るので、libvips や ffmpeg は要らない。

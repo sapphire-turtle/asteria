@@ -1,7 +1,7 @@
 //! The app's translation files: they parse, both languages have the same keys, and every id
 //! the code uses exists.
 
-use asteria_photos::i18n::RESOURCES;
+use asteria_photos_gui::i18n::RESOURCES;
 use corundum_framework::gui::i18n::check;
 
 #[test]

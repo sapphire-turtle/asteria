@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use asteria_framework_api::{ItemId, MediaItem, codes};
-use asteria_photos::PhotosApp;
-use asteria_photos::detail::{BUSY_RETRY_DELAY, Edit, EditError, Field, rating_after_click};
+use asteria_photos_gui::PhotosApp;
+use asteria_photos_gui::detail::{BUSY_RETRY_DELAY, Edit, EditError, Field, rating_after_click};
 use corundum_framework::egui;
 use serde_json::{Value, json};
 

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use asteria_framework_client::session::SessionState;
-use asteria_photos::app::{AppPaths, PhotosApp, Screen};
+use asteria_photos_gui::app::{AppPaths, PhotosApp, Screen};
 use corundum_framework::egui;
 
 use support::common::{DEADLINE, StubResponse, library_info, photos_server_info, serve};

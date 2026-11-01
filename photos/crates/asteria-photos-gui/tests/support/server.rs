@@ -46,7 +46,7 @@ impl TestServer {
         );
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
         let red = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../crates/asteria-framework/tests/fixtures/red.jpg");
+            .join("../../../crates/asteria-framework/tests/fixtures/red.jpg");
         for f in files {
             std::fs::copy(&red, root.join(f)).unwrap();
         }

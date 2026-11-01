@@ -63,7 +63,9 @@ claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Beare
 ```sh
 # On Linux, eframe needs a few system packages (Debian/Ubuntu names):
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev
-cargo run -p asteria-photos --release
+cargo run -p asteria-photos-desktop --release
+# The same binary with arguments is the server's command line: `asteria-photos serve`, say.
+cargo run -p asteria-photos-desktop --release -- serve --config ~/.config/asteria/photos.toml
 ```
 
 - The client browses a library served by `asteria-photos serve`; it does not need libvips or ffmpeg (the server makes the thumbnails).
@@ -79,7 +81,9 @@ cargo run -p asteria-photos --release
 ```sh
 # On Linux, eframe needs a few system packages, and the sound output needs ALSA (Debian/Ubuntu names):
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev libasound2-dev
-cargo run -p asteria-music --release
+cargo run -p asteria-music-desktop --release
+# The same binary with arguments is the server's command line: `asteria-music serve`, say.
+cargo run -p asteria-music-desktop --release -- serve --config ~/.config/asteria/music.toml
 ```
 
 - The client plays a library served by `asteria-music serve`; it does not need libvips or ffmpeg (the server makes the covers and the low-quality copies).

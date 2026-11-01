@@ -7,15 +7,16 @@ use std::path::{Path, PathBuf};
 
 use asteria_framework_client::upload::UploadSnapshot;
 use asteria_framework_client::upload::queue::{GroupId, GroupState, QueueSummary, QueuedGroup};
-use asteria_photos::app::{PhotosApp, Screen};
-use asteria_photos::uploads::{Actions, actions, done_warnings, status_counts};
+use asteria_photos_gui::app::{PhotosApp, Screen};
+use asteria_photos_gui::uploads::{Actions, actions, done_warnings, status_counts};
 use corundum_framework::egui;
 
 use support::server::TestServer;
 use support::*;
 
 fn red() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/asteria-framework/tests/fixtures/red.jpg")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../crates/asteria-framework/tests/fixtures/red.jpg")
 }
 
 /// A JPEG that differs from red.jpg (and from every other `n`) by trailing bytes.
@@ -131,7 +132,7 @@ fn actions_follow_the_state() {
 fn drop_while_disconnected_is_refused() {
     // No server registered at all.
     let dir = tempfile::tempdir().unwrap();
-    let paths = asteria_photos::app::AppPaths {
+    let paths = asteria_photos_gui::app::AppPaths {
         servers: dir.path().join("servers.toml"),
         cache: None,
         data: Some(dir.path().join("data")),
@@ -190,7 +191,7 @@ fn status_bar_counts_pending() {
 #[test]
 fn i18n_keys_exist_in_both_languages() {
     use corundum_framework::gui::i18n::check;
-    let r = &asteria_photos::i18n::RESOURCES;
+    let r = &asteria_photos_gui::i18n::RESOURCES;
     assert!(check::key_difference(r, "en", "ja").is_empty());
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     assert_eq!(
@@ -277,7 +278,7 @@ fn a_dropped_sidecar_is_reported_on_its_row() {
     let src = tempfile::tempdir().unwrap();
     jpeg(&src.path().join("a.jpg"), 3);
     let broken = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../crates/asteria-framework/tests/fixtures/xmp/malformed.xmp");
+        .join("../../../crates/asteria-framework/tests/fixtures/xmp/malformed.xmp");
     std::fs::copy(broken, src.path().join("a.jpg.xmp")).unwrap();
 
     app.drop_files(vec![src.path().join("a.jpg"), src.path().join("a.jpg.xmp")]);

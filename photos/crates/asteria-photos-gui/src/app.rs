@@ -164,14 +164,6 @@ impl PhotosApp {
     /// Draw one frame into the window's root `ui`, after taking in what arrived.
     pub fn show(&mut self, ui: &mut egui::Ui) {
         self.state.poll();
-        #[cfg(not(any(target_os = "ios", target_os = "android")))]
-        {
-            let dropped = crate::desktop::take_drops(ui.ctx());
-            if !dropped.is_empty() {
-                self.drop_files(dropped);
-            }
-            crate::desktop::drop_overlay(ui.ctx());
-        }
         self.state.compact = is_compact(ui);
         if self.shell.current() == Some(Screen::Library) && self.state.viewer_open() {
             self.state.viewer_ui(ui);

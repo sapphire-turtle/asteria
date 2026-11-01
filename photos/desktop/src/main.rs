@@ -1,5 +1,6 @@
-//! The desktop window: where the app's files are, and opening it. Desktop only; a phone
-//! build starts the app its own way.
+//! `asteria-photos-desktop`: with no arguments it opens the window; with any, it is the
+//! server's command line, the same as `asteria-photos` (headless). It also takes the files
+//! dropped on the window to the app, which the phone build has no use for.
 
 use std::error::Error;
 use std::path::PathBuf;
@@ -10,14 +11,11 @@ use corundum_framework::gui::tr;
 use corundum_framework::gui::window::{self, WindowOptions};
 use corundum_framework::platform::dirs::AppDirs;
 
-use crate::app::{AppPaths, PhotosApp};
-
-/// The app's name, for its directories.
-pub const APP_NAME: &str = "asteria-photos";
+use asteria_photos_gui::{APP_NAME, AppPaths, PhotosApp};
 
 /// Where the app keeps `servers.toml` (its config directory), the thumbnail cache (its cache
 /// directory) and the upload queues (its data directory).
-pub fn paths(dirs: &AppDirs) -> AppPaths {
+fn paths(dirs: &AppDirs) -> AppPaths {
     AppPaths {
         servers: dirs.config().join("servers.toml"),
         cache: Some(dirs.cache().to_path_buf()),
@@ -27,7 +25,7 @@ pub fn paths(dirs: &AppDirs) -> AppPaths {
 
 /// The paths of the files dropped on the window this frame. The first thing the app does with
 /// the OS's drag and drop; nothing else in the app depends on it.
-pub(crate) fn take_drops(ctx: &egui::Context) -> Vec<PathBuf> {
+fn take_drops(ctx: &egui::Context) -> Vec<PathBuf> {
     ctx.input(|i| {
         i.raw
             .dropped_files
@@ -38,7 +36,7 @@ pub(crate) fn take_drops(ctx: &egui::Context) -> Vec<PathBuf> {
 }
 
 /// While files are held over the window, a veil over all of it that says where they go.
-pub(crate) fn drop_overlay(ctx: &egui::Context) {
+fn drop_overlay(ctx: &egui::Context) {
     if ctx.input(|i| i.raw.hovered_files.is_empty()) {
         return;
     }
@@ -68,7 +66,7 @@ pub(crate) fn drop_overlay(ctx: &egui::Context) {
 /// Sends the app's log to stderr: warnings and errors unless `RUST_LOG` says otherwise
 /// (`RUST_LOG=asteria_photos=debug`, say). Nothing the app logs carries a token: tokens only
 /// travel in the `Authorization` header, and their `Debug` output is masked.
-pub fn init_logging() {
+fn init_logging() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
     // Fails only if a subscriber is already installed, which then keeps logging.
@@ -78,8 +76,29 @@ pub fn init_logging() {
         .try_init();
 }
 
+fn main() -> Result<(), Box<dyn Error>> {
+    if std::env::args_os().nth(1).is_some() {
+        asteria_framework_server::cli::main(asteria_photos_server::spec())
+    }
+    run()
+}
+
+/// The app in the window, with the files dropped on it.
+struct DesktopApp(PhotosApp);
+
+impl corundum_framework::eframe::App for DesktopApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut corundum_framework::eframe::Frame) {
+        let dropped = take_drops(ui.ctx());
+        if !dropped.is_empty() {
+            self.0.drop_files(dropped);
+        }
+        self.0.show(ui);
+        drop_overlay(ui.ctx());
+    }
+}
+
 /// Open the window and run the app until it closes.
-pub fn run() -> Result<(), Box<dyn Error>> {
+fn run() -> Result<(), Box<dyn Error>> {
     init_logging();
     // Before anything opens the settings: on Windows they move from Roaming to Local.
     asteria_framework_client::migrate_dirs(APP_NAME)?;
@@ -87,7 +106,40 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let paths = paths(&dirs);
     let options = WindowOptions::new(APP_NAME).remember(Store::new(&dirs));
     window::run(options, move |cc| {
-        Box::new(PhotosApp::new(paths, &cc.egui_ctx))
+        Box::new(DesktopApp(PhotosApp::new(paths, &cc.egui_ctx)))
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file dropped on the window, as the OS hands it over.
+    #[derive(Debug)]
+    struct Dropped(PathBuf);
+
+    impl egui::DroppedFile for Dropped {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Err("not read".into())
+        }
+    }
+
+    #[test]
+    fn dropped_files_are_taken_from_the_frame() {
+        let ctx = egui::Context::default();
+        let path = PathBuf::from("trip/a.jpg");
+        let input = egui::RawInput {
+            dropped_files: vec![std::sync::Arc::new(Dropped(path.clone()))],
+            ..Default::default()
+        };
+        let mut taken = Vec::new();
+        let mut output = ctx.run_ui(input, |ui| taken = take_drops(ui.ctx()));
+        // There is no renderer to hand the texture uploads to.
+        output.textures_delta.clear();
+        assert_eq!(taken, [path]);
+    }
 }

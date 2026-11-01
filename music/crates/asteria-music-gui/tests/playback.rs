@@ -4,16 +4,16 @@
 
 mod support;
 
-use asteria_music::app::{MusicApp, Screen};
-use asteria_music::player::fakes::{FakeOpener, entry};
-use asteria_music::player::{Command, Quality, Status};
-use asteria_music::settings::PlaybackSettings;
+use asteria_music_gui::app::{MusicApp, Screen};
+use asteria_music_gui::player::fakes::{FakeOpener, entry};
+use asteria_music_gui::player::{Command, Quality, Status};
+use asteria_music_gui::settings::PlaybackSettings;
 use corundum_framework::egui;
 
 use support::*;
 
 /// An app on a stub server with fakes for the player, and its first frames run.
-fn start_fakes(paths: &asteria_music::app::AppPaths) -> (egui::Context, MusicApp, FakeOpener) {
+fn start_fakes(paths: &asteria_music_gui::app::AppPaths) -> (egui::Context, MusicApp, FakeOpener) {
     let ctx = egui::Context::default();
     let (player, opener, _outs) = player_with_fakes(&ctx);
     let app = MusicApp::new(paths.clone(), &ctx, player);

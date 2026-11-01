@@ -412,13 +412,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "asteria-music"
+name = "asteria-music-api"
+version = "2.4.0"
+dependencies = [
+ "asteria-framework-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "asteria-music-desktop"
+version = "0.1.0"
+dependencies = [
+ "asteria-framework-client",
+ "asteria-framework-server",
+ "asteria-music-gui",
+ "asteria-music-server",
+ "corundum-framework",
+ "tempfile",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "asteria-music-gui"
 version = "0.1.0"
 dependencies = [
  "asteria-framework-api",
  "asteria-framework-client",
- "asteria-music",
  "asteria-music-api",
+ "asteria-music-gui",
  "asteria-photos-api",
  "axum",
  "corundum-framework",
@@ -437,17 +459,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "tracing-subscriber",
  "url",
-]
-
-[[package]]
-name = "asteria-music-api"
-version = "2.4.0"
-dependencies = [
- "asteria-framework-api",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -485,7 +497,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "asteria-photos"
+name = "asteria-photos-api"
+version = "2.3.0"
+dependencies = [
+ "asteria-framework-api",
+ "serde_json",
+]
+
+[[package]]
+name = "asteria-photos-desktop"
+version = "0.1.0"
+dependencies = [
+ "asteria-framework-client",
+ "asteria-framework-server",
+ "asteria-photos-gui",
+ "asteria-photos-server",
+ "corundum-framework",
+ "tempfile",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "asteria-photos-gui"
 version = "0.1.0"
 dependencies = [
  "asteria-framework",
@@ -500,16 +533,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "url",
-]
-
-[[package]]
-name = "asteria-photos-api"
-version = "2.3.0"
-dependencies = [
- "asteria-framework-api",
- "serde_json",
 ]
 
 [[package]]

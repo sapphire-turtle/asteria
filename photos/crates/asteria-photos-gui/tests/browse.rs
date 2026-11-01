@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use asteria_framework_client::session::SessionState;
-use asteria_photos::PhotosApp;
-use asteria_photos::browse::SCANNING_POLL;
+use asteria_photos_gui::PhotosApp;
+use asteria_photos_gui::browse::SCANNING_POLL;
 use corundum_framework::egui;
 use serde_json::{Value, json};
 

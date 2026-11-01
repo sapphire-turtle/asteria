@@ -1,5 +1,5 @@
-//! The desktop window: where the app's files are, and opening it. Desktop only; a phone
-//! build starts the app its own way.
+//! `asteria-music-desktop`: with no arguments it opens the window; with any, it is the
+//! server's command line, the same as `asteria-music` (headless).
 
 use std::error::Error;
 
@@ -7,17 +7,14 @@ use corundum_framework::gui::store::Store;
 use corundum_framework::gui::window::{self, WindowOptions};
 use corundum_framework::platform::dirs::AppDirs;
 
-use crate::app::{AppPaths, MusicApp};
-use crate::player::Player;
-use crate::player::feed::HttpOpener;
-use crate::player::output::CpalOutputs;
-
-/// The app's name, for its directories.
-pub const APP_NAME: &str = "asteria-music";
+use asteria_music_gui::player::Player;
+use asteria_music_gui::player::feed::HttpOpener;
+use asteria_music_gui::player::output::CpalOutputs;
+use asteria_music_gui::{APP_NAME, AppPaths, MusicApp};
 
 /// Where the app keeps `servers.toml` and `playback.toml` (its config directory) and the
 /// cover cache and the streamed tracks (its cache directory).
-pub fn paths(dirs: &AppDirs) -> AppPaths {
+fn paths(dirs: &AppDirs) -> AppPaths {
     AppPaths {
         servers: dirs.config().join("servers.toml"),
         playback: dirs.config().join("playback.toml"),
@@ -28,7 +25,7 @@ pub fn paths(dirs: &AppDirs) -> AppPaths {
 /// Sends the app's log to stderr: warnings and errors unless `RUST_LOG` says otherwise
 /// (`RUST_LOG=asteria_music=debug`, say). Nothing the app logs carries a token: tokens only
 /// travel in the `Authorization` header, and their `Debug` output is masked.
-pub fn init_logging() {
+fn init_logging() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
     // Fails only if a subscriber is already installed, which then keeps logging.
@@ -38,8 +35,15 @@ pub fn init_logging() {
         .try_init();
 }
 
+fn main() -> Result<(), Box<dyn Error>> {
+    if std::env::args_os().nth(1).is_some() {
+        asteria_framework_server::cli::main(asteria_music_server::spec())
+    }
+    run()
+}
+
 /// Open the window and run the app until it closes.
-pub fn run() -> Result<(), Box<dyn Error>> {
+fn run() -> Result<(), Box<dyn Error>> {
     init_logging();
     // Before anything opens the settings: on Windows they move from Roaming to Local.
     asteria_framework_client::migrate_dirs(APP_NAME)?;
