@@ -38,6 +38,8 @@ pub struct LocalServerSpec {
     pub server: fn() -> AppSpec,
     /// The background service that runs `serve`.
     pub service: fn() -> ServiceSpec,
-    /// Where the window reaches the server on this computer (`http://127.0.0.1:7810`).
+    /// Where the window reaches the server on this computer with the default listen address
+    /// (`http://127.0.0.1:7810`). The first run registers the address the server actually
+    /// listens on, which is this unless an existing config says otherwise.
     pub url: &'static str,
 }

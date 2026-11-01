@@ -6,6 +6,7 @@
 //! soon as it is drawn (with an empty title), and the flow finishes without showing them.
 
 use std::cell::Cell;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -249,10 +250,11 @@ enum Setup {
     /// Setting up `library` on a thread.
     Running {
         library: PathBuf,
-        job: mpsc::Receiver<Result<(), String>>,
+        /// The address the app reaches the server at, or why it could not be set up.
+        job: mpsc::Receiver<Result<String, String>>,
     },
-    /// `library` is served, and the app connects to it.
-    Done { library: PathBuf },
+    /// `library` is served, and the app connects to it at `url`.
+    Done { library: PathBuf, url: String },
     /// Setting up `library` failed, for the reason given.
     Failed { library: PathBuf, error: String },
 }
@@ -321,9 +323,22 @@ impl SetupPage {
     }
 }
 
+/// Where a client on this computer reaches a server listening on `listen`: an unspecified
+/// address (`0.0.0.0`, `[::]`) through the loopback of its family, any other as it is.
+fn local_url(listen: SocketAddr) -> String {
+    let ip = match listen.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    // `SocketAddr` puts an IPv6 address in brackets.
+    format!("http://{}", SocketAddr::new(ip, listen.port()))
+}
+
 /// Sets up the server for `library` and makes it the app's server: a profile named `name`
-/// at the spec's address with a new key's token, chosen. A profile at that address already
-/// (from an earlier first run) is given the new token rather than added again.
+/// at the address the server listens on (an existing config's, else the app's default) with
+/// a new key's token, chosen. A profile at that address already (from an earlier first run)
+/// is given the new token rather than added again. The address, when done.
 fn set_up(
     spec: &LocalServerSpec,
     paths: &LocalPaths,
@@ -331,7 +346,7 @@ fn set_up(
     library: &Path,
     owner: &str,
     name: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let server = (spec.server)();
     let local = setup_local_at(&server, &paths.config, library, owner, "desktop", |id| {
         paths.open_keys(spec.app, id)
@@ -339,23 +354,25 @@ fn set_up(
     .map_err(|e| e.to_string())?;
     let mut profiles = Profiles::load(servers).map_err(|e| e.to_string())?;
     let token = Token::new(local.token);
-    let url = asteria_framework_client::profiles::parse_url(spec.url).map_err(|e| e.to_string())?;
+    let address = local_url(local.listen);
+    let url = asteria_framework_client::profiles::parse_url(&address).map_err(|e| e.to_string())?;
     let id = match profiles.servers.iter().find(|s| s.url == url).map(|s| s.id) {
         Some(id) => {
             profiles
-                .update(id, name, spec.url, token)
+                .update(id, name, &address, token)
                 .map_err(|e| e.to_string())?;
             id
         }
         None => profiles
-            .add(name, spec.url, token)
+            .add(name, &address, token)
             .map_err(|e| e.to_string())?,
     };
     profiles.set_active(Some(id)).map_err(|e| e.to_string())?;
     if let Some(dir) = servers.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    profiles.save(servers).map_err(|e| e.to_string())
+    profiles.save(servers).map_err(|e| e.to_string())?;
+    Ok(address)
 }
 
 impl FirstRunPage for SetupPage {
@@ -375,7 +392,7 @@ impl FirstRunPage for SetupPage {
             if let Some(answer) = answer {
                 let library = library.clone();
                 self.setup = match answer {
-                    Ok(()) => Setup::Done { library },
+                    Ok(url) => Setup::Done { library, url },
                     Err(error) => Setup::Failed { library, error },
                 };
             }
@@ -399,12 +416,12 @@ impl FirstRunPage for SetupPage {
                     ));
                 });
             }
-            Setup::Done { library } => {
+            Setup::Done { library, url } => {
                 ui.label(tr!(
                     ui,
                     "asteria-desktop-setup-done",
                     path = library.display().to_string(),
-                    url = self.spec.url
+                    url = url.as_str()
                 ));
             }
             Setup::Failed { library, error } => {
@@ -581,6 +598,42 @@ mod tests {
         f.settle();
         assert!(matches!(f.page.setup, Setup::Done { .. }));
         assert!(f.servers().exists());
+    }
+
+    #[test]
+    fn a_config_on_another_port_is_registered_at_that_port() {
+        let mut f = Fixture::new();
+        let lib = f.dir.path().join("lib");
+        std::fs::create_dir(&lib).unwrap();
+        asteria_framework::Library::init(&lib, "me").unwrap();
+        std::fs::create_dir_all(f.dir.path().join("conf")).unwrap();
+        ServerConfig {
+            library: lib.canonicalize().unwrap(),
+            listen: "0.0.0.0:7123".parse().unwrap(),
+        }
+        .save(&f.dir.path().join("conf/server.toml"))
+        .unwrap();
+
+        f.click("Choose a folder…");
+        let output = f.settle();
+        assert!(matches!(f.page.setup, Setup::Done { .. }));
+        assert!(shows(&output, "http://127.0.0.1:7123"));
+        let profiles = Profiles::load(&f.servers()).unwrap();
+        assert_eq!(profiles.servers.len(), 1);
+        assert_eq!(
+            profiles.active().unwrap().url.as_str(),
+            "http://127.0.0.1:7123/"
+        );
+    }
+
+    #[test]
+    fn the_local_url_reaches_the_listen_address() {
+        let url = |listen: &str| local_url(listen.parse().unwrap());
+        assert_eq!(url("0.0.0.0:7810"), "http://127.0.0.1:7810");
+        assert_eq!(url("[::]:7810"), "http://[::1]:7810");
+        assert_eq!(url("192.168.1.5:7811"), "http://192.168.1.5:7811");
+        assert_eq!(url("[fe80::1]:7811"), "http://[fe80::1]:7811");
+        assert_eq!(url("127.0.0.1:7810"), "http://127.0.0.1:7810");
     }
 
     #[test]
