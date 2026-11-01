@@ -47,6 +47,33 @@ fn a_config_is_read() {
     assert_eq!(page.state(), &PageState::Ready { library, listen });
 }
 
+/// An older config's `[[token]]` entries are a server command's to import; the page shows
+/// the library and the address all the same, and leaves the file alone.
+#[test]
+fn a_config_with_old_tokens_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = dir.path().join("lib");
+    let paths = paths(&dir);
+    std::fs::create_dir_all(paths.config.parent().unwrap()).unwrap();
+    let text = format!(
+        "library = {:?}\nlisten = \"127.0.0.1:7899\"\n\n[[token]]\nuser = \"{}\"\nhash = \"blake3:{}\"\n",
+        library.to_str().unwrap(),
+        "0192f3a4-5b6c-7d8e-9f01-23456789abcd",
+        "00".repeat(32)
+    );
+    std::fs::write(&paths.config, &text).unwrap();
+    let config = paths.config.clone();
+    let page = LocalServerPage::with_paths(&SPEC, paths);
+    assert_eq!(
+        page.state(),
+        &PageState::Ready {
+            library,
+            listen: "127.0.0.1:7899".parse().unwrap()
+        }
+    );
+    assert_eq!(std::fs::read_to_string(config).unwrap(), text);
+}
+
 #[test]
 fn an_unreadable_config_says_why() {
     let dir = tempfile::tempdir().unwrap();

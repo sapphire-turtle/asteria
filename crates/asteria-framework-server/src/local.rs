@@ -14,12 +14,23 @@ use crate::{ServerConfig, default_config_path, open_keys};
 
 /// A local server that is set up: where its config is, where it listens, and the token of a
 /// key made for the caller.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LocalServer {
     pub config: PathBuf,
     pub listen: SocketAddr,
     /// Shown once; only its hash is kept.
     pub token: String,
+}
+
+/// Leaves the token out.
+impl std::fmt::Debug for LocalServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalServer")
+            .field("config", &self.config)
+            .field("listen", &self.listen)
+            .field("token", &"…")
+            .finish()
+    }
 }
 
 /// Sets up the local server at the default config path: see [`setup_local_at`]. The keys are
@@ -58,24 +69,35 @@ pub fn setup_local_at(
 ) -> Result<LocalServer> {
     let (lib, listen) = if config.exists() {
         let cfg = crate::load_and_migrate(spec.app, config)?;
-        let same = match (library.canonicalize(), cfg.library.canonicalize()) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => false,
-        };
-        if !same {
+        let configured = cfg.library.canonicalize().map_err(|e| {
+            ServerError::Config(format!(
+                "the library {} named in {} cannot be found ({e}); reconnect it, or edit or \
+                 remove {}",
+                cfg.library.display(),
+                config.display(),
+                config.display()
+            ))
+        })?;
+        if library.canonicalize().ok().as_ref() != Some(&configured) {
             return Err(ServerError::Config(format!(
-                "a local server for another library is already set up at {}",
+                "a local server for the library {} is already set up in {}, not for {}: \
+                 choose {}, or edit or remove {}",
+                configured.display(),
+                config.display(),
+                library.display(),
+                configured.display(),
                 config.display()
             )));
         }
-        (Library::open(&cfg.library.canonicalize()?)?, cfg.listen)
+        (Library::open(&configured)?, cfg.listen)
     } else {
         let listen: SocketAddr = spec.default_listen.parse().map_err(|e| {
             ServerError::Config(format!("default listen {:?}: {e}", spec.default_listen))
         })?;
         let (root, lib, _) = open_or_init_library(library, owner)?;
         if let Some(parent) = config.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| ServerError::Config(format!("{}: {e}", parent.display())))?;
         }
         ServerConfig {
             library: root,
@@ -239,12 +261,51 @@ mod tests {
         let before = std::fs::read(f.config()).unwrap();
         let other = f.dir.path().join("other");
         let err = f.setup(&other, "desktop").unwrap_err().to_string();
-        assert!(
-            err.contains("a local server for another library is already set up at"),
-            "{err}"
-        );
+        let configured = f.dir.path().join("lib").canonicalize().unwrap();
+        for part in [
+            format!(
+                "a local server for the library {} is already set up",
+                configured.display()
+            ),
+            format!("not for {}", other.display()),
+            format!(
+                "choose {}, or edit or remove {}",
+                configured.display(),
+                f.config().display()
+            ),
+        ] {
+            assert!(err.contains(&part), "{part:?} not in {err}");
+        }
         assert!(!other.exists());
         assert_eq!(std::fs::read(f.config()).unwrap(), before);
         assert_eq!(KeyStore::open(&f.keys_dir()).unwrap().list().len(), 1);
+    }
+
+    #[test]
+    fn a_configured_library_that_is_gone_is_named() {
+        let f = Fixture::new();
+        let lib = f.dir.path().join("lib");
+        f.setup(&lib, "desktop").unwrap();
+        let configured = lib.canonicalize().unwrap();
+        std::fs::remove_dir_all(&lib).unwrap();
+        let err = f.setup(&lib, "desktop").unwrap_err().to_string();
+        assert!(!err.contains("another library"), "{err}");
+        for part in [
+            format!("the library {} named in", configured.display()),
+            "cannot be found".to_owned(),
+            format!("edit or remove {}", f.config().display()),
+        ] {
+            assert!(err.contains(&part), "{part:?} not in {err}");
+        }
+    }
+
+    #[test]
+    fn debug_does_not_show_the_token() {
+        let f = Fixture::new();
+        let server = f.setup(&f.dir.path().join("lib"), "desktop").unwrap();
+        let shown = format!("{server:?}");
+        assert!(!shown.contains(&server.token), "{shown}");
+        assert!(shown.contains("token: \"…\""), "{shown}");
+        assert!(shown.contains(&server.listen.to_string()), "{shown}");
     }
 }

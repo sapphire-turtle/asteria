@@ -118,7 +118,7 @@ impl LocalServerPage {
         self.state = match &self.paths {
             Err(error) => PageState::Unreadable(error.clone()),
             Ok(paths) if !paths.config.exists() => PageState::NotSetUp,
-            Ok(paths) => match ServerConfig::load(&paths.config) {
+            Ok(paths) => match ServerConfig::load_ignoring_tokens(&paths.config) {
                 Ok(cfg) => PageState::Ready {
                     library: cfg.library,
                     listen: cfg.listen,

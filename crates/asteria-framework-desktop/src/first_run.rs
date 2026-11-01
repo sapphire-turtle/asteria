@@ -590,7 +590,7 @@ mod tests {
         let output = f.settle();
         assert!(matches!(f.page.setup, Setup::Failed { .. }));
         assert!(!f.page.can_continue());
-        assert!(shows(&output, "another library is already set up"));
+        assert!(shows(&output, "is already set up in"));
         assert!(!f.servers().exists());
 
         std::fs::remove_file(f.dir.path().join("conf/server.toml")).unwrap();

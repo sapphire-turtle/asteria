@@ -57,6 +57,22 @@ impl ServerConfig {
         })
     }
 
+    /// Reads the config at `path`, passing over any `[[token]]` entries of an older version
+    /// (leaving them for a server command to import). For showing what the config says.
+    pub fn load_ignoring_tokens(path: &Path) -> Result<ServerConfig> {
+        let text = std::fs::read_to_string(path).map_err(|e| in_file(path, e))?;
+        #[derive(Deserialize)]
+        struct Fields {
+            library: PathBuf,
+            listen: SocketAddr,
+        }
+        let fields: Fields = toml::from_str(&text).map_err(|e| in_file(path, e))?;
+        Ok(ServerConfig {
+            library: fields.library,
+            listen: fields.listen,
+        })
+    }
+
     /// Writes atomically; on unix the file is 0600 (new file and overwrite alike).
     pub fn save(&self, path: &Path) -> Result<()> {
         let text = toml::to_string_pretty(self).map_err(|e| ServerError::Config(e.to_string()))?;
