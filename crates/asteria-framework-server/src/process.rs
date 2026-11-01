@@ -41,6 +41,9 @@ pub enum ImageTool {
 
 /// Where macOS keeps `sips`.
 const SIPS_PATH: &str = "/usr/bin/sips";
+/// The sRGB profile macOS ships, which `sips` converts images to (as vips does with
+/// `--export-profile srgb`), so a Display P3 photo does not come out washed out.
+const SRGB_PROFILE: &str = "/System/Library/ColorSync/Profiles/sRGB Profile.icc";
 
 /// The image tool to use: `vipsthumbnail` where [`find_tool`] finds it, else on macOS the
 /// built-in `sips`. `None` when neither is there.
@@ -311,6 +314,8 @@ struct Inner {
     timeout: Duration,
     audio_timeout: Duration,
     image: ImageTool,
+    /// The sRGB profile `sips` converts to; without the file it converts nothing.
+    srgb_profile: PathBuf,
     ffmpeg: OsString,
     /// Renders queued or running, by key. Its length is the queue size.
     inflight: Mutex<HashMap<(String, Preset), Pending>>,
@@ -410,6 +415,7 @@ impl Processor {
                 timeout,
                 audio_timeout: Preset::OfflineAudio.timeout(timeout),
                 image,
+                srgb_profile: SRGB_PROFILE.into(),
                 ffmpeg: ffmpeg.into(),
                 inflight: Mutex::new(HashMap::new()),
                 on_unprocessable: OnceLock::new(),
@@ -417,6 +423,15 @@ impl Processor {
                 tmp_counter: AtomicUsize::new(0),
             }),
         }
+    }
+
+    /// Replaces the sRGB profile file `sips` converts to.
+    #[cfg(all(test, unix))]
+    fn with_srgb_profile(mut self, profile: PathBuf) -> Processor {
+        Arc::get_mut(&mut self.inner)
+            .expect("a new processor is not shared yet")
+            .srgb_profile = profile;
+        self
     }
 
     /// Replaces the time an offline-audio encode may take (by default
@@ -804,8 +819,12 @@ impl Inner {
         let _cleanup = Cleanup(vec![jpeg.clone()]);
         let mut cmd = Command::new(sips);
         cmd.arg("-Z")
-            .arg(sips::target_size(width, height, preset.size()).to_string())
-            .args(["-s", "format", "jpeg", "-s", "formatOptions", "90"])
+            .arg(sips::target_size(width, height, preset.size()).to_string());
+        // Convert to sRGB when the profile is there; if not, keep the colours as they are.
+        if is_file(&self.srgb_profile) {
+            cmd.arg("-m").arg(&self.srgb_profile);
+        }
+        cmd.args(["-s", "format", "jpeg", "-s", "formatOptions", "90"])
             .arg(src)
             .arg("--out")
             .arg(&jpeg);
@@ -1252,13 +1271,16 @@ mod sips_tests {
         let src = dir.path().join("photo.jpg");
         std::fs::write(&src, b"x").unwrap();
         let thumbs = dir.path().join("thumbs");
+        let profile = dir.path().join("sRGB Profile.icc");
+        std::fs::write(&profile, b"icc").unwrap();
         let p = Processor::with_image_tool(
             thumbs.clone(),
             1,
             Duration::from_secs(30),
             ImageTool::Sips(sips.into_os_string()),
             "ffmpeg",
-        );
+        )
+        .with_srgb_profile(profile.clone());
         let out = p
             .render(&src, MediaKind::Image, "blake3:abcdef0123", Preset::Preview)
             .await
@@ -1267,8 +1289,35 @@ mod sips_tests {
         assert_eq!((img.width(), img.height()), (200, 400));
         // 400x200 is below 1920, so sips is asked for 400, not 1920.
         let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
-        assert!(args.contains("-Z 400 -s format jpeg"), "{args}");
+        assert!(
+            args.contains(&format!("-Z 400 -m {} -s format jpeg", profile.display())),
+            "{args}"
+        );
         assert!(leftovers(&thumbs).is_empty(), "{:?}", leftovers(&thumbs));
+    }
+
+    #[tokio::test]
+    async fn without_the_profile_file_sips_runs_without_matching() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg = dir.path().join("in.jpg");
+        std::fs::write(&jpeg, jpeg_with_orientation(40, 20, 1)).unwrap();
+        let sips = fake_sips(dir.path(), &jpeg, 40, 20);
+        let src = dir.path().join("photo.jpg");
+        std::fs::write(&src, b"x").unwrap();
+        let p = Processor::with_image_tool(
+            dir.path().join("thumbs"),
+            1,
+            Duration::from_secs(30),
+            ImageTool::Sips(sips.into_os_string()),
+            "ffmpeg",
+        )
+        .with_srgb_profile(dir.path().join("missing.icc"));
+        p.render(&src, MediaKind::Image, "blake3:abcdef0123", Preset::Thumb)
+            .await
+            .unwrap();
+        let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+        assert!(args.contains("-Z 40 -s format jpeg"), "{args}");
+        assert!(!args.contains("-m "), "{args}");
     }
 
     #[tokio::test]
@@ -1352,6 +1401,29 @@ mod macos_sips_tests {
             .render(&src, MediaKind::Image, HASH, Preset::Preview)
             .await
             .unwrap();
+        assert_eq!(size_of(&out), (200, 400));
+    }
+
+    #[tokio::test]
+    async fn sips_keeps_a_portrait_heic_upright() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpg = dir.path().join("portrait.jpg");
+        std::fs::write(&jpg, jpeg_with_orientation(400, 200, 6)).unwrap();
+        let heic = dir.path().join("portrait.heic");
+        let status = std::process::Command::new(SIPS_PATH)
+            .args(["-s", "format", "heic"])
+            .arg(&jpg)
+            .arg("--out")
+            .arg(&heic)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let out = processor(&dir.path().join("thumbs"))
+            .render(&heic, MediaKind::Image, HASH, Preset::Preview)
+            .await
+            .unwrap();
+        // Upright whichever way sips carries the rotation into the HEIC: not left on its
+        // side, and not turned twice.
         assert_eq!(size_of(&out), (200, 400));
     }
 
