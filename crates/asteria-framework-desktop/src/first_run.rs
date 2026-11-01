@@ -83,7 +83,8 @@ fn pages(
     ]
 }
 
-/// "Where is your library?": a button for each answer, which moves on.
+/// "Where is your library?": a button for each answer, which moves on, or finishes the flow
+/// when the library is not here.
 struct WherePage {
     choice: Shared,
 }
@@ -119,7 +120,12 @@ impl FirstRunPage for WherePage {
                 .clicked()
             {
                 self.choice.set(choice);
-                action = PageAction::Next;
+                // Only a library here needs the pages after this one.
+                action = if choice == Choice::ThisComputer {
+                    PageAction::Next
+                } else {
+                    PageAction::Finish
+                };
             }
             ui.label(egui::RichText::new(tr!(ui, note)).weak());
             ui.add_space(12.0);
@@ -132,37 +138,28 @@ impl FirstRunPage for WherePage {
     }
 }
 
-/// A page shown only when the library is on this computer; otherwise it moves on at once.
+/// A page shown only when the library is on this computer: left out once it is elsewhere.
 struct OnlyHere {
     page: Box<dyn FirstRunPage>,
     choice: Shared,
 }
 
-impl OnlyHere {
-    fn skipped(&self) -> bool {
-        self.choice.get() != Choice::ThisComputer
-    }
-}
-
 impl FirstRunPage for OnlyHere {
     fn title(&self, ctx: &egui::Context) -> String {
-        if self.skipped() {
-            String::new()
-        } else {
-            self.page.title(ctx)
-        }
+        self.page.title(ctx)
     }
 
     fn ui(&mut self, ui: &mut egui::Ui) -> PageAction {
-        if self.skipped() {
-            ui.ctx().request_repaint();
-            return PageAction::Next;
-        }
         self.page.ui(ui)
     }
 
     fn can_continue(&self) -> bool {
-        self.skipped() || self.page.can_continue()
+        self.page.can_continue()
+    }
+
+    /// Counted among the steps until the library is said to be elsewhere.
+    fn skip(&self) -> bool {
+        matches!(self.choice.get(), Choice::Other | Choice::Later)
     }
 }
 
@@ -634,6 +631,48 @@ mod tests {
         assert_eq!(url("192.168.1.5:7811"), "http://192.168.1.5:7811");
         assert_eq!(url("[fe80::1]:7811"), "http://[fe80::1]:7811");
         assert_eq!(url("127.0.0.1:7810"), "http://127.0.0.1:7810");
+    }
+
+    /// What the "Where is your library?" page asks for when `label` is clicked, and the
+    /// pages after it that are left out then.
+    fn answer(label: &str) -> (PageAction, Vec<bool>) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = LocalPaths {
+            config: dir.path().join("conf/server.toml"),
+            keys: Some(dir.path().join("keys")),
+        };
+        let mut pages = pages(&SPEC, dir.path().join("app/servers.toml"), Ok(paths));
+        assert!(
+            pages.iter().all(|p| !p.skip()),
+            "nothing is left out before"
+        );
+        let mut asked = PageAction::Stay;
+        click(&context(), label, |ui| {
+            let action = pages[0].ui(ui);
+            if action != PageAction::Stay {
+                asked = action;
+            }
+        });
+        (asked, pages[1..].iter().map(|p| p.skip()).collect())
+    }
+
+    #[test]
+    fn this_computer_goes_on_to_the_setup() {
+        assert_eq!(
+            answer("This computer"),
+            (PageAction::Next, vec![false, false, false])
+        );
+    }
+
+    #[test]
+    fn another_server_or_later_finishes_at_once() {
+        for label in ["Another server", "Later"] {
+            assert_eq!(
+                answer(label),
+                (PageAction::Finish, vec![true, true, true]),
+                "{label}"
+            );
+        }
     }
 
     #[test]

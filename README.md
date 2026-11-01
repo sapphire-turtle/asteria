@@ -10,12 +10,12 @@
 # Create the library (or adopt an existing one) and a config; prints the token of the key `owner` once.
 asteria-photos init --library ~/Pictures --owner me
 # Add a key (and print its token once) for another device.
-asteria-photos api-key add laptop
+asteria-photos api-key add laptop --profile owner
 # Serve (Ctrl-C stops it cleanly).
 asteria-photos serve
 ```
 
-- The config is `<config dir>/asteria-photos/server.toml` unless `--config <file>` names another place (every command takes it). `api-key list|retire|restore|rotate` manage the keys; every key acts as the library's owner.
+- The config is `<config dir>/asteria-photos/server.toml` unless `--config <file>` names another place (every command takes it). `api-key list|retire|restore|rotate` manage the keys. Every key names a profile; for now there is one, `owner`, and a key of it acts as the library's owner.
 - `init` refuses to overwrite an existing config unless you pass `--force`. Only the token goes to stdout.
 - The default address is `127.0.0.1:7810` (`init --listen` sets it; `serve --listen` overrides it).
 - The cache (index and thumbnails) lives in `$XDG_CACHE_HOME/asteria-photos/<library-id>/` (usually `~/.cache/...`) and can be deleted safely; ratings and tags live in the library's sidecar files.
@@ -23,7 +23,7 @@ asteria-photos serve
 - Keys are files in the data directory, so a key added with `api-key add` works without restarting a running server. `init --force` writes a new config and retires every existing key.
 - Tokens travel in clear text (plain HTTP). Expose the server only on a LAN or a VPN such as Tailscale, never directly on the internet.
 - One server per library on a host: `serve` holds a lock on `server.lock` in its data directory, and a second one on the same host exits with an error.
-- Upgrading from a version with `[[token]]` entries in the config: the first command that opens it imports them as API keys `token-1`, `token-2`… and rewrites the config without them (comments in the file are lost; if the file is read-only, the server warns and you remove the `[[token]]` entries by hand). The tokens keep working, but a token that was issued for another user now acts as the owner too.
+- Upgrading from a version with `[[token]]` entries in the config: the first command that opens it imports them as API keys `token-1`, `token-2`… and rewrites the config without them (comments in the file are lost; if the file is read-only, the server warns and you remove the `[[token]]` entries by hand). The tokens keep working, but a token that was issued for another user now acts as the owner too. Keys added before profiles existed (asteria with corundum 0.6) are given the `owner` profile the first time a command opens the keys.
 - Servers on different hosts may share one library (over NFS, say), such as a production server and a test server. Each has its own journal, cache and unfinished uploads. File watching does not see changes made from another NFS host; they appear after the periodic rescan (every 15 minutes) or `library.rescan`. The duplicate check on upload knows only what this server has scanned. Two servers of the same library on one host are not supported, since they would share the cache and data directories.
 - Thumbnails need `vipsthumbnail` (libvips-tools) and, for videos, `ffmpeg`, found on `PATH` or named in `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG`. Set `RUST_LOG` to change log verbosity (default `info`).
 
@@ -35,7 +35,7 @@ asteria-photos serve
 # Create the library (or adopt an existing one) and a config; prints the token of the key `owner` once.
 asteria-music init --library ~/Music --owner me
 # Add a key (and print its token once) for another device.
-asteria-music api-key add laptop
+asteria-music api-key add laptop --profile owner
 # Serve (Ctrl-C stops it cleanly).
 asteria-music serve
 ```

@@ -106,7 +106,7 @@ impl TestServer {
         let keys = dir.path().join("keys");
         let token = KeyStore::open(&keys)
             .unwrap()
-            .add("owner", None, None)
+            .add("owner", None, asteria_framework_server::profile::owner())
             .unwrap()
             .1
             .expose()

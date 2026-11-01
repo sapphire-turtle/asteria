@@ -108,7 +108,7 @@ pub fn setup_local_at(
     };
     let mut keys = keys(&lib.config().id)?;
     let name = unique_name(&keys, key_name);
-    let (_, token) = keys.add(&name, None, None)?;
+    let (_, token) = keys.add(&name, None, crate::profile::owner())?;
     Ok(LocalServer {
         config: config.to_path_buf(),
         listen,

@@ -15,6 +15,7 @@ mod mcp;
 mod media_http;
 pub(crate) mod organize;
 pub mod process;
+pub mod profile;
 mod rpc;
 pub mod scan;
 pub mod state;

@@ -35,7 +35,7 @@ pub struct AppState {
 impl AppState {
     /// `scanning` is set by whoever runs scans; `rescan` asks that task for another scan.
     /// Also makes `processor` record unprocessable renders in `cache`. `keys` checks the
-    /// bearer tokens; every key acts as the library's owner.
+    /// bearer tokens; a key of the owner profile acts as the library's owner.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         library: Arc<Library>,

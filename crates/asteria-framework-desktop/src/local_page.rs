@@ -136,7 +136,10 @@ impl LocalServerPage {
         let store = paths
             .open_keys(self.spec.app, &library.config().id)
             .map_err(|e| e.to_string())?;
-        Ok(KeysPage::new(Box::new(LocalKeys::new(store))))
+        Ok(KeysPage::new(Box::new(LocalKeys::new(
+            store,
+            asteria_framework_server::profile::profiles,
+        ))))
     }
 
     /// Draw the page.

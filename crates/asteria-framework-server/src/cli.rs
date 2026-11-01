@@ -101,7 +101,7 @@ fn command(spec: &AppSpec) -> Command {
         )
         .subcommand(KeyCommand::augment_subcommands(
             Command::new("api-key")
-                .about("Manage the API keys; every key acts as the library's owner")
+                .about("Manage the API keys; a key of the `owner` profile acts as the library's owner")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .arg(config().global(true)),
@@ -171,8 +171,8 @@ fn dispatch(spec: &AppSpec, matches: &ArgMatches) -> AnyResult<i32> {
         ),
         Some(("token", _)) => {
             eprintln!(
-                "error: `token` was replaced by `api-key`: run `{} api-key add <name>` (every \
-                 key acts as the library owner)",
+                "error: `token` was replaced by `api-key`: run `{} api-key add <name> --profile \
+                 owner`",
                 program_name(spec)
             );
             Ok(2)
@@ -277,7 +277,7 @@ fn owner_key(keys: &mut KeyStore, force: bool) -> AnyResult<Token> {
     if name != OWNER_KEY {
         eprintln!("a key `{OWNER_KEY}` exists already; the new key is `{name}`");
     }
-    Ok(keys.add(&name, None, None)?.1)
+    Ok(keys.add(&name, None, crate::profile::owner())?.1)
 }
 
 /// Runs `command` on the API keys of the library the config at `config_path` names.
@@ -285,7 +285,7 @@ fn api_key(spec: &AppSpec, config_path: &Path, command: KeyCommand) -> AnyResult
     let cfg = load_and_migrate(spec.app, config_path)?;
     let lib = Library::open(&library_root(&cfg, config_path)?)?;
     let mut keys = open_keys(spec.app, &lib.config().id)?;
-    Ok(command.run(&mut keys)?)
+    Ok(command.run(&mut keys, &crate::profile::profiles())?)
 }
 
 /// The library the config names, as an absolute path; an error names both.
@@ -347,7 +347,9 @@ fn serve(spec: &AppSpec, config_path: &Path, listen: Option<SocketAddr>) -> AnyR
     // `api-key add`, another host, a sync) work without a restart.
     let keys = open_keys(spec.app, &library.config().id)?;
     if !keys.list().iter().any(|k| !k.is_retired()) {
-        tracing::warn!("there are no API keys yet; add one with `api-key add <name>`");
+        tracing::warn!(
+            "there are no API keys yet; add one with `api-key add <name> --profile owner`"
+        );
     }
     let keys = Arc::new(KeyVerifier::new(&keys_dir_for(
         spec.app,
@@ -611,7 +613,7 @@ mod tests {
     fn init_with_force_retires_every_key() {
         let (dir, mut keys) = store();
         let old = owner_key(&mut keys, false).unwrap();
-        let (_, phone) = keys.add("phone", None, None).unwrap();
+        let (_, phone) = keys.add("phone", None, crate::profile::owner()).unwrap();
         let config = dir.path().join("server.toml");
         std::fs::write(
             &config,
@@ -638,8 +640,26 @@ mod tests {
     fn api_key_takes_config_on_either_side() {
         let spec = spec();
         for args in [
-            ["x", "api-key", "--config", "/c.toml", "add", "phone"],
-            ["x", "api-key", "add", "phone", "--config", "/c.toml"],
+            [
+                "x",
+                "api-key",
+                "--config",
+                "/c.toml",
+                "add",
+                "phone",
+                "--profile",
+                "owner",
+            ],
+            [
+                "x",
+                "api-key",
+                "add",
+                "phone",
+                "--profile",
+                "owner",
+                "--config",
+                "/c.toml",
+            ],
         ] {
             let m = command(&spec).try_get_matches_from(args).unwrap();
             let (name, m) = m.subcommand().unwrap();

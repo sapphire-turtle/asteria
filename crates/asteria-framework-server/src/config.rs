@@ -154,7 +154,7 @@ fn migrate(
             id: KeyId::generate(),
             name: name.clone(),
             description: None,
-            subject: None,
+            profile: crate::profile::owner(),
             hash,
             created_at: Utc::now(),
             rotated_at: None,
@@ -210,8 +210,11 @@ pub fn keys_dir_for(app: &str, library: &LibraryId) -> Result<PathBuf> {
 }
 
 /// The store of the library's API keys (created if absent); new tokens start with `<app>-`.
+/// A key added before keys had profiles is given the owner's first.
 pub fn open_keys(app: &str, library: &LibraryId) -> Result<KeyStore> {
-    Ok(KeyStore::open(&keys_dir_for(app, library)?)?.token_prefix(&format!("{app}-")))
+    let dir = keys_dir_for(app, library)?;
+    crate::profile::adopt_keys_without_profile(&dir)?;
+    Ok(KeyStore::open(&dir)?.token_prefix(&format!("{app}-")))
 }
 
 /// Makes sure `path` exists with mode 0600 so `atomic_write` (which keeps the target's
