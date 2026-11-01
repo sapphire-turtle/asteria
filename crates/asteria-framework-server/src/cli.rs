@@ -182,8 +182,8 @@ pub fn main(spec: AppSpec) -> ! {
     }
 }
 
-/// Creates or adopts the library, makes (or, when it exists, rotates) the API key `owner`,
-/// writes the config, and prints the key's token, alone, on stdout.
+/// Creates or adopts the library, adds the API key `owner` (`owner-2`, `owner-3`… when that
+/// name is taken), writes the config, and prints the key's token, alone, on stdout.
 fn init(
     spec: &AppSpec,
     library: &Path,
@@ -206,7 +206,7 @@ fn init(
         eprintln!("using existing library at {}", root.display());
     }
     if let Some(parent) = config_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
     let mut keys = open_keys(spec.app, &lib.config().id)?;
     let token = owner_key(&mut keys, force)?;
@@ -250,9 +250,21 @@ fn owner_key(keys: &mut KeyStore, force: bool) -> AnyResult<Token> {
 /// Runs `command` on the API keys of the library the config at `config_path` names.
 fn api_key(spec: &AppSpec, config_path: &Path, command: KeyCommand) -> AnyResult<i32> {
     let cfg = load_and_migrate(spec.app, config_path)?;
-    let lib = Library::open(&cfg.library.canonicalize()?)?;
+    let lib = Library::open(&library_root(&cfg, config_path)?)?;
     let mut keys = open_keys(spec.app, &lib.config().id)?;
     Ok(command.run(&mut keys)?)
+}
+
+/// The library the config names, as an absolute path; an error names both.
+fn library_root(cfg: &ServerConfig, config_path: &Path) -> AnyResult<PathBuf> {
+    cfg.library.canonicalize().map_err(|e| {
+        format!(
+            "library {} (named in {}): {e}",
+            cfg.library.display(),
+            config_path.display()
+        )
+        .into()
+    })
 }
 
 fn serve(spec: &AppSpec, config_path: &Path, listen: Option<SocketAddr>) -> AnyResult<()> {
@@ -264,7 +276,7 @@ fn serve(spec: &AppSpec, config_path: &Path, listen: Option<SocketAddr>) -> AnyR
         .init();
     let cfg = load_and_migrate(spec.app, config_path)?;
     let listen = listen.unwrap_or(cfg.listen);
-    let root = cfg.library.canonicalize()?;
+    let root = library_root(&cfg, config_path)?;
     let library = Library::open(&root)?;
     // This instance's own state (journal, upload sessions), apart from the workspace, which
     // instances on other hosts may share.

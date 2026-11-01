@@ -222,3 +222,56 @@ fn the_config_defaults_to_the_apps_config_dir() {
         app.config().join("server.toml")
     );
 }
+
+/// A config nobody may rewrite (owned by root, a read-only mount): the tokens are imported
+/// and the server goes on with the config as it is.
+#[cfg(unix)]
+#[test]
+fn a_read_only_old_config_is_imported_and_left_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let conf = dir.path().join("conf");
+    fs::create_dir(&conf).unwrap();
+    let (_, path) = old_config(&conf, &["first-token"]);
+    let lib = conf.join("lib");
+    let keys_dir = dir.path().join("keys");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(&conf, fs::Permissions::from_mode(0o555)).unwrap();
+    struct Writable<'a>(&'a std::path::Path);
+    impl Drop for Writable<'_> {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+    let _restore = Writable(&conf);
+    // Root writes anyway: nothing to test then.
+    if fs::write(conf.join("probe"), b"").is_ok() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let before = fs::read(&path).unwrap();
+
+    let cfg = load_and_migrate_in(&keys_dir, APP, &path).unwrap();
+    assert_eq!(cfg.library, lib);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    let verifier = KeyVerifier::new(&keys_dir);
+    assert!(matches!(
+        verifier.verify("first-token"),
+        Verdict::Accepted(_)
+    ));
+    // A second run imports nothing more.
+    load_and_migrate_in(&keys_dir, APP, &path).unwrap();
+    assert_eq!(key_store(&keys_dir).list().len(), 1);
+}
+
+#[test]
+fn a_missing_config_is_named_in_the_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nothing.toml");
+    let err = load_and_migrate_in(&dir.path().join("keys"), APP, &path)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(&path.display().to_string()), "{err}");
+    let err = ServerConfig::load(&path).unwrap_err().to_string();
+    assert!(err.contains(&path.display().to_string()), "{err}");
+}

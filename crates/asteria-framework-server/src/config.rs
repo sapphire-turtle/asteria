@@ -35,7 +35,7 @@ struct RawConfig {
 }
 
 fn read_raw(path: &Path) -> Result<RawConfig> {
-    let text = std::fs::read_to_string(path)?;
+    let text = std::fs::read_to_string(path).map_err(|e| in_file(path, e))?;
     toml::from_str(&text).map_err(|e| ServerError::Config(format!("{}: {e}", path.display())))
 }
 
@@ -64,16 +64,23 @@ impl ServerConfig {
         // (zero-byte) file can remain; that is intentional, since it leaks nothing and
         // keeps the content from ever being written with looser permissions.
         #[cfg(unix)]
-        restrict_permissions(path)?;
-        atomic_write(path, text.as_bytes())?;
+        restrict_permissions(path).map_err(|e| in_file(path, e))?;
+        atomic_write(path, text.as_bytes()).map_err(|e| in_file(path, e))?;
         Ok(())
     }
+}
+
+/// An I/O error on the config file, with its path.
+fn in_file(path: &Path, e: impl std::fmt::Display) -> ServerError {
+    ServerError::Config(format!("{}: {e}", path.display()))
 }
 
 /// Reads the config at `path`, as every server command does. An older config's `[[token]]`
 /// entries are imported as API keys of the library (named `token-<n>`, their hashes as they
 /// are, so the tokens keep working), and the config is then saved without them. If any entry
-/// cannot be imported, nothing is saved and the error is returned.
+/// cannot be imported, nothing is saved and the error is returned. If the config cannot be
+/// rewritten (a read-only file), that is only a warning: the keys are imported, and a later
+/// run finds them there and imports nothing again.
 pub fn load_and_migrate(app: &str, path: &Path) -> Result<ServerConfig> {
     migrate(app, path, |cfg| {
         let library = Library::open(&cfg.library.canonicalize()?)?;
@@ -139,7 +146,17 @@ fn migrate(
         })?;
         names.push(name);
     }
-    cfg.save(path)?;
+    if let Err(e) = cfg.save(path) {
+        tracing::warn!(
+            config = %path.display(),
+            "could not rewrite the config without its [[token]] entries: {e}"
+        );
+        eprintln!(
+            "warning: could not rewrite {} without its [[token]] entries ({e}); they are \
+             API keys now, so remove the [[token]] entries from it by hand",
+            path.display()
+        );
+    }
     if !names.is_empty() {
         eprintln!(
             "imported {} tokens from {} as API keys {}",
@@ -184,7 +201,7 @@ pub fn open_keys(app: &str, library: &LibraryId) -> Result<KeyStore> {
 /// Makes sure `path` exists with mode 0600 so `atomic_write` (which keeps the target's
 /// permission bits) never exposes the new content with looser permissions.
 #[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<()> {
+fn restrict_permissions(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     std::fs::OpenOptions::new()
         .write(true)
