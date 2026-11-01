@@ -17,7 +17,7 @@ use corundum_framework::keys::{KeyCommand, KeyId, KeyStore, KeyVerifier, Token};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::free_name;
+use crate::local::{open_or_init_library, unique_name};
 use crate::upload::UploadStore;
 use crate::watch::{DEFAULT_DEBOUNCE, DEFAULT_PERIOD};
 use crate::{
@@ -199,19 +199,12 @@ fn init(
         )
         .into());
     }
-    std::fs::create_dir_all(library)?;
-    let root = library.canonicalize()?;
-    let lib = match Library::init(&root, owner) {
-        Ok(lib) => {
-            eprintln!("created library at {}", root.display());
-            lib
-        }
-        Err(asteria_framework::Error::AlreadyInitialized(_)) => {
-            eprintln!("using existing library at {}", root.display());
-            Library::open(&root)?
-        }
-        Err(e) => return Err(e.into()),
-    };
+    let (root, lib, created) = open_or_init_library(library, owner)?;
+    if created {
+        eprintln!("created library at {}", root.display());
+    } else {
+        eprintln!("using existing library at {}", root.display());
+    }
     if let Some(parent) = config_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
@@ -247,17 +240,10 @@ fn owner_key(keys: &mut KeyStore, force: bool) -> AnyResult<Token> {
             live.len()
         );
     }
-    let taken = keys
-        .list()
-        .iter()
-        .any(|k| k.name == OWNER_KEY && !k.is_retired());
-    let name = if taken {
-        let name = free_name(keys, &format!("{OWNER_KEY}-"), 2);
+    let name = unique_name(keys, OWNER_KEY);
+    if name != OWNER_KEY {
         eprintln!("a key `{OWNER_KEY}` exists already; the new key is `{name}`");
-        name
-    } else {
-        OWNER_KEY.to_owned()
-    };
+    }
     Ok(keys.add(&name, None, None)?.1)
 }
 

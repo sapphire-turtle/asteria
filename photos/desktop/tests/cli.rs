@@ -68,3 +68,61 @@ fn init_works_from_the_desktop_binary() {
     // The owner's token, and nothing else, goes to stdout.
     assert!(!String::from_utf8(out.stdout).unwrap().trim().is_empty());
 }
+
+/// With no `--config`, `init` writes the app's default config (corundum's `dirs` reads the
+/// environment on unix only).
+#[cfg(unix)]
+#[test]
+fn init_without_config_uses_the_default_place() {
+    let home = tempfile::tempdir().unwrap();
+    let library = home.path().join("library");
+    let out = run(
+        home.path(),
+        &[
+            "init",
+            "--owner",
+            "me",
+            "--library",
+            library.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let config = home.path().join("config/asteria-photos/server.toml");
+    assert!(config.is_file(), "{config:?}");
+}
+
+#[test]
+fn api_key_add_prints_only_the_token_and_list_shows_the_keys() {
+    let home = tempfile::tempdir().unwrap();
+    let library = home.path().join("library");
+    let config = home.path().join("server.toml");
+    let config = config.to_str().unwrap();
+    let out = run(
+        home.path(),
+        &[
+            "init",
+            "--owner",
+            "me",
+            "--library",
+            library.to_str().unwrap(),
+            "--config",
+            config,
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let out = run(
+        home.path(),
+        &["api-key", "add", "laptop", "--config", config],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let token = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(token.lines().count(), 1, "{token:?}");
+    assert!(token.starts_with("asteria-photos-"), "{token:?}");
+    let out = run(home.path(), &["api-key", "list", "--config", config]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    for name in ["owner", "laptop"] {
+        assert!(text.contains(name), "{name} missing from:\n{text}");
+    }
+    assert!(!text.contains(token.trim()));
+}
