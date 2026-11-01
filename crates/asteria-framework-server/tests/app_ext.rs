@@ -269,10 +269,9 @@ async fn unknown_method_reaches_the_extension() {
     assert_eq!(v["result"]["params"], json!({"n": 1}));
     assert_eq!(v["result"]["user"], e.lib.owner().to_string());
     assert_eq!(v["result"]["owner"], e.lib.owner().to_string());
-    // A guest's token makes the guest the context user.
-    let v = common::call(&e.app, &e.guest_token, "test.echo", json!({})).await;
-    assert_ne!(v["result"]["user"], v["result"]["owner"]);
-    assert_eq!(v["result"]["owner"], e.lib.owner().to_string());
+    // Every key acts as the owner.
+    let v = common::call(&e.app, &e.other_token, "test.echo", json!({})).await;
+    assert_eq!(v["result"]["user"], e.lib.owner().to_string());
 }
 
 #[tokio::test]

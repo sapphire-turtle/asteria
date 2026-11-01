@@ -8,10 +8,10 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use asteria_framework::{Library, MediaKind};
+use asteria_framework_server::keys::{KeyStore, KeyVerifier};
 use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
-    AppExtension, AppState, Cache, Processor, ServerConfig, TokenEntry, Tokens, hash_pending,
-    new_token, router, scan, spawn_writer, token_hash,
+    AppExtension, AppState, Cache, Processor, hash_pending, router, scan, spawn_writer,
 };
 
 struct Photos;
@@ -54,15 +54,15 @@ impl TestServer {
         scan(&lib, &cache, &Photos).unwrap();
         // The duplicate check compares content hashes.
         hash_pending(&lib, &cache, &AtomicBool::new(false)).unwrap();
-        let token = new_token();
-        let cfg = ServerConfig {
-            library: root.clone(),
-            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
-            token: vec![TokenEntry {
-                user: lib.owner(),
-                hash: token_hash(&token),
-            }],
-        };
+        // The keys live in the temporary directory, not in the app's data directory.
+        let keys = dir.path().join("keys");
+        let token = KeyStore::open(&keys)
+            .unwrap()
+            .add("owner", None, None)
+            .unwrap()
+            .1
+            .expose()
+            .to_owned();
         let processor = Arc::new(Processor::new(
             dir.path().join("cache/thumbs"),
             1,
@@ -82,7 +82,7 @@ impl TestServer {
                 state_lib,
                 cache,
                 writer,
-                Arc::new(Tokens::from_config(&cfg)),
+                Arc::new(KeyVerifier::new(&keys)),
                 asteria_photos_api::APP,
                 asteria_photos_api::APP_API,
                 Arc::new(AtomicBool::new(false)),

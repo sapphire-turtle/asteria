@@ -116,8 +116,12 @@ pub fn frame(ctx: &egui::Context, app: &mut PhotosApp) {
     frame_with(ctx, app, Vec::new());
 }
 
-/// One frame in which `events` (key presses, say) arrive.
-pub fn frame_with(ctx: &egui::Context, app: &mut PhotosApp, events: Vec<egui::Event>) {
+/// One frame in which `events` (key presses, say) arrive; what it put out.
+pub fn frame_with(
+    ctx: &egui::Context,
+    app: &mut PhotosApp,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
     let mut output = ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -131,6 +135,7 @@ pub fn frame_with(ctx: &egui::Context, app: &mut PhotosApp, events: Vec<egui::Ev
     );
     // There is no renderer to hand the texture uploads to.
     output.textures_delta.clear();
+    output
 }
 
 /// Runs frames until `done` holds, checking `always` after every frame.

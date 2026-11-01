@@ -5,6 +5,7 @@ members = [
     "crates/asteria-framework",
     "crates/asteria-framework-server",
     "crates/asteria-framework-client",
+    "crates/asteria-framework-desktop",
     "photos/crates/asteria-photos-api",
     "photos/crates/asteria-photos-server",
     "photos/crates/asteria-photos-gui",

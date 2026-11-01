@@ -7,35 +7,37 @@
 `asteria-photos` は、GUI のないホスト向けのウィンドウを持たないサーバー。`cargo install --path photos/headless` で入れる。デスクトップアプリ（`asteria-photos-desktop`）も同じコマンドを実行できる。
 
 ```sh
-# ライブラリ（既存でも可）と設定ファイルを作り、所有者のトークンを一度だけ表示する。
-asteria-photos init --library ~/Pictures --owner me --config ~/.config/asteria/photos.toml
-# <library>/.asteria/users.toml にいる別のユーザーのトークンを追加する。
-asteria-photos token add --config ~/.config/asteria/photos.toml --user <USER_ID>
+# ライブラリ（既存でも可）と設定ファイルを作り、キー `owner` のトークンを一度だけ表示する。
+asteria-photos init --library ~/Pictures --owner me
+# 別の端末のためにキーを足し、そのトークンを一度だけ表示する。
+asteria-photos api-key add laptop
 # 起動する（Ctrl-C で安全に停止）。
-asteria-photos serve --config ~/.config/asteria/photos.toml
+asteria-photos serve
 ```
 
+- 設定ファイルは、`--config <ファイル>` で別の場所を指さなければ `<設定ディレクトリ>/asteria-photos/server.toml`（どのコマンドも `--config` を取れる）。キーは `api-key list|retire|restore|rotate` で扱う。どのキーもライブラリの所有者として動く。
 - `init` は既存の設定ファイルを `--force` なしでは上書きしない。標準出力に出るのはトークンだけ。
 - 既定の待ち受けは `127.0.0.1:7810`（`init --listen` で設定、`serve --listen` で上書き）。
 - キャッシュ（索引とサムネイル）は `$XDG_CACHE_HOME/asteria-photos/<library-id>/`（通常は `~/.cache/...`）にあり、消しても問題ない。評価やタグはライブラリ内のサイドカーが原本。
 - サーバー自身の状態（操作のジャーナル、未完了のアップロード、サーバーのロック）は、ライブラリではなく `$XDG_DATA_HOME/asteria-photos/<library-id>/`（通常は `~/.local/share/...`）に置く。ライブラリの `.asteria/` には、ライブラリ自身のファイル（`library.toml`、`users.toml`、のちにゴミ箱と共有のプレイリスト）だけがある。
-- `token add` は設定ファイルを書き換えるだけ。動いているサーバーには再起動で反映される。`init --force` は設定ファイルを作り直すので、既存のトークンはすべて置き換わる。
+- キーはデータディレクトリのファイルなので、`api-key add` で足したキーは動いているサーバーを再起動せずに使える。`init --force` は設定ファイルを作り直し、既存のキーをすべて失効させる。
 - トークンは平文（素の HTTP）で流れる。サーバーは LAN か Tailscale などの VPN の中だけで公開し、インターネットに直接出さない。
 - 1つのホストで1つのライブラリを扱うサーバーは1つだけ。`serve` はデータディレクトリの `server.lock` をロックし、同じホストの2つ目はエラーで終了する。
+- 設定ファイルに `[[token]]` がある以前の版からの更新：それを開いた最初のコマンドが、`[[token]]` を API キー `token-1`、`token-2`… として取り込み、設定ファイルをそれ抜きで書き直す（ファイル中のコメントは消える。ファイルが読み取り専用なら、サーバーは警告を出すので `[[token]]` を手で消す）。トークンはそのまま使えるが、ほかのユーザーに発行したトークンも所有者として動くようになる。
 - 別々のホストのサーバーが、1つのライブラリを（NFS などで）共有してよい（本番と試験用のサーバーなど）。ジャーナル、キャッシュ、未完了のアップロードはサーバーごとに持つ。ファイルの監視はほかの NFS ホストからの変更に気づかないので、そうした変更は定期的な再スキャン（15分ごと）か `library.rescan` で反映される。アップロードの重複の確認は、そのサーバーがスキャンしたものしか知らない。同じホストで同じライブラリのサーバーを2つ動かすことはできない（キャッシュとデータディレクトリを共有してしまう）。
-- サムネイルには `vipsthumbnail`（libvips-tools）、動画には `ffmpeg` が必要。ログは `RUST_LOG` で調整（既定 `info`）。
+- サムネイルには `vipsthumbnail`（libvips-tools）、動画には `ffmpeg` が必要（`PATH` から探す。`ASTERIA_VIPSTHUMBNAIL` と `ASTERIA_FFMPEG` で場所を指すこともできる）。ログは `RUST_LOG` で調整（既定 `info`）。
 
 ## music サーバーの起動
 
 `asteria-music` は、ウィンドウを持たないサーバー（`cargo install --path music/headless`）。デスクトップアプリ（`asteria-music-desktop`）も同じコマンドを実行できる。
 
 ```sh
-# ライブラリ（既存でも可）と設定ファイルを作り、所有者のトークンを一度だけ表示する。
-asteria-music init --library ~/Music --owner me --config ~/.config/asteria/music.toml
-# <library>/.asteria/users.toml にいる別のユーザーのトークンを追加する。
-asteria-music token add --config ~/.config/asteria/music.toml --user <USER_ID>
+# ライブラリ（既存でも可）と設定ファイルを作り、キー `owner` のトークンを一度だけ表示する。
+asteria-music init --library ~/Music --owner me
+# 別の端末のためにキーを足し、そのトークンを一度だけ表示する。
+asteria-music api-key add laptop
 # 起動する（Ctrl-C で安全に停止）。
-asteria-music serve --config ~/.config/asteria/music.toml
+asteria-music serve
 ```
 
 - コマンド、設定ファイル、トークンの扱い、キャッシュとデータのディレクトリ（`asteria-photos` の代わりに `asteria-music`）、ロック、素の HTTP についての注意は、上の photos サーバーと同じ。既定の待ち受けは `127.0.0.1:7811`。
@@ -54,7 +56,7 @@ asteria-music serve --config ~/.config/asteria/music.toml
 claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Bearer <token>"
 ```
 
-- エンドポイントは `<サーバーの URL>/mcp`（Streamable HTTP）である。トークンはクライアントと同じ Bearer トークンで、エージェントはそのトークンのユーザーとして動く。
+- エンドポイントは `<サーバーの URL>/mcp`（Streamable HTTP）である。トークンはクライアントと同じ Bearer トークンで、エージェントはライブラリの所有者として動く。
 - ツールは、ライブラリ・フォルダ・アイテムの参照、評価・タグ・説明を書き換える `media_update`、ファイルの移動・改名・ゴミ箱入れをする `organize_apply` とその状況・取り消し・履歴、サムネイルを見る `media_preview` である。music サーバーには `album_list`、`album_get`、`artist_list`、`artist_get`、`playlist_list`、`playlist_get` が加わる。
 - エージェントの変更はジャーナルに `agent` として残り、`organize_undo` でファイル操作のバッチごと取り消せる。メタデータの編集（`media_update`）はバッチではなく、取り消せない。
 
@@ -65,11 +67,11 @@ claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Beare
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev
 cargo run -p asteria-photos-desktop --release
 # 引数を付けると、同じバイナリがサーバーの CLI になる（`asteria-photos serve` と同じ）。
-cargo run -p asteria-photos-desktop --release -- serve --config ~/.config/asteria/photos.toml
+cargo run -p asteria-photos-desktop --release -- serve
 ```
 
 - クライアントは `asteria-photos serve` が配信するライブラリを見るもの。サムネイルはサーバーが作るので、libvips や ffmpeg は要らない。
-- 初回はサーバーが未登録なので、設定が「サーバー」ページで追加フォームを開いた状態で始まる。名前、アドレス（`http://192.168.1.10:7810` など）、`init`（または `token add`）が表示したアクセストークンを入れ、「接続を確かめる」で確かめてから保存する。左のレールで「ライブラリ」を開くと写真が見える。
+- 初回はサーバーが未登録なので、ウィンドウがライブラリの場所を尋ねる：このコンピューター（[このコンピューターのサーバー](#このコンピューターのサーバー)）、ほかのサーバー、あとで。ほかのサーバー（またはあとで）を選ぶと、設定が「サーバー」ページで追加フォームを開いた状態になる。名前、アドレス（`http://192.168.1.10:7810` など）、`init`（または `api-key add`）が表示したアクセストークンを入れ、「接続を確かめる」で確かめてから保存する。左のレールで「ライブラリ」を開くと写真が見える。
 - サーバーは複数登録できる。ステータスバー（右下。幅が狭いときはアイコンだけ）に使用中のサーバーと接続の状態が出る。メニューから別のサーバーを選ぶと切り替わり、「サーバーを管理…」（設定 › サーバー）では追加、編集、削除ができる。使用中のサーバーは次回の起動でも覚えていて、切り替えるとライブラリのルートから表示し直す。
 - サーバーにつながらない、トークンが通らない、バージョンが合わない、といったときは、ライブラリに理由と「もう一度」ボタンが出る。オフライン用のキャッシュはまだない。
 - サーバーとトークンは、アプリの設定ディレクトリの `servers.toml` に保存される（Linux は `~/.config/asteria-photos/`、macOS は `~/Library/Application Support/asteria-photos/`、Windows は `%LOCALAPPDATA%\asteria-photos\`。以前の版が `%APPDATA%` に置いた設定は、最初の起動でここへ移る）。Unix ではこのファイルを自分だけが読める権限（0600）にする。トークンは OS のキーチェーンには入れない。取得したサムネイルはアプリのキャッシュディレクトリ（Linux は `~/.cache/asteria-photos/`）に置かれ、消しても問題ない。
@@ -83,14 +85,26 @@ cargo run -p asteria-photos-desktop --release -- serve --config ~/.config/asteri
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev libasound2-dev
 cargo run -p asteria-music-desktop --release
 # 引数を付けると、同じバイナリがサーバーの CLI になる（`asteria-music serve` と同じ）。
-cargo run -p asteria-music-desktop --release -- serve --config ~/.config/asteria/music.toml
+cargo run -p asteria-music-desktop --release -- serve
 ```
 
 - クライアントは `asteria-music serve` が配信するライブラリを再生するもの。カバーと低音質のコピーはサーバーが作るので、libvips や ffmpeg は要らない。
-- 初回はサーバーが未登録なので、設定が「サーバー」ページで追加フォームを開いた状態で始まる。名前、アドレス（`http://192.168.1.10:7811` など）、`init`（または `token add`）が表示したアクセストークンを入れ、「接続を確かめる」で確かめてから保存する。サーバーの登録、切り替え、保存のしかたは photos クライアントと同じ（`servers.toml`。`asteria-photos` の代わりに `asteria-music` の下）。
+- 初回は photos クライアントと同じく、ウィンドウがライブラリの場所を尋ねる。ほかのサーバー（またはあとで）を選ぶと、設定が「サーバー」ページで追加フォームを開いた状態になる。名前、アドレス（`http://192.168.1.10:7811` など）、`init`（または `api-key add`）が表示したアクセストークンを入れ、「接続を確かめる」で確かめてから保存する。サーバーの登録、切り替え、保存のしかたは photos クライアントと同じ（`servers.toml`。`asteria-photos` の代わりに `asteria-music` の下）。
 - アルバム、アーティスト、プレイリストを選ぶと曲が並び、再生できる。再生はファイルを取り終える前に始まり、まだ届いていない位置へのシークは、その部分が届くまで待つ。
 - 「低音質で再生する」はアプリ全体で一つの設定で、音量といっしょにアプリの設定ディレクトリの `playback.toml` に保存される。オンにすると、サーバーが曲を低ビットレートの Ogg Opus（オフライン用のコピー。サーバーに libopus つきの `ffmpeg` が要る）に変換し、クライアントはそれを再生する。回線が遅いときのためのもの。曲を初めて再生するときは、サーバーが変換するあいだ「準備中」と出ることがある。変更は次に開く曲から効く。
 - まだないもの：フォルダでの表示（#20）、評価（#19）、シャッフルとリピート（#17）、ギャップレス再生（#18）、メディアキー（`sapphire-turtle/corundum-framework#50`）。
+
+## このコンピューターのサーバー
+
+desktop アプリは、このコンピューターのフォルダをライブラリにしたサーバーを用意できる。1台だけでほかに何も要らない。それでもウィンドウはサーバーにつなぐだけで、サーバーはバックグラウンドで動く `asteria-photos serve`（または `asteria-music serve`）。
+
+- 初回、サーバーが未登録なら「このコンピューター」を選び、ライブラリのフォルダを選ぶ（既にライブラリのフォルダはそのまま使う）。アプリはサーバーの設定ファイルを既定の場所に書き、名前 `desktop` の API キーを作り、サーバーを「このコンピューター」（`http://127.0.0.1:7810`、music は `:7811`）として登録して選ぶ。続けて、サーバーをバックグラウンドで動かし続けるかを尋ねる（Linux は systemd のユーザーユニット、macOS は LaunchAgent、Windows はタスクスケジューラーのログオン時のタスク）。断ったときは `asteria-photos serve` で自分で起動する。最後に、見つかった外部ツールを出す。
+- 設定 › ローカルサーバーでは、ライブラリと待ち受けアドレスの表示、バックグラウンドのサービスの登録・起動・停止・削除、ライブラリの API キーの管理（スマートフォンやほかのコンピューターごとに足し、使わなくなったものは外す）、外部ツールの有無の表示ができる。ローカルサーバーがまだ無いときは、「ローカルサーバーを用意する」ボタンで初回の手順をもう一度たどれる。
+- サーバーはサムネイルや小さいコピーを外部ツールで作る。無くてもサーバーは動き、それが作れないだけ。サーバーが動くマシンに入れる：
+  - `vipsthumbnail`（libvips に含まれる）：画像のサムネイルとカバー。Debian/Ubuntu は `sudo apt install libvips-tools`（ほかのディストリビューションも似た名前のパッケージ）、macOS は `brew install vips`、Windows は github.com/libvips/build-win64-mxe/releases の libvips を入れ、その `bin` フォルダを `PATH` に足す。
+  - `ffmpeg`：動画のサムネイルと、music のオフライン用の小さいコピー（libopus つきのもの）。`sudo apt install ffmpeg`、`brew install ffmpeg`、Windows は ffmpeg.org/download.html から入れ、その `bin` フォルダを `PATH` に足す。
+  - または `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` にプログラムの場所を入れる。入れなければ `PATH`、続けて `/opt/homebrew/bin` と `/usr/local/bin`（macOS）または `/usr/local/bin`（Linux）を探す。ページの「もう一度確かめる」で探し直す。
+- Windows での既知の制限：バックグラウンドのサービスはログオン時にコンソールの窓を開き、それを閉じるとサーバーが止まる（今の desktop アプリはコンソールのプログラムのため。後の版で直す。corundum-framework#89）。
 
 ## photos クライアントからのアップロード
 

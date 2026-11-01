@@ -11,6 +11,9 @@ pub enum ServerError {
     LibraryUnavailable(String),
     #[error("invalid path: {0}")]
     InvalidPath(String),
+    /// The API keys' store.
+    #[error("api keys: {0}")]
+    Keys(#[from] corundum_framework::keys::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

@@ -64,5 +64,7 @@ async fn token_not_logged() {
     assert!(log.contains("busy"), "refused write was not logged: {log}");
     assert!(!log.contains(bad));
     assert!(!log.contains(t.as_str()));
-    assert!(!log.contains(&asteria_framework_server::token_hash(t)));
+    let hash = blake3::hash(t.as_bytes()).to_hex();
+    assert!(!log.contains(hash.as_str()));
+    assert!(!log.contains(&e.other_token));
 }

@@ -1,5 +1,5 @@
 //! The Asteria Photos server as a library: [`spec`] is what `asteria-photos` (headless) and
-//! `asteria-photos-desktop` hand to the shared command line (`init`, `token add`, `serve`).
+//! `asteria-photos-desktop` hand to the shared command line (`init`, `api-key`, `serve`).
 
 use std::sync::Arc;
 

@@ -11,7 +11,7 @@
 //! encode never holds up a thumbnail.
 
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,6 +27,117 @@ use tokio::sync::{Semaphore, watch};
 pub const VIPSTHUMBNAIL_ENV: &str = "ASTERIA_VIPSTHUMBNAIL";
 /// Environment variable naming the `ffmpeg` executable.
 pub const FFMPEG_ENV: &str = "ASTERIA_FFMPEG";
+
+/// An external program the server runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    /// Image thumbnails (libvips-tools).
+    Vipsthumbnail,
+    /// Video thumbnails and offline audio.
+    Ffmpeg,
+}
+
+/// What to run for `tool`: the path in `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` if that is
+/// set, else the tool's name, which is looked up on `PATH`.
+pub fn tool_program(tool: Tool) -> OsString {
+    let (var, default) = match tool {
+        Tool::Vipsthumbnail => (VIPSTHUMBNAIL_ENV, "vipsthumbnail"),
+        Tool::Ffmpeg => (FFMPEG_ENV, "ffmpeg"),
+    };
+    std::env::var_os(var).unwrap_or_else(|| OsString::from(default))
+}
+
+/// Where `tool` is, without running it: [`tool_program`] as a path if it has a directory part,
+/// else the first `PATH` directory that holds it (on Windows also with a `PATHEXT` extension,
+/// at least `.exe`), else the first of [`well_known_dirs`] that does. `None` when it is not
+/// there.
+pub fn find_tool(tool: Tool) -> Option<PathBuf> {
+    find_program(
+        &tool_program(tool),
+        std::env::var_os("PATH").as_deref(),
+        &well_known_dirs(),
+    )
+}
+
+/// Directories tried after `PATH`: a GUI started from the Finder and a LaunchAgent get only
+/// `/usr/bin:/bin:/usr/sbin:/sbin`, which misses Homebrew's tools.
+fn well_known_dirs() -> Vec<PathBuf> {
+    if cfg!(target_os = "macos") {
+        vec!["/opt/homebrew/bin".into(), "/usr/local/bin".into()]
+    } else if cfg!(windows) {
+        Vec::new()
+    } else {
+        vec!["/usr/local/bin".into()]
+    }
+}
+
+/// [`find_tool`] for a given program, `PATH` value and directories tried after `PATH`.
+fn find_program(program: &OsStr, path_var: Option<&OsStr>, extra: &[PathBuf]) -> Option<PathBuf> {
+    let has_dir = Path::new(program).components().count() > 1
+        || program
+            .to_string_lossy()
+            .contains(['/', std::path::MAIN_SEPARATOR]);
+    if has_dir {
+        return is_file(Path::new(program)).then(|| PathBuf::from(program));
+    }
+    let path_dirs = path_var
+        .map(|p| std::env::split_paths(p).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for dir in path_dirs.iter().chain(extra) {
+        for candidate in candidates(dir, program) {
+            if is_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// What the [`Processor`] runs for `tool`: where [`find_tool`] finds it, else its bare name
+/// (so a missing tool fails as "not found" when a render needs it).
+fn tool_to_run(tool: Tool) -> OsString {
+    resolve_program(
+        tool_program(tool),
+        std::env::var_os("PATH").as_deref(),
+        &well_known_dirs(),
+    )
+}
+
+/// [`tool_to_run`] for a given program, `PATH` value and directories tried after `PATH`.
+fn resolve_program(program: OsString, path_var: Option<&OsStr>, extra: &[PathBuf]) -> OsString {
+    find_program(&program, path_var, extra)
+        .map(PathBuf::into_os_string)
+        .unwrap_or(program)
+}
+
+fn is_file(path: &Path) -> bool {
+    path.metadata().is_ok_and(|m| m.is_file())
+}
+
+#[cfg(windows)]
+fn candidates(dir: &Path, program: &OsStr) -> Vec<PathBuf> {
+    let exts = std::env::var("PATHEXT").unwrap_or_default();
+    let mut exts: Vec<String> = exts
+        .split(';')
+        .filter(|e| !e.is_empty())
+        .map(|e| e.to_ascii_lowercase())
+        .collect();
+    if !exts.iter().any(|e| e == ".exe") {
+        exts.push(".exe".into());
+    }
+    let mut out = vec![dir.join(program)];
+    for ext in exts {
+        let mut name = program.to_os_string();
+        name.push(ext);
+        out.push(dir.join(name));
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn candidates(dir: &Path, program: &OsStr) -> Vec<PathBuf> {
+    vec![dir.join(program)]
+}
 
 /// Queued or running renders allowed per render slot.
 const QUEUE_PER_JOB: usize = 32;
@@ -186,19 +297,17 @@ impl Drop for Unregister {
 }
 
 impl Processor {
-    /// Tools come from `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG`, else from `PATH`.
+    /// Tools come from `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG`, else from `PATH` or a
+    /// well-known directory (see [`find_tool`]); the path found is what runs.
     /// `thumbs_dir` must be absolute and must not contain `%` (vipsthumbnail expands it in
     /// output names); otherwise every render fails with an `Io` error.
     pub fn new(thumbs_dir: PathBuf, max_jobs: usize, timeout: Duration) -> Processor {
-        let tool = |var: &str, default: &str| {
-            std::env::var_os(var).unwrap_or_else(|| OsString::from(default))
-        };
         Processor::with_tools(
             thumbs_dir,
             max_jobs,
             timeout,
-            tool(VIPSTHUMBNAIL_ENV, "vipsthumbnail"),
-            tool(FFMPEG_ENV, "ffmpeg"),
+            tool_to_run(Tool::Vipsthumbnail),
+            tool_to_run(Tool::Ffmpeg),
         )
     }
 
@@ -741,5 +850,95 @@ async fn run_tool(
         _ => Err(ProcessError::Unprocessable(format!(
             "{name} produced no output"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tool_tests {
+    use super::*;
+
+    fn program(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn an_env_path_that_exists_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = program(dir.path(), "my-vips");
+        // The path has a directory part, so `PATH` is not consulted.
+        assert_eq!(find_program(tool.as_os_str(), None, &[]), Some(tool));
+    }
+
+    #[test]
+    fn an_env_path_that_does_not_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("nothing-here");
+        let on_path = std::env::join_paths([dir.path()]).unwrap();
+        assert_eq!(find_program(gone.as_os_str(), Some(&on_path), &[]), None);
+    }
+
+    #[test]
+    fn a_program_on_the_path_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = if cfg!(windows) { "vipsx.exe" } else { "vipsx" };
+        let tool = program(dir.path(), name);
+        let path = std::env::join_paths([dir.path()]).unwrap();
+        assert_eq!(
+            find_program(OsStr::new("vipsx"), Some(&path), &[]),
+            Some(tool)
+        );
+        assert_eq!(
+            find_program(OsStr::new("not-there"), Some(&path), &[]),
+            None
+        );
+        assert_eq!(find_program(OsStr::new("vipsx"), None, &[]), None);
+    }
+
+    #[test]
+    fn a_program_only_in_a_well_known_dir_is_found_after_the_path() {
+        let path_dir = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        let name = if cfg!(windows) { "vipsx.exe" } else { "vipsx" };
+        let tool = program(extra.path(), name);
+        let path = std::env::join_paths([path_dir.path()]).unwrap();
+        let extras = [extra.path().to_path_buf()];
+        assert_eq!(
+            find_program(OsStr::new("vipsx"), Some(&path), &extras),
+            Some(tool.clone())
+        );
+        // Without a PATH at all too.
+        assert_eq!(
+            find_program(OsStr::new("vipsx"), None, &extras),
+            Some(tool.clone())
+        );
+        // PATH comes first.
+        let on_path = program(path_dir.path(), name);
+        assert_eq!(
+            find_program(OsStr::new("vipsx"), Some(&path), &extras),
+            Some(on_path)
+        );
+    }
+
+    #[test]
+    fn the_processor_runs_the_resolved_path_or_else_the_bare_name() {
+        let extra = tempfile::tempdir().unwrap();
+        let name = if cfg!(windows) { "vipsx.exe" } else { "vipsx" };
+        let tool = program(extra.path(), name);
+        let extras = [extra.path().to_path_buf()];
+        assert_eq!(
+            resolve_program(OsString::from("vipsx"), None, &extras),
+            tool.into_os_string()
+        );
+        assert_eq!(
+            resolve_program(OsString::from("not-there"), None, &extras),
+            OsString::from("not-there")
+        );
     }
 }

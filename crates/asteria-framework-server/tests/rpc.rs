@@ -313,8 +313,9 @@ async fn folder_list_limits_and_paging() {
     assert_eq!(v2["result"]["items"][0]["path"], "bulk/f00600.jpg");
 }
 
+/// Every key acts as the owner: a rating made with one key is the rating every key sees.
 #[tokio::test]
-async fn ratings_are_per_user() {
+async fn every_key_rates_as_the_owner() {
     let e = env();
     let id = item_id(&e, "a.jpg");
     call(
@@ -326,15 +327,13 @@ async fn ratings_are_per_user() {
     .await;
     call(
         &e.app,
-        &e.guest_token,
+        &e.other_token,
         "media.update",
         json!({"id": id, "rating": 2}),
     )
     .await;
     let v = call(&e.app, &e.owner_token, "media.get", json!({"id": id})).await;
-    assert_eq!(v["result"]["rating"], 5);
-    let v = call(&e.app, &e.guest_token, "media.get", json!({"id": id})).await;
     assert_eq!(v["result"]["rating"], 2);
-    let v = call(&e.app, &e.guest_token, "folder.list", json!({"path": ""})).await;
+    let v = call(&e.app, &e.other_token, "folder.list", json!({"path": ""})).await;
     assert_eq!(v["result"]["items"][0]["rating"], 2);
 }

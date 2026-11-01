@@ -7,35 +7,37 @@
 `asteria-photos` is the server without a window, for hosts with no GUI. Install it with `cargo install --path photos/headless`; the desktop app (`asteria-photos-desktop`) runs the same commands.
 
 ```sh
-# Create the library (or adopt an existing one) and a config; prints the owner's token once.
-asteria-photos init --library ~/Pictures --owner me --config ~/.config/asteria/photos.toml
-# Add a token for another user listed in <library>/.asteria/users.toml.
-asteria-photos token add --config ~/.config/asteria/photos.toml --user <USER_ID>
+# Create the library (or adopt an existing one) and a config; prints the token of the key `owner` once.
+asteria-photos init --library ~/Pictures --owner me
+# Add a key (and print its token once) for another device.
+asteria-photos api-key add laptop
 # Serve (Ctrl-C stops it cleanly).
-asteria-photos serve --config ~/.config/asteria/photos.toml
+asteria-photos serve
 ```
 
+- The config is `<config dir>/asteria-photos/server.toml` unless `--config <file>` names another place (every command takes it). `api-key list|retire|restore|rotate` manage the keys; every key acts as the library's owner.
 - `init` refuses to overwrite an existing config unless you pass `--force`. Only the token goes to stdout.
 - The default address is `127.0.0.1:7810` (`init --listen` sets it; `serve --listen` overrides it).
 - The cache (index and thumbnails) lives in `$XDG_CACHE_HOME/asteria-photos/<library-id>/` (usually `~/.cache/...`) and can be deleted safely; ratings and tags live in the library's sidecar files.
 - The server's own state (the journal of operations, unfinished uploads, the server lock) lives in `$XDG_DATA_HOME/asteria-photos/<library-id>/` (usually `~/.local/share/...`), not in the library. The library's `.asteria/` holds only the library's own files (`library.toml`, `users.toml`, and later the trash and shared playlists).
-- `token add` writes the config only; a running server picks the new token up after a restart. `init --force` writes a new config, which replaces every existing token.
+- Keys are files in the data directory, so a key added with `api-key add` works without restarting a running server. `init --force` writes a new config and retires every existing key.
 - Tokens travel in clear text (plain HTTP). Expose the server only on a LAN or a VPN such as Tailscale, never directly on the internet.
 - One server per library on a host: `serve` holds a lock on `server.lock` in its data directory, and a second one on the same host exits with an error.
+- Upgrading from a version with `[[token]]` entries in the config: the first command that opens it imports them as API keys `token-1`, `token-2`… and rewrites the config without them (comments in the file are lost; if the file is read-only, the server warns and you remove the `[[token]]` entries by hand). The tokens keep working, but a token that was issued for another user now acts as the owner too.
 - Servers on different hosts may share one library (over NFS, say), such as a production server and a test server. Each has its own journal, cache and unfinished uploads. File watching does not see changes made from another NFS host; they appear after the periodic rescan (every 15 minutes) or `library.rescan`. The duplicate check on upload knows only what this server has scanned. Two servers of the same library on one host are not supported, since they would share the cache and data directories.
-- Thumbnails need `vipsthumbnail` (libvips-tools) and, for videos, `ffmpeg`. Set `RUST_LOG` to change log verbosity (default `info`).
+- Thumbnails need `vipsthumbnail` (libvips-tools) and, for videos, `ffmpeg`, found on `PATH` or named in `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG`. Set `RUST_LOG` to change log verbosity (default `info`).
 
 ## Running the music server
 
 `asteria-music` is the server without a window (`cargo install --path music/headless`); the desktop app (`asteria-music-desktop`) runs the same commands.
 
 ```sh
-# Create the library (or adopt an existing one) and a config; prints the owner's token once.
-asteria-music init --library ~/Music --owner me --config ~/.config/asteria/music.toml
-# Add a token for another user listed in <library>/.asteria/users.toml.
-asteria-music token add --config ~/.config/asteria/music.toml --user <USER_ID>
+# Create the library (or adopt an existing one) and a config; prints the token of the key `owner` once.
+asteria-music init --library ~/Music --owner me
+# Add a key (and print its token once) for another device.
+asteria-music api-key add laptop
 # Serve (Ctrl-C stops it cleanly).
-asteria-music serve --config ~/.config/asteria/music.toml
+asteria-music serve
 ```
 
 - The commands, the config, the token handling, the cache and data directories (`asteria-music` in place of `asteria-photos`), the lock and the plain-HTTP warning are the same as for the photos server above. The default address is `127.0.0.1:7811`.
@@ -54,7 +56,7 @@ Both servers speak the Model Context Protocol, so an AI agent can browse the lib
 claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Bearer <token>"
 ```
 
-- The endpoint is `<server URL>/mcp` (Streamable HTTP). The token is the same Bearer token the clients use; the agent acts as that token's user.
+- The endpoint is `<server URL>/mcp` (Streamable HTTP). The token is the same Bearer token the clients use; the agent acts as the library's owner.
 - The tools are the library, folder and item calls, `media_update` for ratings, tags and descriptions, `organize_apply` and its status, undo and history, and `media_preview` for thumbnails. The music server adds `album_list`, `album_get`, `artist_list`, `artist_get`, `playlist_list` and `playlist_get`.
 - What the agent changes is recorded in the journal as `agent`, and `organize_undo` takes a batch of file operations back. Metadata edits (`media_update`) are not batches and cannot be undone.
 
@@ -65,11 +67,11 @@ claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Beare
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev
 cargo run -p asteria-photos-desktop --release
 # The same binary with arguments is the server's command line: `asteria-photos serve`, say.
-cargo run -p asteria-photos-desktop --release -- serve --config ~/.config/asteria/photos.toml
+cargo run -p asteria-photos-desktop --release -- serve
 ```
 
 - The client browses a library served by `asteria-photos serve`; it does not need libvips or ffmpeg (the server makes the thumbnails).
-- On first start there is no server yet and Settings opens on the Servers page with the add form. Enter a name, the address (such as `http://192.168.1.10:7810`) and the access token that `init` (or `token add`) printed, press "Test connection" to check them, then Save. Open Library on the rail to see the photos.
+- On first start there is no server yet, and the window asks where your library is: on this computer (see [A server on this computer](#a-server-on-this-computer)), on another server, or later. For another server (or later), Settings opens on the Servers page with the add form. Enter a name, the address (such as `http://192.168.1.10:7810`) and the access token that `init` (or `api-key add`) printed, press "Test connection" to check them, then Save. Open Library on the rail to see the photos.
 - You can register several servers. The status bar (bottom right; on a narrow window only its icon) shows which one is in use and whether it is connected; pick another one from its menu to switch, or choose "Manage servers..." (Settings › Servers) to add, edit or delete. The server in use is remembered for the next start, and switching always starts at the library's root.
 - If the server cannot be reached, rejects the token or speaks an incompatible version, the library shows the reason with a "Try again" button; there is no offline cache yet.
 - Servers and tokens are stored in `servers.toml` in the app's config directory (`~/.config/asteria-photos/` on Linux, `~/Library/Application Support/asteria-photos/` on macOS, `%LOCALAPPDATA%\asteria-photos\` on Windows; an earlier version's settings under `%APPDATA%` move there on the first start). On Unix the file is readable only by you (mode 0600); the tokens are not stored in the OS keychain. Downloaded thumbnails are cached under the app's cache directory (`~/.cache/asteria-photos/` on Linux) and can be deleted safely.
@@ -83,14 +85,26 @@ cargo run -p asteria-photos-desktop --release -- serve --config ~/.config/asteri
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev libasound2-dev
 cargo run -p asteria-music-desktop --release
 # The same binary with arguments is the server's command line: `asteria-music serve`, say.
-cargo run -p asteria-music-desktop --release -- serve --config ~/.config/asteria/music.toml
+cargo run -p asteria-music-desktop --release -- serve
 ```
 
 - The client plays a library served by `asteria-music serve`; it does not need libvips or ffmpeg (the server makes the covers and the low-quality copies).
-- On first start there is no server yet and Settings opens on the Servers page with the add form. Enter a name, the address (such as `http://192.168.1.10:7811`) and the access token that `init` (or `token add`) printed, press "Test connection" to check them, then Save. Servers are registered, switched and stored as in the photos client (in `servers.toml`, under `asteria-music` in place of `asteria-photos`).
+- On first start the window asks where your library is, as in the photos client. For another server (or later), Settings opens on the Servers page with the add form. Enter a name, the address (such as `http://192.168.1.10:7811`) and the access token that `init` (or `api-key add`) printed, press "Test connection" to check them, then Save. Servers are registered, switched and stored as in the photos client (in `servers.toml`, under `asteria-music` in place of `asteria-photos`).
 - Pick an album, an artist or a playlist to see its tracks and play them. Playback starts before the file has been fully downloaded, and seeking to a position that has not arrived yet waits for that part.
 - "Play in low quality" is one setting for the whole app, saved in `playback.toml` in the app's config directory along with the volume. When it is on, the server converts each track to low-bitrate Ogg Opus (the offline copy, which needs `ffmpeg` with libopus on the server) and the client plays that; it is meant for slow connections. The first play of a track can show "Preparing" while the server converts it. A change takes effect from the next track you open.
 - Not there yet: showing the library by folder (#20), ratings (#19), shuffle and repeat (#17), gapless playback (#18), and the media keys (`sapphire-turtle/corundum-framework#50`).
+
+## A server on this computer
+
+The desktop apps can set up a server for a folder on this computer, so one machine needs nothing else. The window still only connects to the server; the server is `asteria-photos serve` (or `asteria-music serve`) running in the background.
+
+- On first start, when no server is registered, choose "This computer" and pick the library's folder (a folder that is already a library is used as it is). The app writes the server's config to its default place, creates an API key named `desktop`, and registers the server as "This computer" (`http://127.0.0.1:7810`, or `:7811` for music) and uses it. It then offers to keep the server running in the background: a systemd user unit on Linux, a LaunchAgent on macOS, a logon task in the Task Scheduler on Windows. If you decline, start it yourself with `asteria-photos serve`. Last, it shows which external tools it found.
+- Settings › Local server shows the library and the address the server listens on, registers, starts, stops or removes the background service, manages the library's API keys (add one for each phone or other computer, retire one you no longer use), and shows the external tools. Without a local server yet, its "Set up a local server" button runs the first-start steps again.
+- The server makes thumbnails and smaller copies with external tools; without them it still runs, just without those. Install them where the server runs:
+  - `vipsthumbnail` (from libvips), for image thumbnails and covers: `sudo apt install libvips-tools` (Debian/Ubuntu; other distributions name the package similarly), `brew install vips` on macOS, or on Windows the libvips build from github.com/libvips/build-win64-mxe/releases with its `bin` folder added to `PATH`.
+  - `ffmpeg`, for video thumbnails and music's smaller offline copies (built with libopus): `sudo apt install ffmpeg`, `brew install ffmpeg`, or on Windows a build from ffmpeg.org/download.html with its `bin` folder added to `PATH`.
+  - Or point `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` at the programs. Otherwise they are looked for on `PATH`, then in `/opt/homebrew/bin` and `/usr/local/bin` (macOS) or `/usr/local/bin` (Linux). "Check again" on the page looks for them again.
+- Known limitation on Windows: the background service opens a console window at logon, and closing it stops the server (the desktop app is a console program for now; a later version fixes this, corundum-framework#89).
 
 ## Uploading from the photos client
 

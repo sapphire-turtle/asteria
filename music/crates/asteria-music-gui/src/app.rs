@@ -17,6 +17,7 @@ use asteria_framework_client::errors::{error_detail, error_text};
 use asteria_framework_client::profiles::{ProfileId, Profiles, ServerProfile, Token};
 use asteria_framework_client::saver::Saver;
 use asteria_framework_client::session::{SessionDirs, SessionState};
+use asteria_framework_client::settings::ExtraSettingsPage;
 use asteria_framework_client::settings::servers::{ServersChange, ServersPage};
 use asteria_framework_client::widgets::server_switcher::{ServerSwitcher, SwitcherAction};
 use asteria_music_api::{AlbumId, ArtistId, PlaylistId};
@@ -44,6 +45,8 @@ pub enum Screen {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Servers,
+    /// The page at this index of [`State::extra_pages`].
+    Extra(usize),
     Playback,
 }
 
@@ -75,6 +78,8 @@ struct State {
     profiles: Profiles,
     connection: Option<Connection>,
     servers_page: ServersPage,
+    /// The pages handed in from outside, listed after the servers.
+    extra_pages: Vec<Box<dyn ExtraSettingsPage>>,
     playback_page: PlaybackPage,
     playback_saver: Option<Saver<PlaybackSettings>>,
     /// Whether the player was handed the connection's endpoint.
@@ -172,6 +177,7 @@ impl MusicApp {
             profiles,
             connection: None,
             servers_page,
+            extra_pages: Vec::new(),
             playback_page: PlaybackPage::new(playback),
             playback_saver,
             endpoint_sent: false,
@@ -190,6 +196,13 @@ impl MusicApp {
         let mut app = MusicApp { shell, state };
         app.apply_open_screen();
         app
+    }
+
+    /// The app with `pages` added to Settings, after the servers (the desktop's "Local
+    /// server", say).
+    pub fn with_extra_settings(mut self, pages: Vec<Box<dyn ExtraSettingsPage>>) -> MusicApp {
+        self.state.extra_pages = pages;
+        self
     }
 
     /// Draw one frame into the window's root `ui`, after taking in what arrived.
@@ -660,22 +673,28 @@ impl State {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        let items = [
-            ListItem::Entry {
-                page: Page::Servers,
-                label: self.servers_page.label(ui.ctx()),
-                dirty: self.servers_page.dirty(),
-            },
-            ListItem::Entry {
-                page: Page::Playback,
-                label: self.playback_page.label(ui.ctx()),
-                dirty: false,
-            },
-        ];
+        let mut items = vec![ListItem::Entry {
+            page: Page::Servers,
+            label: self.servers_page.label(ui.ctx()),
+            dirty: self.servers_page.dirty(),
+        }];
+        items.extend(
+            self.extra_pages
+                .iter()
+                .enumerate()
+                .map(|(i, p)| ListItem::entry(Page::Extra(i), p.label(ui.ctx()))),
+        );
+        items.push(ListItem::Entry {
+            page: Page::Playback,
+            label: self.playback_page.label(ui.ctx()),
+            dirty: false,
+        });
         let page = &mut self.servers_page;
+        let extra = &mut self.extra_pages;
         let playback = &mut self.playback_page;
         self.settings.ui(ui, &items, |ui, open| match open {
             Page::Servers => page.ui(ui),
+            Page::Extra(i) => extra[i].ui(ui),
             Page::Playback => playback.ui(ui),
         });
         if self.playback_page.take_change().is_some() {

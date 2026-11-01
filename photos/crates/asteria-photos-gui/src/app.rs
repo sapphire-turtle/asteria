@@ -20,6 +20,7 @@ use asteria_framework_client::profiles::{ProfileId, Profiles};
 use asteria_framework_client::profiles::{ServerProfile, Token};
 use asteria_framework_client::saver::Saver;
 use asteria_framework_client::session::{SessionDirs, SessionState};
+use asteria_framework_client::settings::ExtraSettingsPage;
 use asteria_framework_client::settings::servers::{ServersChange, ServersPage};
 use asteria_framework_client::widgets::server_switcher::{ServerSwitcher, SwitcherAction};
 use corundum_framework::egui;
@@ -42,6 +43,8 @@ pub enum Screen {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Servers,
+    /// The page at this index of [`State::extra_pages`].
+    Extra(usize),
 }
 
 /// Where the app keeps its files.
@@ -70,6 +73,8 @@ struct State {
     profiles: Profiles,
     connection: Option<Connection>,
     servers_page: ServersPage,
+    /// The pages handed in from outside, listed after the servers.
+    extra_pages: Vec<Box<dyn ExtraSettingsPage>>,
     settings: SettingsLayout<Page>,
     /// `None` when `servers.toml` could not be read (saving would overwrite it) or the save
     /// thread could not start; [`State::save_blocked`] says why.
@@ -143,6 +148,7 @@ impl PhotosApp {
             profiles,
             connection: None,
             servers_page,
+            extra_pages: Vec::new(),
             settings: SettingsLayout::new(),
             saver,
             save_blocked,
@@ -159,6 +165,13 @@ impl PhotosApp {
         let mut app = PhotosApp { shell, state };
         app.apply_open_screen();
         app
+    }
+
+    /// The app with `pages` added to Settings, after the servers (the desktop's "Local
+    /// server", say).
+    pub fn with_extra_settings(mut self, pages: Vec<Box<dyn ExtraSettingsPage>>) -> PhotosApp {
+        self.state.extra_pages = pages;
+        self
     }
 
     /// Draw one frame into the window's root `ui`, after taking in what arrived.
@@ -503,14 +516,22 @@ impl State {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        let items = [ListItem::Entry {
+        let mut items = vec![ListItem::Entry {
             page: Page::Servers,
             label: self.servers_page.label(ui.ctx()),
             dirty: self.servers_page.dirty(),
         }];
+        items.extend(
+            self.extra_pages
+                .iter()
+                .enumerate()
+                .map(|(i, p)| ListItem::entry(Page::Extra(i), p.label(ui.ctx()))),
+        );
         let page = &mut self.servers_page;
+        let extra = &mut self.extra_pages;
         self.settings.ui(ui, &items, |ui, open| match open {
             Page::Servers => page.ui(ui),
+            Page::Extra(i) => extra[i].ui(ui),
         });
     }
 

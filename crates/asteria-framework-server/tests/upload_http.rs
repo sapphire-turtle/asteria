@@ -143,25 +143,25 @@ async fn non_numeric_chunk_is_400() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
 
+/// Every key acts as the owner, so a session begun with one key goes on with another.
 #[tokio::test]
-async fn other_users_session_is_404() {
+async fn another_key_continues_the_owners_session() {
     let e = env();
     let bytes = big_jpeg(&e, 1000);
     let session = begin(&e, &e.owner_token, &bytes).await;
     let uri = format!("/upload/{session}/0");
     assert_eq!(
-        put(&e.app, Some(&e.guest_token), &uri, bytes.clone()).await,
-        StatusCode::NOT_FOUND
-    );
-    for method in ["upload.status", "upload.abort"] {
-        let v = call(&e.app, &e.guest_token, method, json!({"session": session})).await;
-        assert_eq!(code(&v), -32001, "{method}: {v}");
-    }
-    // Still the owner's, untouched.
-    assert_eq!(
-        put(&e.app, Some(&e.owner_token), &uri, bytes).await,
+        put(&e.app, Some(&e.other_token), &uri, bytes).await,
         StatusCode::NO_CONTENT
     );
+    let v = call(
+        &e.app,
+        &e.other_token,
+        "upload.status",
+        json!({"session": session}),
+    )
+    .await;
+    assert!(v.get("error").is_none(), "{v}");
 }
 
 #[tokio::test]

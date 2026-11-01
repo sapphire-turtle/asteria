@@ -247,7 +247,8 @@ mod linux {
         assert!(!std::fs::read_to_string(&config).unwrap().contains(&token));
         assert_eq!(mode(&config), 0o600);
 
-        // A refused init leaves the config untouched; --force replaces it (with a new token).
+        // A refused init leaves the config untouched; --force writes it again (it holds no
+        // tokens, so it is the same) and gives the key `owner` a new token.
         let before = std::fs::read(&config).unwrap();
         assert!(!init(false).status.success());
         assert_eq!(std::fs::read(&config).unwrap(), before);
@@ -259,27 +260,20 @@ mod linux {
         );
         let forced = String::from_utf8(out.stdout).unwrap().trim().to_owned();
         assert_ne!(forced, token);
-        assert_ne!(std::fs::read(&config).unwrap(), before);
+        assert_eq!(std::fs::read(&config).unwrap(), before);
         assert_eq!(mode(&config), 0o600);
         let token = forced;
 
-        // token add: the owner gets a second working token; unknown users are refused.
-        let token_add = |user: &str| {
+        // api-key add: a second key, whose token alone goes to stdout; a taken name is refused.
+        let key_add = |name: &str| {
             env.command()
-                .args(["token", "add", "--config"])
+                .args(["api-key", "add", "--config"])
                 .arg(&config)
-                .args(["--user", user])
+                .arg(name)
                 .output()
                 .unwrap()
         };
-        let users = std::fs::read_to_string(lib.join(".asteria/users.toml")).unwrap();
-        let owner_id = users
-            .lines()
-            .find_map(|l| l.strip_prefix("id = "))
-            .unwrap()
-            .trim_matches('"')
-            .to_owned();
-        let out = token_add(&owner_id);
+        let out = key_add("phone");
         assert!(
             out.status.success(),
             "{}",
@@ -287,9 +281,10 @@ mod linux {
         );
         let second = String::from_utf8(out.stdout).unwrap();
         assert_eq!(second.lines().count(), 1, "stdout: {second:?}");
-        assert_ne!(second.trim(), token);
-        let stranger = asteria_framework::UserId(grain_id::GrainId::random()).to_string();
-        assert!(!token_add(&stranger).status.success());
+        let second = second.trim().to_owned();
+        assert!(second.starts_with("asteria-photos-"), "{second}");
+        assert_ne!(second, token);
+        assert!(!key_add("phone").status.success());
 
         let listen = format!("127.0.0.1:{}", free_port());
         let api = Api {

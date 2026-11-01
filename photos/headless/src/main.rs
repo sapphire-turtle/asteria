@@ -1,4 +1,4 @@
-//! `asteria-photos`: the Asteria Photos server's command line (`init`, `token add`, `serve`), for
+//! `asteria-photos`: the Asteria Photos server's command line (`init`, `api-key`, `serve`), for
 //! hosts without a window.
 
 fn main() {

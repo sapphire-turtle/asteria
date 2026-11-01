@@ -15,10 +15,11 @@ path = "src/main.rs"
 
 [dependencies]
 asteria-framework-client = { path = "../../crates/asteria-framework-client" }
+asteria-framework-desktop = { path = "../../crates/asteria-framework-desktop" }
 asteria-framework-server = { path = "../../crates/asteria-framework-server" }
 asteria-photos-gui = { path = "../crates/asteria-photos-gui" }
 asteria-photos-server = { path = "../crates/asteria-photos-server" }
-corundum-framework = { workspace = true, features = ["gui", "serde", "eframe"] }
+corundum-framework = { workspace = true, features = ["gui", "serde", "eframe", "service"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [dev-dependencies]
