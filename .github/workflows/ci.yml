@@ -30,5 +30,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check the client libraries for iOS
-        run: cargo check -p asteria-framework-client -p asteria-photos-mobile -p asteria-music-mobile --target aarch64-apple-ios --locked
+      # On its own: checked together with the apps, Cargo would unify features and the
+      # client library would be built with eframe, which it must not need (spec §9).
+      - name: Check the client library for iOS
+        run: cargo check -p asteria-framework-client --target aarch64-apple-ios --locked
+
+      - name: Check the phone apps for iOS
+        run: cargo check -p asteria-photos-mobile -p asteria-music-mobile --target aarch64-apple-ios --locked
