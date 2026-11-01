@@ -1,5 +1,5 @@
 //! The Asteria Music server as a library: [`spec`] is what `asteria-music` (headless) and
-//! `asteria-music-desktop` hand to the shared command line (`init`, `token add`, `serve`).
+//! `asteria-music-desktop` hand to the shared command line (`init`, `api-key`, `serve`).
 
 mod cover;
 mod ext;

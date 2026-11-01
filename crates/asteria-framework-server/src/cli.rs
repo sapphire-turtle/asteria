@@ -1,4 +1,4 @@
-//! The command line shared by the Asteria servers: `init`, `token add` and `serve`, with the
+//! The command line shared by the Asteria servers: `init`, `api-key` and `serve`, with the
 //! serve runtime (instance lock, upload purge, shutdown). An app supplies an [`AppSpec`].
 
 use std::error::Error;
@@ -9,19 +9,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::{Duration, SystemTime};
 
+use asteria_framework::Library;
 use asteria_framework::fsutil::cleanup_tmp_files;
 use asteria_framework::paths::META_DIR;
-use asteria_framework::{Library, UserId};
-use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
+use clap::{Arg, ArgAction, ArgMatches, Command, FromArgMatches, Subcommand, value_parser};
+use corundum_framework::keys::{KeyCommand, KeyVerifier};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::upload::UploadStore;
 use crate::watch::{DEFAULT_DEBOUNCE, DEFAULT_PERIOD};
 use crate::{
-    AppExtension, AppState, Cache, Processor, ScanLoop, ServerConfig, TokenEntry, Tokens,
-    cache_dir_for, data_dir_for, new_token, router_with_shutdown, spawn_scan_loop, spawn_writer,
-    token_hash,
+    AppExtension, AppState, Cache, Processor, ScanLoop, ServerConfig, cache_dir_for, data_dir_for,
+    default_config_path, keys_dir_for, load_and_migrate, open_keys, router_with_shutdown,
+    spawn_scan_loop, spawn_writer,
 };
 
 type AnyResult<T> = Result<T, Box<dyn Error>>;
@@ -33,6 +34,8 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// How often stale upload sessions are looked for.
 const PURGE_PERIOD: Duration = Duration::from_secs(60 * 60);
 const LOCK_FILE: &str = "server.lock";
+/// The key `init` makes for the owner.
+const OWNER_KEY: &str = "owner";
 
 /// What differs between the apps' servers.
 pub struct AppSpec {
@@ -53,8 +56,11 @@ fn command(spec: &AppSpec) -> Command {
         Arg::new("config")
             .long("config")
             .value_name("CONFIG")
-            .required(true)
             .value_parser(value_parser!(PathBuf))
+            .help(format!(
+                "Config file [default: <config dir>/{}/server.toml]",
+                spec.app
+            ))
     };
     Command::new(name)
         .version(env!("CARGO_PKG_VERSION"))
@@ -63,7 +69,7 @@ fn command(spec: &AppSpec) -> Command {
         .arg_required_else_help(true)
         .subcommand(
             Command::new("init")
-                .about("Create (or adopt) a library and a config file, and print the owner's first token")
+                .about("Create (or adopt) a library and a config file, and print the token of the API key `owner`")
                 .arg(
                     Arg::new("library")
                         .long("library").value_name("LIBRARY")
@@ -77,7 +83,7 @@ fn command(spec: &AppSpec) -> Command {
                         .required(true)
                         .help("Owner's name, used when the library is created"),
                 )
-                .arg(config().help("Config file to write"))
+                .arg(config())
                 .arg(
                     Arg::new("listen")
                         .long("listen").value_name("LISTEN")
@@ -92,23 +98,13 @@ fn command(spec: &AppSpec) -> Command {
                         .help("Overwrite an existing config file"),
                 ),
         )
-        .subcommand(
-            Command::new("token")
-                .about("Manage access tokens")
+        .subcommand(KeyCommand::augment_subcommands(
+            Command::new("api-key")
+                .about("Manage the API keys; every key acts as the library's owner")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
-                .subcommand(
-                    Command::new("add")
-                        .about("Add a token for a user listed in the library's users.toml and print it")
-                        .arg(config())
-                        .arg(
-                            Arg::new("user")
-                                .long("user").value_name("USER")
-                                .required(true)
-                                .value_parser(value_parser!(UserId)),
-                        ),
-                ),
-        )
+                .arg(config().global(true)),
+        ))
         .subcommand(
             Command::new("serve")
                 .about("Run the server")
@@ -122,32 +118,42 @@ fn command(spec: &AppSpec) -> Command {
         )
 }
 
-fn dispatch(spec: &AppSpec, matches: &ArgMatches) -> AnyResult<()> {
+/// The `--config` given, or `<config dir>/<app>/server.toml`.
+fn config_path(spec: &AppSpec, m: &ArgMatches) -> AnyResult<PathBuf> {
+    match m.get_one::<PathBuf>("config") {
+        Some(path) => Ok(path.clone()),
+        None => Ok(default_config_path(spec.app)?),
+    }
+}
+
+/// Runs the command; the process's exit code.
+fn dispatch(spec: &AppSpec, matches: &ArgMatches) -> AnyResult<i32> {
     match matches.subcommand() {
         Some(("init", m)) => init(
+            spec,
             m.get_one::<PathBuf>("library").unwrap(),
             m.get_one::<String>("owner").unwrap(),
-            m.get_one::<PathBuf>("config").unwrap(),
+            &config_path(spec, m)?,
             *m.get_one::<SocketAddr>("listen").unwrap(),
             m.get_flag("force"),
+        )
+        .map(|()| 0),
+        Some(("api-key", m)) => api_key(
+            spec,
+            &config_path(spec, m)?,
+            KeyCommand::from_arg_matches(m)?,
         ),
-        Some(("token", m)) => match m.subcommand() {
-            Some(("add", m)) => token_add(
-                m.get_one::<PathBuf>("config").unwrap(),
-                *m.get_one::<UserId>("user").unwrap(),
-            ),
-            _ => unreachable!("subcommand_required"),
-        },
         Some(("serve", m)) => serve(
             spec,
-            m.get_one::<PathBuf>("config").unwrap(),
+            &config_path(spec, m)?,
             m.get_one::<SocketAddr>("listen").copied(),
-        ),
+        )
+        .map(|()| 0),
         _ => unreachable!("subcommand_required"),
     }
 }
 
-/// Parses the command line (init / token add / serve), moves the app's directories from
+/// Parses the command line (init / api-key / serve), moves the app's directories from
 /// Roaming to Local on Windows, and runs it; exits the process with 1 on error.
 pub fn main(spec: AppSpec) -> ! {
     let matches = command(&spec).get_matches();
@@ -166,14 +172,19 @@ pub fn main(spec: AppSpec) -> ! {
             std::process::exit(1);
         }
     }
-    if let Err(e) = dispatch(&spec, &matches) {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+    match dispatch(&spec, &matches) {
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
     }
-    std::process::exit(0)
 }
 
+/// Creates or adopts the library, makes (or, when it exists, rotates) the API key `owner`,
+/// writes the config, and prints the key's token, alone, on stdout.
 fn init(
+    spec: &AppSpec,
     library: &Path,
     owner: &str,
     config_path: &Path,
@@ -186,6 +197,16 @@ fn init(
             config_path.display()
         )
         .into());
+    }
+    if config_path.exists() {
+        // An older config's tokens become keys before the file is replaced; one that cannot
+        // be read does not stop `--force`.
+        if let Err(e) = load_and_migrate(spec.app, config_path) {
+            eprintln!(
+                "warning: {} could not be read ({e}); replacing it",
+                config_path.display()
+            );
+        }
     }
     std::fs::create_dir_all(library)?;
     let root = library.canonicalize()?;
@@ -203,35 +224,35 @@ fn init(
     if let Some(parent) = config_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    let token = new_token();
+    let mut keys = open_keys(spec.app, &lib.config().id)?;
+    let has_owner = keys
+        .list()
+        .iter()
+        .any(|k| k.name == OWNER_KEY && !k.is_retired());
+    let (_, token) = if has_owner {
+        // Only the key's token is ever shown, and only once: a new one replaces it.
+        let rotated = keys.rotate(OWNER_KEY)?;
+        eprintln!("the key `{OWNER_KEY}` existed; it has a new token now");
+        rotated
+    } else {
+        keys.add(OWNER_KEY, None, None)?
+    };
     let cfg = ServerConfig {
         library: root,
         listen,
-        token: vec![TokenEntry {
-            user: lib.owner(),
-            hash: token_hash(&token),
-        }],
     };
     cfg.save(config_path)?;
     eprintln!("wrote {}", config_path.display());
-    println!("{token}");
+    println!("{}", token.expose());
     Ok(())
 }
 
-fn token_add(config_path: &Path, user: UserId) -> AnyResult<()> {
-    let mut cfg = ServerConfig::load(config_path)?;
+/// Runs `command` on the API keys of the library the config at `config_path` names.
+fn api_key(spec: &AppSpec, config_path: &Path, command: KeyCommand) -> AnyResult<i32> {
+    let cfg = load_and_migrate(spec.app, config_path)?;
     let lib = Library::open(&cfg.library.canonicalize()?)?;
-    if !lib.users().user.iter().any(|u| u.id == user) {
-        return Err(format!("user {user} is not in the library's users.toml").into());
-    }
-    let token = new_token();
-    cfg.token.push(TokenEntry {
-        user,
-        hash: token_hash(&token),
-    });
-    cfg.save(config_path)?;
-    println!("{token}");
-    Ok(())
+    let mut keys = open_keys(spec.app, &lib.config().id)?;
+    Ok(command.run(&mut keys)?)
 }
 
 fn serve(spec: &AppSpec, config_path: &Path, listen: Option<SocketAddr>) -> AnyResult<()> {
@@ -241,7 +262,7 @@ fn serve(spec: &AppSpec, config_path: &Path, listen: Option<SocketAddr>) -> AnyR
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
-    let cfg = ServerConfig::load(config_path)?;
+    let cfg = load_and_migrate(spec.app, config_path)?;
     let listen = listen.unwrap_or(cfg.listen);
     let root = cfg.library.canonicalize()?;
     let library = Library::open(&root)?;
@@ -277,15 +298,22 @@ fn serve(spec: &AppSpec, config_path: &Path, listen: Option<SocketAddr>) -> AnyR
     }
     let processor = Arc::new(Processor::new(thumbs, RENDER_JOBS, RENDER_TIMEOUT));
     processor.sweep_tmp();
-    let tokens = Arc::new(Tokens::from_config(&cfg));
+    // Created when absent, so the verifier finds a directory; keys added to it later (by
+    // `api-key add`, another host, a sync) work without a restart.
+    let keys = open_keys(spec.app, &library.config().id)?;
+    if !keys.list().iter().any(|k| !k.is_retired()) {
+        tracing::warn!("there are no API keys yet; add one with `api-key add <name>`");
+    }
+    let keys = Arc::new(KeyVerifier::new(&keys_dir_for(
+        spec.app,
+        &library.config().id,
+    )?));
     let uploads = Arc::new(UploadStore::open(&data_dir)?);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = rt.block_on(run(
-        spec, library, cache, processor, tokens, uploads, listen,
-    ));
+    let result = rt.block_on(run(spec, library, cache, processor, keys, uploads, listen));
     // Connections cut off after the grace period may still have tasks; do not wait for them.
     rt.shutdown_timeout(Duration::from_secs(1));
     result
@@ -318,7 +346,7 @@ async fn run(
     library: Arc<Library>,
     cache: Arc<Cache>,
     processor: Arc<Processor>,
-    tokens: Arc<Tokens>,
+    keys: Arc<KeyVerifier>,
     uploads: Arc<UploadStore>,
     listen: SocketAddr,
 ) -> AnyResult<()> {
@@ -330,7 +358,7 @@ async fn run(
         library.clone(),
         cache.clone(),
         writer.clone(),
-        tokens,
+        keys,
         spec.app,
         spec.app_api,
         scanning.clone(),
@@ -478,6 +506,53 @@ async fn wait_for_signal() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Nothing;
+    impl AppExtension for Nothing {
+        fn accepts(&self, _: asteria_framework::MediaKind) -> bool {
+            false
+        }
+    }
+
+    fn spec() -> AppSpec {
+        AppSpec {
+            app: "asteria-test",
+            app_api: 1,
+            about: "test",
+            default_listen: "127.0.0.1:0",
+            extension: Arc::new(Nothing),
+        }
+    }
+
+    #[test]
+    fn config_is_optional_and_defaults_to_the_apps_config_dir() {
+        let spec = spec();
+        let m = command(&spec).try_get_matches_from(["x", "serve"]).unwrap();
+        let (_, m) = m.subcommand().unwrap();
+        assert_eq!(
+            config_path(&spec, m).unwrap(),
+            default_config_path("asteria-test").unwrap()
+        );
+    }
+
+    /// `--config` goes before or after the key command.
+    #[test]
+    fn api_key_takes_config_on_either_side() {
+        let spec = spec();
+        for args in [
+            ["x", "api-key", "--config", "/c.toml", "add", "phone"],
+            ["x", "api-key", "add", "phone", "--config", "/c.toml"],
+        ] {
+            let m = command(&spec).try_get_matches_from(args).unwrap();
+            let (name, m) = m.subcommand().unwrap();
+            assert_eq!(name, "api-key");
+            assert_eq!(config_path(&spec, m).unwrap(), Path::new("/c.toml"));
+            assert!(matches!(
+                KeyCommand::from_arg_matches(m).unwrap(),
+                KeyCommand::Add { name, .. } if name == "phone"
+            ));
+        }
+    }
 
     #[test]
     fn instance_lock_is_exclusive_until_released() {

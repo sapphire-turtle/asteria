@@ -12,10 +12,8 @@ asteria-framework-api = { path = "../asteria-framework-api" }
 serde.workspace = true
 toml.workspace = true
 thiserror.workspace = true
-blake3.workspace = true
-getrandom.workspace = true
 base64.workspace = true
-corundum-framework.workspace = true
+corundum-framework = { workspace = true, features = ["keys", "keys-clap"] }
 redb.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -34,6 +32,7 @@ tower = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
 
 [dev-dependencies]
+blake3.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 http-body-util.workspace = true

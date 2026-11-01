@@ -6,22 +6,39 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use asteria_framework::{Library, MediaKind, UserId};
+use asteria_framework::{Library, LibraryId, MediaKind};
+use asteria_framework_server::keys::KeyVerifier;
 use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
-    AppExtension, AppState, Cache, Processor, ServerConfig, TokenEntry, Tokens, new_token, router,
-    scan, spawn_writer, token_hash,
+    AppExtension, AppState, Cache, Processor, data_dir_for, keys_dir_for, open_keys, router, scan,
+    spawn_writer,
 };
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use grain_id::GrainId;
 use http_body_util::BodyExt;
 use rmcp::service::{RoleClient, RunningService, ServiceExt as _};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::{Value, json};
 use tower::ServiceExt;
+
+/// The app the test servers run as; names the directory of their keys.
+pub const APP: &str = "asteria-photos";
+
+/// Removes `<data_dir>/<app>/<library id>/` (where the keys are) when dropped: the tests'
+/// libraries are new, so the directory is theirs alone.
+pub struct DataDir(pub PathBuf);
+impl DataDir {
+    pub fn of(library: &LibraryId) -> DataDir {
+        DataDir(data_dir_for(APP, library).unwrap())
+    }
+}
+impl Drop for DataDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 pub struct Photos;
 impl AppExtension for Photos {
@@ -38,19 +55,30 @@ pub struct Env {
     pub app: Router,
     pub state: AppState,
     pub processor: Arc<Processor>,
+    /// The token of the key `owner`.
     pub owner_token: String,
-    pub guest_token: String,
-    pub guest: UserId,
+    /// The token of a second key, `other`; it acts as the owner too.
+    pub other_token: String,
     pub _rescan_rx: tokio::sync::mpsc::Receiver<()>,
+    pub _data: DataDir,
 }
 
 pub fn env() -> Env {
     env_with(|thumbs| Processor::new(thumbs, 2, Duration::from_secs(60)))
 }
 
+/// The same environment, with the key verifier trusting a success for `ttl`.
+pub fn env_ttl(ttl: Duration) -> Env {
+    env_full(
+        |thumbs| Processor::new(thumbs, 2, Duration::from_secs(60)),
+        Arc::new(Photos),
+        Some(ttl),
+    )
+}
+
 /// `make` gets the thumbs directory (inside the cache directory) and builds the processor.
 pub fn env_with(make: impl FnOnce(PathBuf) -> Processor) -> Env {
-    env_full(make, Arc::new(Photos))
+    env_full(make, Arc::new(Photos), None)
 }
 
 /// The same environment served by `ext`.
@@ -58,10 +86,16 @@ pub fn env_ext(ext: Arc<dyn AppExtension>) -> Env {
     env_full(
         |thumbs| Processor::new(thumbs, 2, Duration::from_secs(60)),
         ext,
+        None,
     )
 }
 
-fn env_full(make: impl FnOnce(PathBuf) -> Processor, ext: Arc<dyn AppExtension>) -> Env {
+/// `ttl`: how long the key verifier trusts a success; its default when `None`.
+fn env_full(
+    make: impl FnOnce(PathBuf) -> Processor,
+    ext: Arc<dyn AppExtension>,
+    ttl: Option<Duration>,
+) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("lib");
     fs::create_dir(&root).unwrap();
@@ -79,22 +113,15 @@ fn env_full(make: impl FnOnce(PathBuf) -> Processor, ext: Arc<dyn AppExtension>)
     scan(&lib, &cache, ext.as_ref()).unwrap();
     let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
 
-    let owner_token = new_token();
-    let guest_token = new_token();
-    let guest = UserId(GrainId::random());
-    let cfg = ServerConfig {
-        library: root.clone(),
-        listen: SocketAddr::from(([127, 0, 0, 1], 0)),
-        token: vec![
-            TokenEntry {
-                user: lib.owner(),
-                hash: token_hash(&owner_token),
-            },
-            TokenEntry {
-                user: guest,
-                hash: token_hash(&guest_token),
-            },
-        ],
+    let id = lib.config().id;
+    let data = DataDir::of(&id);
+    let mut keys = open_keys(APP, &id).unwrap();
+    let owner_token = keys.add("owner", None, None).unwrap().1.expose().to_owned();
+    let other_token = keys.add("other", None, None).unwrap().1.expose().to_owned();
+    let verifier = KeyVerifier::new(&keys_dir_for(APP, &id).unwrap());
+    let verifier = match ttl {
+        Some(ttl) => verifier.cache_ttl(ttl),
+        None => verifier,
     };
     let processor = Arc::new(make(dir.path().join("cache/thumbs")));
     let (rescan, rescan_rx) = tokio::sync::mpsc::channel(1);
@@ -102,8 +129,8 @@ fn env_full(make: impl FnOnce(PathBuf) -> Processor, ext: Arc<dyn AppExtension>)
         lib.clone(),
         cache.clone(),
         writer,
-        Arc::new(Tokens::from_config(&cfg)),
-        "asteria-photos",
+        Arc::new(verifier),
+        APP,
         1,
         Arc::new(AtomicBool::new(false)),
         rescan,
@@ -120,9 +147,9 @@ fn env_full(make: impl FnOnce(PathBuf) -> Processor, ext: Arc<dyn AppExtension>)
         state,
         processor,
         owner_token,
-        guest_token,
-        guest,
+        other_token,
         _rescan_rx: rescan_rx,
+        _data: data,
     }
 }
 

@@ -1,57 +1,57 @@
-use asteria_framework::UserId;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+//! Bearer-token authentication against the library's API keys. Every key acts as the
+//! library's owner; the key's own `subject` is not used.
 
-use crate::config::ServerConfig;
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use corundum_framework::keys::Verdict;
 
-const HASH_PREFIX: &str = "blake3:";
+use crate::state::AppState;
 
-/// A fresh random bearer token: 32 random bytes as unpadded base64url (43 characters).
-pub fn new_token() -> String {
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).expect("system random source unavailable");
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
-/// The value stored in the server config for a token: `blake3:<hex>`.
-pub fn token_hash(token: &str) -> String {
-    format!("{HASH_PREFIX}{}", blake3::hash(token.as_bytes()).to_hex())
-}
-
-fn parse_hash(s: &str) -> Option<blake3::Hash> {
-    s.strip_prefix(HASH_PREFIX)?.parse().ok()
-}
-
-pub(crate) fn is_valid_hash(s: &str) -> bool {
-    parse_hash(s).is_some()
-}
-
-/// Verifies presented bearer tokens against the hashes in the server config.
-pub struct Tokens {
-    entries: Vec<(UserId, blake3::Hash)>,
-}
-
-impl Tokens {
-    /// Entries whose hash is malformed can never match and are skipped.
-    pub fn from_config(config: &ServerConfig) -> Tokens {
-        let entries = config
-            .token
-            .iter()
-            .filter_map(|e| Some((e.user, parse_hash(&e.hash)?)))
-            .collect();
-        Tokens { entries }
-    }
-
-    /// Returns the user whose stored hash matches. `blake3::Hash` equality is constant-time,
-    /// and every entry is checked so timing does not reveal which one matched.
-    pub fn verify(&self, presented: &str) -> Option<UserId> {
-        let presented = blake3::hash(presented.as_bytes());
-        let mut found = None;
-        for (user, hash) in &self.entries {
-            if *hash == presented {
-                found = Some(*user);
-            }
+/// Requires `Authorization: Bearer <token>` of an unretired key; on success stores the owner's
+/// `UserId` in the request extensions. Anything else is a 401 with an empty body and
+/// `WWW-Authenticate: Bearer`. Neither the header nor the token is ever logged.
+pub(crate) async fn authenticate(
+    State(state): State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let token = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(bearer_token)
+        .map(str::to_owned);
+    let accepted = match token {
+        // The verifier reads the key files on a cache miss.
+        Some(token) => {
+            let verifier = state.keys().clone();
+            matches!(
+                tokio::task::spawn_blocking(move || verifier.verify(&token)).await,
+                Ok(Verdict::Accepted(_))
+            )
         }
-        found
+        None => false,
+    };
+    if accepted {
+        req.extensions_mut().insert(state.library().owner());
+        next.run(req).await
+    } else {
+        unauthorized()
     }
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"))],
+    )
+        .into_response()
+}
+
+/// The token of a `Bearer <token>` value; the scheme is case-insensitive (RFC 7235).
+fn bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("Bearer").then_some(token)
 }

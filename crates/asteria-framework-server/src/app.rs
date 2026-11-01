@@ -1,18 +1,17 @@
-//! The axum router and its bearer-token authentication.
+//! The axum router, behind the API keys' authentication ([`crate::auth`]).
 
 use std::sync::Arc;
 
 use asteria_framework_api::UPLOAD_CHUNK_SIZE;
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::{StatusCode, header};
-use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::extract::DefaultBodyLimit;
+use axum::middleware;
 use axum::routing::{get, post, put};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio_util::sync::CancellationToken;
 
+use crate::auth::authenticate;
 use crate::mcp::AsteriaMcp;
 use crate::media_http::media;
 use crate::rpc::rpc;
@@ -58,29 +57,4 @@ pub fn router_with_shutdown(state: AppState, shutdown: CancellationToken) -> Rou
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state)
-}
-
-/// Requires `Authorization: Bearer <token>`; on success stores the `UserId` in the request
-/// extensions. Anything else is a 401 with an empty body. Neither the header nor the token is
-/// ever logged.
-async fn authenticate(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
-    let user = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(bearer_token)
-        .and_then(|token| state.tokens().verify(token));
-    match user {
-        Some(user) => {
-            req.extensions_mut().insert(user);
-            next.run(req).await
-        }
-        None => StatusCode::UNAUTHORIZED.into_response(),
-    }
-}
-
-/// The token of a `Bearer <token>` value; the scheme is case-insensitive (RFC 7235).
-fn bearer_token(value: &str) -> Option<&str> {
-    let (scheme, token) = value.split_once(' ')?;
-    scheme.eq_ignore_ascii_case("Bearer").then_some(token)
 }

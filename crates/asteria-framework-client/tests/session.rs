@@ -17,10 +17,10 @@ use asteria_framework_client::rpc::ClientError;
 use asteria_framework_client::session::{
     Reply, Request, RequestId, Response, Session, SessionDirs, SessionState,
 };
+use asteria_framework_server::keys::{KeyStore, KeyVerifier};
 use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
-    AppExtension, AppState, Cache, Processor, ServerConfig, TokenEntry, Tokens, new_token, router,
-    scan, spawn_writer, token_hash,
+    AppExtension, AppState, Cache, Processor, router, scan, spawn_writer,
 };
 use corundum_framework::egui;
 use serde_json::json;
@@ -62,15 +62,15 @@ impl TestServer {
             .join("../asteria-framework/tests/fixtures/red.jpg");
         std::fs::copy(&red, root.join("a.jpg")).unwrap();
         scan(&lib, &cache, &Photos).unwrap();
-        let token = new_token();
-        let cfg = ServerConfig {
-            library: root,
-            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
-            token: vec![TokenEntry {
-                user: lib.owner(),
-                hash: token_hash(&token),
-            }],
-        };
+        // The keys live in the temporary directory, not in the app's data directory.
+        let keys = dir.path().join("keys");
+        let token = KeyStore::open(&keys)
+            .unwrap()
+            .add("owner", None, None)
+            .unwrap()
+            .1
+            .expose()
+            .to_owned();
         let processor = Arc::new(Processor::new(
             dir.path().join("cache/thumbs"),
             1,
@@ -89,7 +89,7 @@ impl TestServer {
                 lib,
                 cache,
                 writer,
-                Arc::new(Tokens::from_config(&cfg)),
+                Arc::new(KeyVerifier::new(&keys)),
                 asteria_photos_api::APP,
                 asteria_photos_api::APP_API,
                 Arc::new(AtomicBool::new(false)),

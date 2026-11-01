@@ -8,7 +8,7 @@ fn help_lists_the_server_commands() {
         .unwrap();
     assert!(out.status.success(), "{out:?}");
     let text = String::from_utf8(out.stdout).unwrap();
-    for command in ["init", "token", "serve"] {
+    for command in ["init", "api-key", "serve"] {
         assert!(text.contains(command), "{command} missing from:\n{text}");
     }
 }

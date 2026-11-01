@@ -18,7 +18,6 @@ asteria-photos-server = { path = "../crates/asteria-photos-server" }
 
 [dev-dependencies]
 asteria-framework = { path = "../../crates/asteria-framework" }
-grain-id.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

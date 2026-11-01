@@ -18,10 +18,10 @@ use asteria_framework_client::rpc::{ClientError, RpcClient};
 use asteria_framework_client::session::{Session, SessionDirs, SessionState};
 use asteria_framework_client::upload::queue::{GroupState, QueuedGroup, UploadQueue, queue_path};
 use asteria_framework_client::upload::{UploadSnapshot, UploadsState, set_retry_backoff};
+use asteria_framework_server::keys::{KeyStore, KeyVerifier};
 use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
-    AppExtension, AppState, Cache, Processor, ServerConfig, TokenEntry, Tokens, hash_pending,
-    new_token, router, scan, spawn_writer, token_hash,
+    AppExtension, AppState, Cache, Processor, hash_pending, router, scan, spawn_writer,
 };
 use axum::http::{Method, StatusCode};
 use corundum_framework::egui;
@@ -102,15 +102,15 @@ impl TestServer {
         fs::write(root.join("a.jpg"), fixture("red.jpg")).unwrap();
         scan(&lib, &cache, &Photos).unwrap();
         hash_pending(&lib, &cache, &AtomicBool::new(false)).unwrap();
-        let token = new_token();
-        let cfg = ServerConfig {
-            library: root,
-            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
-            token: vec![TokenEntry {
-                user: lib.owner(),
-                hash: token_hash(&token),
-            }],
-        };
+        // The keys live in the temporary directory, not in the app's data directory.
+        let keys = dir.path().join("keys");
+        let token = KeyStore::open(&keys)
+            .unwrap()
+            .add("owner", None, None)
+            .unwrap()
+            .1
+            .expose()
+            .to_owned();
         let processor = Arc::new(Processor::new(
             dir.path().join("cache/thumbs"),
             1,
@@ -131,7 +131,7 @@ impl TestServer {
                 lib,
                 cache,
                 writer,
-                Arc::new(Tokens::from_config(&cfg)),
+                Arc::new(KeyVerifier::new(&keys)),
                 asteria_photos_api::APP,
                 asteria_photos_api::APP_API,
                 Arc::new(AtomicBool::new(false)),

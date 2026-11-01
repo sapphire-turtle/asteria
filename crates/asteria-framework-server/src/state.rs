@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use asteria_framework::Library;
+use corundum_framework::keys::KeyVerifier;
 use tokio::sync::mpsc;
 
-use crate::auth::Tokens;
 use crate::cache::Cache;
 use crate::ext::AppExtension;
 use crate::process::Processor;
@@ -22,7 +22,7 @@ pub struct AppState {
     canonical_root: Arc<PathBuf>,
     cache: Arc<Cache>,
     writer: Writer,
-    tokens: Arc<Tokens>,
+    keys: Arc<KeyVerifier>,
     app: &'static str,
     app_api: u32,
     scanning: Arc<AtomicBool>,
@@ -34,13 +34,14 @@ pub struct AppState {
 
 impl AppState {
     /// `scanning` is set by whoever runs scans; `rescan` asks that task for another scan.
-    /// Also makes `processor` record unprocessable renders in `cache`.
+    /// Also makes `processor` record unprocessable renders in `cache`. `keys` checks the
+    /// bearer tokens; every key acts as the library's owner.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         library: Arc<Library>,
         cache: Arc<Cache>,
         writer: Writer,
-        tokens: Arc<Tokens>,
+        keys: Arc<KeyVerifier>,
         app: &'static str,
         app_api: u32,
         scanning: Arc<AtomicBool>,
@@ -64,7 +65,7 @@ impl AppState {
             library,
             cache,
             writer,
-            tokens,
+            keys,
             app,
             app_api,
             scanning,
@@ -94,8 +95,9 @@ impl AppState {
     pub fn set_organize_wait(&self, wait: std::time::Duration) {
         self.writer.set_organize_wait(wait);
     }
-    pub fn tokens(&self) -> &Tokens {
-        &self.tokens
+    /// The verifier of the library's API keys.
+    pub fn keys(&self) -> &Arc<KeyVerifier> {
+        &self.keys
     }
     pub fn app(&self) -> &'static str {
         self.app

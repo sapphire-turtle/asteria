@@ -113,9 +113,9 @@ async fn media_update_is_recorded_as_the_agent() {
 }
 
 #[tokio::test]
-async fn media_update_by_another_user_rates_for_that_user() {
+async fn media_update_with_another_key_acts_for_the_owner() {
     let e = env();
-    let client = connect_as(&e, &e.guest_token).await;
+    let client = connect_as(&e, &e.other_token).await;
     let id = item_id(&e, "a.jpg");
     let r = tool(&client, "media_update", json!({"id": id, "rating": 2})).await;
     assert_eq!(ok_json(&r)["rating"], 2);
@@ -126,14 +126,14 @@ async fn media_update_by_another_user_rates_for_that_user() {
             call(&e.app, &token, "media.get", json!({"id": id})).await["result"]["rating"].clone()
         }
     };
-    assert_eq!(rating(&e.guest_token).await, 2);
-    assert_ne!(rating(&e.owner_token).await, 2);
+    assert_eq!(rating(&e.other_token).await, 2);
+    assert_eq!(rating(&e.owner_token).await, 2);
     let write = journal(&e)
         .into_iter()
         .rev()
         .find(|l| l.kind == OpKind::WriteSidecar)
         .unwrap();
-    assert_eq!(actor(&write), json!({"agent": e.guest.to_string()}));
+    assert_eq!(actor(&write), agent(&e));
     client.cancel().await.unwrap();
 }
 
