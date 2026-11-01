@@ -89,3 +89,32 @@ fn api_key_add_prints_only_the_token_and_list_shows_the_keys() {
     }
     assert!(!text.contains(token.trim()));
 }
+
+/// `token` of an earlier version points to `api-key`, whatever follows it, and stays out of
+/// the help.
+#[test]
+fn token_points_to_api_key() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        &["token"][..],
+        &["token", "add", "--user", "me"],
+        &["token", "--whatever"],
+    ] {
+        let out = run(home.path(), args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert!(
+            err.contains(
+                "`token` was replaced by `api-key`: run `asteria-photos api-key add <name>` \
+                 (every key acts as the library owner)"
+            ),
+            "{args:?}: {err}"
+        );
+    }
+    let out = run(home.path(), &["--help"]);
+    let help = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !help.lines().any(|l| l.trim_start().starts_with("token")),
+        "{help}"
+    );
+}

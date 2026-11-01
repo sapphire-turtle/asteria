@@ -107,6 +107,18 @@ fn command(spec: &AppSpec) -> Command {
                 .arg(config().global(true)),
         ))
         .subcommand(
+            // An earlier version's `token`, kept out of the help: points to `api-key`.
+            Command::new("token")
+                .hide(true)
+                .disable_help_flag(true)
+                .arg(
+                    Arg::new("args")
+                        .num_args(0..)
+                        .allow_hyphen_values(true)
+                        .trailing_var_arg(true),
+                ),
+        )
+        .subcommand(
             Command::new("serve")
                 .about("Run the server")
                 .arg(config())
@@ -127,6 +139,19 @@ fn config_path(spec: &AppSpec, m: &ArgMatches) -> AnyResult<PathBuf> {
     }
 }
 
+/// The name this program was run by (`asteria-photos`, `asteria-photos-desktop`), else the
+/// app's.
+fn program_name(spec: &AppSpec) -> String {
+    std::env::args_os()
+        .next()
+        .and_then(|a| {
+            Path::new(&a)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| spec.app.to_owned())
+}
+
 /// Runs the command; the process's exit code.
 fn dispatch(spec: &AppSpec, matches: &ArgMatches) -> AnyResult<i32> {
     match matches.subcommand() {
@@ -144,6 +169,14 @@ fn dispatch(spec: &AppSpec, matches: &ArgMatches) -> AnyResult<i32> {
             &config_path(spec, m)?,
             KeyCommand::from_arg_matches(m)?,
         ),
+        Some(("token", _)) => {
+            eprintln!(
+                "error: `token` was replaced by `api-key`: run `{} api-key add <name>` (every \
+                 key acts as the library owner)",
+                program_name(spec)
+            );
+            Ok(2)
+        }
         Some(("serve", m)) => serve(
             spec,
             &config_path(spec, m)?,
