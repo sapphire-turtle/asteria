@@ -279,7 +279,7 @@ asteria/
 ### 4.1 起動とキャッシュ
 
 - 設定ファイルに書くのは、ライブラリのパスと待ち受けアドレス。`--config` を省くと `<config_dir>/<アプリ名>/server.toml` を使う（2026-11-01 決定。常駐の登録を `asteria-<app> serve` だけで済ませるため）。
-- 認証は corundum-framework-keys（2026-11-01 決定、Plan 8c）。キーは `<data_dir>/<アプリ名>/<ライブラリID>/keys/` に1つずつ TOML で置き、ハッシュだけを持つ。トークンの頭は `asteria-photos-` / `asteria-music-`。サーバーは `KeyVerifier` で確かめるので、足したキーは再起動なしで効き、外したキーは 30 秒以内に効かなくなる。CLI は `api-key add|list|retire|restore|rotate`（corundum の `KeyCommand`）、`init` は最初のキーを1つ作って出す。以前の版の設定ファイルの `[[token]]` は、どのコマンドでも最初に開いたときにキーとして取り込み、設定ファイルから消す（付いていたユーザー ID は捨てる）。
+- 認証は corundum-framework-keys（2026-11-01 決定、Plan 8c）。キーは `<data_dir>/<アプリ名>/<ライブラリID>/keys/` に1つずつ TOML で置き、ハッシュだけを持つ。トークンの頭は `asteria-photos-` / `asteria-music-`。サーバーは `KeyVerifier` で確かめるので、足したキーは再起動なしで効き、外したキーは 30 秒以内に効かなくなる。CLI は `api-key add|list|retire|restore|rotate`（corundum の `KeyCommand`）、`init` は最初のキーを1つ作って出す。以前の版の設定ファイルの `[[token]]` は、どのコマンドでも最初に開いたときにキーとして取り込み、設定ファイルから消す（付いていたユーザー ID は捨てる）。設定ファイルが書き換えられない（読み取り専用）ときは、パスと「`[[token]]` を手で消す」ことを警告に出して続ける（取り込みはハッシュで重複を避けるので、次からは何もしない）。
 - redb にはスキーマのバージョンを持たせる。作り直す（削除して新しいエポックで始める）のは、ファイルが壊れている、形式が古い、スキーマのバージョンが一致しない、別のライブラリのキャッシュである、のどれかの場合だけ。ロックが取れない（別のプロセスが開いている）場合や I/O エラーは、作り直さずに起動を失敗させる。
 - 1つのホストで1つのライブラリを扱うサーバーは1つだけ。`serve` はデータディレクトリを作ったら何よりも先に（一時ファイルの掃除より前に）`<data_dir>/<アプリ名>/<ライブラリID>/server.lock` の排他ロック（advisory）を取り、終了まで持ち続ける。取れなければ「another asteria server is serving this library」と出してエラーで終わる。ロックをワークスペースに置かないのは、別のホストのサーバーがワークスペースを共有できるようにするため（NFS のロックはホストをまたいで効く）。
 - キャッシュにはエポック（作るたびに新しくなる ID）を持たせる。クライアントはエポックの変化を見て、全体を同期し直す。
@@ -677,7 +677,7 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
   4. 外部ツール：`vipsthumbnail` と `ffmpeg` があるかを出し、無ければ入れ方を案内する。無くても続けられる（サムネイルや低音質版が作れないだけ）。
 - **サービス**：corundum-framework-service。名前はアプリ名（`asteria-photos` / `asteria-music`）、実行するのは自分の実行ファイルと `serve`。Linux は systemd のユーザーユニット、macOS は LaunchAgent、Windows はタスクスケジューラー（ログオン時）。
 - **設定の「ローカルサーバー」ページ**（desktop だけ）：ライブラリの場所と待ち受けアドレス、`settings::ServiceRow`（登録、起動、停止、削除）、API キーの管理（`KeysPage`、ローカルの `KeyStore` を直接扱う）、外部ツールの有無。
-- 外部ツールの有無は、サーバーがツールを探すのと同じ関数で desktop が確かめる（同じマシンなので結果は同じ）。同梱するかは Plan 8d で決める。
+- 外部ツールの有無は、サーバーがツールを探すのと同じ関数で desktop が確かめる（同じマシンなので結果は同じ）。ツールは `ASTERIA_*` の変数、`PATH`、よく使われるディレクトリ（macOS は `/opt/homebrew/bin` と `/usr/local/bin`、Linux は `/usr/local/bin`）の順に探し、サーバーは見つけた絶対パスを実行する（Finder から起動した GUI や LaunchAgent の `PATH` には Homebrew が入っていないため）。同梱するかは Plan 8d で決める。
 - mobile にはない。LAN から受けるための待ち受けアドレスの変更は、今は設定ファイルで行う。
 
 ## 6. エラー処理
@@ -747,7 +747,7 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
    - クレートの分割と移動：`asteria-<app>-server` をライブラリにし、`-headless`、`-gui`、`-desktop`、`-mobile`（骨組み）を作る。desktop は CLI を兼ね、`asteria-<app>-desktop serve` でサーバーを立てられる。CI の iOS チェックを mobile に広げる。（Plan 8b、済）
    - corundum-framework 0.6.0 に上げた（コードの変更なし、2026-11-01）。
    - ローカルサーバー（§5.8）：認証を corundum の API キーに置き換え、設定ファイルの既定の場所を決め、desktop の初回起動の流れ（ライブラリを選ぶ、`init`、キーの発行と接続先への自動登録、サービス登録、外部ツールの確かめ）と、設定の「ローカルサーバー」ページを足す。cargo で入れた版でも使える。（Plan 8c、済）
-   - desktop の Velopack 配布（改名、PATH、packId、アイコンとランチャー、更新パネル、リリースの CI）、単一起動（`acquire_or_activate_with`、`WindowOptions::on_activate`）、外部ツールの同梱を決める。desktop は今「引数が1つでもあれば CLI」なので、Velopack のフック（`--veloapp-*`）はその判定より前に `package::start` で処理すること。（Plan 8d）
+   - desktop の Velopack 配布（改名、PATH、packId、アイコンとランチャー、更新パネル、リリースの CI）、単一起動（`acquire_or_activate_with`、`WindowOptions::on_activate`）、外部ツールの同梱を決める。desktop は今「引数が1つでもあれば CLI」なので、Velopack のフック（`--veloapp-*`）はその判定より前に `package::start` で処理すること。8c で登録したサービスは Windows でコンソールの窓を出す（desktop がコンソールのサブシステムのため）。8d のシムと GUI のサブシステムで直す（corundum-framework#89）。（Plan 8d）
 10. オフラインキャッシュと操作キュー。（Plan 9）
 11. payload ハッシュの第2段階。（Plan 10）
 12. iOS のクライアント（photos のアップロード、music のバックグラウンド再生）。corundum-framework が iOS のウィンドウに対応してから始める。

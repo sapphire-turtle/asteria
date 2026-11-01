@@ -23,6 +23,7 @@ asteria-photos serve
 - キーはデータディレクトリのファイルなので、`api-key add` で足したキーは動いているサーバーを再起動せずに使える。`init --force` は設定ファイルを作り直し、既存のキーをすべて失効させる。
 - トークンは平文（素の HTTP）で流れる。サーバーは LAN か Tailscale などの VPN の中だけで公開し、インターネットに直接出さない。
 - 1つのホストで1つのライブラリを扱うサーバーは1つだけ。`serve` はデータディレクトリの `server.lock` をロックし、同じホストの2つ目はエラーで終了する。
+- 設定ファイルに `[[token]]` がある以前の版からの更新：それを開いた最初のコマンドが、`[[token]]` を API キー `token-1`、`token-2`… として取り込み、設定ファイルをそれ抜きで書き直す（ファイル中のコメントは消える。ファイルが読み取り専用なら、サーバーは警告を出すので `[[token]]` を手で消す）。トークンはそのまま使えるが、ほかのユーザーに発行したトークンも所有者として動くようになる。
 - 別々のホストのサーバーが、1つのライブラリを（NFS などで）共有してよい（本番と試験用のサーバーなど）。ジャーナル、キャッシュ、未完了のアップロードはサーバーごとに持つ。ファイルの監視はほかの NFS ホストからの変更に気づかないので、そうした変更は定期的な再スキャン（15分ごと）か `library.rescan` で反映される。アップロードの重複の確認は、そのサーバーがスキャンしたものしか知らない。同じホストで同じライブラリのサーバーを2つ動かすことはできない（キャッシュとデータディレクトリを共有してしまう）。
 - サムネイルには `vipsthumbnail`（libvips-tools）、動画には `ffmpeg` が必要（`PATH` から探す。`ASTERIA_VIPSTHUMBNAIL` と `ASTERIA_FFMPEG` で場所を指すこともできる）。ログは `RUST_LOG` で調整（既定 `info`）。
 
@@ -55,7 +56,7 @@ asteria-music serve
 claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Bearer <token>"
 ```
 
-- エンドポイントは `<サーバーの URL>/mcp`（Streamable HTTP）である。トークンはクライアントと同じ Bearer トークンで、エージェントはそのトークンのユーザーとして動く。
+- エンドポイントは `<サーバーの URL>/mcp`（Streamable HTTP）である。トークンはクライアントと同じ Bearer トークンで、エージェントはライブラリの所有者として動く。
 - ツールは、ライブラリ・フォルダ・アイテムの参照、評価・タグ・説明を書き換える `media_update`、ファイルの移動・改名・ゴミ箱入れをする `organize_apply` とその状況・取り消し・履歴、サムネイルを見る `media_preview` である。music サーバーには `album_list`、`album_get`、`artist_list`、`artist_get`、`playlist_list`、`playlist_get` が加わる。
 - エージェントの変更はジャーナルに `agent` として残り、`organize_undo` でファイル操作のバッチごと取り消せる。メタデータの編集（`media_update`）はバッチではなく、取り消せない。
 
@@ -66,7 +67,7 @@ claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Beare
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev
 cargo run -p asteria-photos-desktop --release
 # 引数を付けると、同じバイナリがサーバーの CLI になる（`asteria-photos serve` と同じ）。
-cargo run -p asteria-photos-desktop --release -- serve --config ~/.config/asteria/photos.toml
+cargo run -p asteria-photos-desktop --release -- serve
 ```
 
 - クライアントは `asteria-photos serve` が配信するライブラリを見るもの。サムネイルはサーバーが作るので、libvips や ffmpeg は要らない。
@@ -84,7 +85,7 @@ cargo run -p asteria-photos-desktop --release -- serve --config ~/.config/asteri
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev libasound2-dev
 cargo run -p asteria-music-desktop --release
 # 引数を付けると、同じバイナリがサーバーの CLI になる（`asteria-music serve` と同じ）。
-cargo run -p asteria-music-desktop --release -- serve --config ~/.config/asteria/music.toml
+cargo run -p asteria-music-desktop --release -- serve
 ```
 
 - クライアントは `asteria-music serve` が配信するライブラリを再生するもの。カバーと低音質のコピーはサーバーが作るので、libvips や ffmpeg は要らない。
@@ -102,7 +103,8 @@ desktop アプリは、このコンピューターのフォルダをライブラ
 - サーバーはサムネイルや小さいコピーを外部ツールで作る。無くてもサーバーは動き、それが作れないだけ。サーバーが動くマシンに入れる：
   - `vipsthumbnail`（libvips に含まれる）：画像のサムネイルとカバー。Debian/Ubuntu は `sudo apt install libvips-tools`（ほかのディストリビューションも似た名前のパッケージ）、macOS は `brew install vips`、Windows は github.com/libvips/build-win64-mxe/releases の libvips を入れ、その `bin` フォルダを `PATH` に足す。
   - `ffmpeg`：動画のサムネイルと、music のオフライン用の小さいコピー（libopus つきのもの）。`sudo apt install ffmpeg`、`brew install ffmpeg`、Windows は ffmpeg.org/download.html から入れ、その `bin` フォルダを `PATH` に足す。
-  - または `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` にプログラムの場所を入れる。ページの「もう一度確かめる」で探し直す。
+  - または `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` にプログラムの場所を入れる。入れなければ `PATH`、続けて `/opt/homebrew/bin` と `/usr/local/bin`（macOS）または `/usr/local/bin`（Linux）を探す。ページの「もう一度確かめる」で探し直す。
+- Windows での既知の制限：バックグラウンドのサービスはログオン時にコンソールの窓を開き、それを閉じるとサーバーが止まる（今の desktop アプリはコンソールのプログラムのため。後の版で直す。corundum-framework#89）。
 
 ## photos クライアントからのアップロード
 

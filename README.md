@@ -23,6 +23,7 @@ asteria-photos serve
 - Keys are files in the data directory, so a key added with `api-key add` works without restarting a running server. `init --force` writes a new config and retires every existing key.
 - Tokens travel in clear text (plain HTTP). Expose the server only on a LAN or a VPN such as Tailscale, never directly on the internet.
 - One server per library on a host: `serve` holds a lock on `server.lock` in its data directory, and a second one on the same host exits with an error.
+- Upgrading from a version with `[[token]]` entries in the config: the first command that opens it imports them as API keys `token-1`, `token-2`… and rewrites the config without them (comments in the file are lost; if the file is read-only, the server warns and you remove the `[[token]]` entries by hand). The tokens keep working, but a token that was issued for another user now acts as the owner too.
 - Servers on different hosts may share one library (over NFS, say), such as a production server and a test server. Each has its own journal, cache and unfinished uploads. File watching does not see changes made from another NFS host; they appear after the periodic rescan (every 15 minutes) or `library.rescan`. The duplicate check on upload knows only what this server has scanned. Two servers of the same library on one host are not supported, since they would share the cache and data directories.
 - Thumbnails need `vipsthumbnail` (libvips-tools) and, for videos, `ffmpeg`, found on `PATH` or named in `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG`. Set `RUST_LOG` to change log verbosity (default `info`).
 
@@ -55,7 +56,7 @@ Both servers speak the Model Context Protocol, so an AI agent can browse the lib
 claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Bearer <token>"
 ```
 
-- The endpoint is `<server URL>/mcp` (Streamable HTTP). The token is the same Bearer token the clients use; the agent acts as that token's user.
+- The endpoint is `<server URL>/mcp` (Streamable HTTP). The token is the same Bearer token the clients use; the agent acts as the library's owner.
 - The tools are the library, folder and item calls, `media_update` for ratings, tags and descriptions, `organize_apply` and its status, undo and history, and `media_preview` for thumbnails. The music server adds `album_list`, `album_get`, `artist_list`, `artist_get`, `playlist_list` and `playlist_get`.
 - What the agent changes is recorded in the journal as `agent`, and `organize_undo` takes a batch of file operations back. Metadata edits (`media_update`) are not batches and cannot be undone.
 
@@ -66,7 +67,7 @@ claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Beare
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev
 cargo run -p asteria-photos-desktop --release
 # The same binary with arguments is the server's command line: `asteria-photos serve`, say.
-cargo run -p asteria-photos-desktop --release -- serve --config ~/.config/asteria/photos.toml
+cargo run -p asteria-photos-desktop --release -- serve
 ```
 
 - The client browses a library served by `asteria-photos serve`; it does not need libvips or ffmpeg (the server makes the thumbnails).
@@ -84,7 +85,7 @@ cargo run -p asteria-photos-desktop --release -- serve --config ~/.config/asteri
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev libasound2-dev
 cargo run -p asteria-music-desktop --release
 # The same binary with arguments is the server's command line: `asteria-music serve`, say.
-cargo run -p asteria-music-desktop --release -- serve --config ~/.config/asteria/music.toml
+cargo run -p asteria-music-desktop --release -- serve
 ```
 
 - The client plays a library served by `asteria-music serve`; it does not need libvips or ffmpeg (the server makes the covers and the low-quality copies).
@@ -102,7 +103,8 @@ The desktop apps can set up a server for a folder on this computer, so one machi
 - The server makes thumbnails and smaller copies with external tools; without them it still runs, just without those. Install them where the server runs:
   - `vipsthumbnail` (from libvips), for image thumbnails and covers: `sudo apt install libvips-tools` (Debian/Ubuntu; other distributions name the package similarly), `brew install vips` on macOS, or on Windows the libvips build from github.com/libvips/build-win64-mxe/releases with its `bin` folder added to `PATH`.
   - `ffmpeg`, for video thumbnails and music's smaller offline copies (built with libopus): `sudo apt install ffmpeg`, `brew install ffmpeg`, or on Windows a build from ffmpeg.org/download.html with its `bin` folder added to `PATH`.
-  - Or point `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` at the programs. "Check again" on the page looks for them again.
+  - Or point `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` at the programs. Otherwise they are looked for on `PATH`, then in `/opt/homebrew/bin` and `/usr/local/bin` (macOS) or `/usr/local/bin` (Linux). "Check again" on the page looks for them again.
+- Known limitation on Windows: the background service opens a console window at logon, and closing it stops the server (the desktop app is a console program for now; a later version fixes this, corundum-framework#89).
 
 ## Uploading from the photos client
 
