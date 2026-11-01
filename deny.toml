@@ -58,6 +58,7 @@ exceptions = [
     { name = "asteria-framework", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-framework-server", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-framework-client", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-framework-desktop", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-photos-gui", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-photos-desktop", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-photos-mobile", allow = ["GPL-3.0-or-later"] },
