@@ -48,15 +48,32 @@ pub fn tool_program(tool: Tool) -> OsString {
 }
 
 /// Where `tool` is, without running it: [`tool_program`] as a path if it has a directory part,
-/// else the first `PATH` directory that holds it (on Windows also with a `PATHEXT` extension,
-/// at least `.exe`), else the first of [`well_known_dirs`] that does. `None` when it is not
-/// there.
+/// else the first of [`bundled_dirs`] beside the running executable that holds it, else the
+/// first `PATH` directory that does (on Windows also with a `PATHEXT` extension, at least
+/// `.exe`), else the first of [`well_known_dirs`] that does. `None` when it is not there.
 pub fn find_tool(tool: Tool) -> Option<PathBuf> {
     find_program(
         &tool_program(tool),
+        &current_bundled_dirs(),
         std::env::var_os("PATH").as_deref(),
         &well_known_dirs(),
     )
+}
+
+/// Where a package puts the tools it bundles, relative to the executable's directory: beside
+/// it (`ffmpeg`), and in `vips/bin` (`vipsthumbnail` and its DLLs on Windows).
+fn bundled_dirs(exe_dir: &Path) -> Vec<PathBuf> {
+    vec![exe_dir.to_path_buf(), exe_dir.join("vips").join("bin")]
+}
+
+/// [`bundled_dirs`] of the running executable's directory, as `current_exe` reports it (not
+/// canonicalized: a Windows `\\?\` path or a resolved symlink would move the search). Empty
+/// when the executable's path is unknown.
+fn current_bundled_dirs() -> Vec<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(bundled_dirs))
+        .unwrap_or_default()
 }
 
 /// Directories tried after `PATH`: a GUI started from the Finder and a LaunchAgent get only
@@ -71,8 +88,14 @@ fn well_known_dirs() -> Vec<PathBuf> {
     }
 }
 
-/// [`find_tool`] for a given program, `PATH` value and directories tried after `PATH`.
-fn find_program(program: &OsStr, path_var: Option<&OsStr>, extra: &[PathBuf]) -> Option<PathBuf> {
+/// [`find_tool`] for a given program, directories tried before `PATH`, `PATH` value and
+/// directories tried after `PATH`.
+fn find_program(
+    program: &OsStr,
+    before: &[PathBuf],
+    path_var: Option<&OsStr>,
+    extra: &[PathBuf],
+) -> Option<PathBuf> {
     let has_dir = Path::new(program).components().count() > 1
         || program
             .to_string_lossy()
@@ -83,7 +106,7 @@ fn find_program(program: &OsStr, path_var: Option<&OsStr>, extra: &[PathBuf]) ->
     let path_dirs = path_var
         .map(|p| std::env::split_paths(p).collect::<Vec<_>>())
         .unwrap_or_default();
-    for dir in path_dirs.iter().chain(extra) {
+    for dir in before.iter().chain(&path_dirs).chain(extra) {
         for candidate in candidates(dir, program) {
             if is_file(&candidate) {
                 return Some(candidate);
@@ -98,14 +121,21 @@ fn find_program(program: &OsStr, path_var: Option<&OsStr>, extra: &[PathBuf]) ->
 fn tool_to_run(tool: Tool) -> OsString {
     resolve_program(
         tool_program(tool),
+        &current_bundled_dirs(),
         std::env::var_os("PATH").as_deref(),
         &well_known_dirs(),
     )
 }
 
-/// [`tool_to_run`] for a given program, `PATH` value and directories tried after `PATH`.
-fn resolve_program(program: OsString, path_var: Option<&OsStr>, extra: &[PathBuf]) -> OsString {
-    find_program(&program, path_var, extra)
+/// [`tool_to_run`] for a given program, directories tried before `PATH`, `PATH` value and
+/// directories tried after `PATH`.
+fn resolve_program(
+    program: OsString,
+    before: &[PathBuf],
+    path_var: Option<&OsStr>,
+    extra: &[PathBuf],
+) -> OsString {
+    find_program(&program, before, path_var, extra)
         .map(PathBuf::into_os_string)
         .unwrap_or(program)
 }
@@ -868,12 +898,78 @@ mod tool_tests {
         path
     }
 
+    fn exe_name(name: &str) -> String {
+        if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// A temp dir and, inside it, a folder with a space in its name, as in a Velopack package.
+    fn tempdir_with_space() -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root
+            .path()
+            .join("Asteria Photos.app")
+            .join("Contents")
+            .join("MacOS");
+        std::fs::create_dir_all(&dir).unwrap();
+        (root, dir)
+    }
+
+    #[test]
+    fn a_tool_beside_the_executable_wins_over_path() {
+        let (_root, exe_dir) = tempdir_with_space();
+        let on_path = tempfile::tempdir().unwrap();
+        let bundled = program(&exe_dir, &exe_name("ffmpeg"));
+        program(on_path.path(), &exe_name("ffmpeg"));
+        let found = find_program(
+            OsStr::new("ffmpeg"),
+            &bundled_dirs(&exe_dir),
+            Some(on_path.path().as_os_str()),
+            &[],
+        );
+        assert_eq!(found, Some(bundled));
+    }
+
+    #[test]
+    fn vipsthumbnail_is_found_in_its_bundled_bin_folder() {
+        let (_root, exe_dir) = tempdir_with_space();
+        let bin = exe_dir.join("vips").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let expected = program(&bin, &exe_name("vipsthumbnail"));
+        let found = find_program(
+            OsStr::new("vipsthumbnail"),
+            &bundled_dirs(&exe_dir),
+            None,
+            &[],
+        );
+        assert_eq!(found, Some(expected));
+    }
+
+    #[test]
+    fn a_path_in_the_variable_is_used_as_it_is() {
+        let (_root, exe_dir) = tempdir_with_space();
+        let bundled = program(&exe_dir, &exe_name("ffmpeg"));
+        let elsewhere = tempfile::tempdir().unwrap();
+        let chosen = program(elsewhere.path(), "my-ffmpeg");
+        let missing = elsewhere.path().join("nothing-here");
+        let before = bundled_dirs(&exe_dir);
+        assert_eq!(
+            find_program(chosen.as_os_str(), &before, None, &[]),
+            Some(chosen)
+        );
+        assert_eq!(find_program(missing.as_os_str(), &before, None, &[]), None);
+        assert!(bundled.is_file());
+    }
+
     #[test]
     fn an_env_path_that_exists_is_found() {
         let dir = tempfile::tempdir().unwrap();
         let tool = program(dir.path(), "my-vips");
         // The path has a directory part, so `PATH` is not consulted.
-        assert_eq!(find_program(tool.as_os_str(), None, &[]), Some(tool));
+        assert_eq!(find_program(tool.as_os_str(), &[], None, &[]), Some(tool));
     }
 
     #[test]
@@ -881,7 +977,10 @@ mod tool_tests {
         let dir = tempfile::tempdir().unwrap();
         let gone = dir.path().join("nothing-here");
         let on_path = std::env::join_paths([dir.path()]).unwrap();
-        assert_eq!(find_program(gone.as_os_str(), Some(&on_path), &[]), None);
+        assert_eq!(
+            find_program(gone.as_os_str(), &[], Some(&on_path), &[]),
+            None
+        );
     }
 
     #[test]
@@ -891,14 +990,14 @@ mod tool_tests {
         let tool = program(dir.path(), name);
         let path = std::env::join_paths([dir.path()]).unwrap();
         assert_eq!(
-            find_program(OsStr::new("vipsx"), Some(&path), &[]),
+            find_program(OsStr::new("vipsx"), &[], Some(&path), &[]),
             Some(tool)
         );
         assert_eq!(
-            find_program(OsStr::new("not-there"), Some(&path), &[]),
+            find_program(OsStr::new("not-there"), &[], Some(&path), &[]),
             None
         );
-        assert_eq!(find_program(OsStr::new("vipsx"), None, &[]), None);
+        assert_eq!(find_program(OsStr::new("vipsx"), &[], None, &[]), None);
     }
 
     #[test]
@@ -910,18 +1009,18 @@ mod tool_tests {
         let path = std::env::join_paths([path_dir.path()]).unwrap();
         let extras = [extra.path().to_path_buf()];
         assert_eq!(
-            find_program(OsStr::new("vipsx"), Some(&path), &extras),
+            find_program(OsStr::new("vipsx"), &[], Some(&path), &extras),
             Some(tool.clone())
         );
         // Without a PATH at all too.
         assert_eq!(
-            find_program(OsStr::new("vipsx"), None, &extras),
+            find_program(OsStr::new("vipsx"), &[], None, &extras),
             Some(tool.clone())
         );
         // PATH comes first.
         let on_path = program(path_dir.path(), name);
         assert_eq!(
-            find_program(OsStr::new("vipsx"), Some(&path), &extras),
+            find_program(OsStr::new("vipsx"), &[], Some(&path), &extras),
             Some(on_path)
         );
     }
@@ -933,11 +1032,11 @@ mod tool_tests {
         let tool = program(extra.path(), name);
         let extras = [extra.path().to_path_buf()];
         assert_eq!(
-            resolve_program(OsString::from("vipsx"), None, &extras),
+            resolve_program(OsString::from("vipsx"), &[], None, &extras),
             tool.into_os_string()
         );
         assert_eq!(
-            resolve_program(OsString::from("not-there"), None, &extras),
+            resolve_program(OsString::from("not-there"), &[], None, &extras),
             OsString::from("not-there")
         );
     }
