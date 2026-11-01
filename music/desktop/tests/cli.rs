@@ -87,7 +87,13 @@ fn init_without_config_uses_the_default_place() {
         ],
     );
     assert!(out.status.success(), "{out:?}");
-    let config = home.path().join("config/asteria-music/server.toml");
+    // corundum's `dirs`: `$XDG_CONFIG_HOME` on Linux, `~/Library/Application Support` on macOS.
+    let base = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support")
+    } else {
+        home.path().join("config")
+    };
+    let config = base.join("asteria-music/server.toml");
     assert!(config.is_file(), "{config:?}");
 }
 
