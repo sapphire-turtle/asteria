@@ -729,7 +729,7 @@ music-server は photos-server と同じ形（Plan 8b からはライブラリ�
    - music の埋め込みタグの書き換え（§3.6、#30）と、サイドカーの曖昧・衝突を画面で解決する仕組み（#31）は、Plan 7 の後に回す。クライアントでのユーザー自身のファイル操作の画面と Ctrl-Z も後で入れる。
 9. 配布形態とクレート構成（§2）。3つの計画に分ける（2026-10-31 決定）。
    - corundum-framework 0.2.0 → 0.5.0。破壊的変更への対応（Windows の Roaming から Local への移行を含む）だけで、新しい機能は使わない。（Plan 8a）
-   - クレートの分割と移動：`asteria-<app>-server` をライブラリにし、`-headless`、`-gui`、`-desktop`、`-mobile`（骨組み）を作る。desktop は CLI を兼ね、`asteria-<app>-desktop serve` でサーバーを立てられる。CI の iOS チェックを mobile に広げる。（Plan 8b）
+   - クレートの分割と移動：`asteria-<app>-server` をライブラリにし、`-headless`、`-gui`、`-desktop`、`-mobile`（骨組み）を作る。desktop は CLI を兼ね、`asteria-<app>-desktop serve` でサーバーを立てられる。CI の iOS チェックを mobile に広げる。（Plan 8b、済）
    - desktop の Velopack 配布（改名、PATH、更新）、ローカルサーバーの接続先への自動登録とトークンの発行、外部ツール（`vipsthumbnail`、`ffmpeg`）の扱い、設定画面と初回起動の画面からのサービス登録（corundum 0.5.0 の `service` / `gui-service`、`first_run::ServicePage`、`settings::ServiceRow`）。今の `users.toml` のトークンを corundum の `keys`（`KeyStore`、`KeysPage`）に置き換えるかもここで決める。（Plan 8c）
 10. オフラインキャッシュと操作キュー。（Plan 9）
 11. payload ハッシュの第2段階。（Plan 10）

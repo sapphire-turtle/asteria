@@ -11,8 +11,9 @@ jobs:
       # libraries eframe (winit, wgpu) builds against. libasound2-dev: cpal's ALSA.
       linux-packages: libvips-tools ffmpeg libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev libasound2-dev
 
-  # The client library must keep building for iOS: a dependency or feature that
-  # does not support it should fail on the pull request, not when the iOS app is
+  # The client libraries and the phone apps must keep building for iOS: a
+  # dependency or feature that does not support it (a server crate pulled into a
+  # mobile build, say) should fail on the pull request, not when the iOS app is
   # first built.
   ios-check:
     runs-on: macos-latest
@@ -29,5 +30,5 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check the client library for iOS
-        run: cargo check -p asteria-framework-client --target aarch64-apple-ios --locked
+      - name: Check the client libraries for iOS
+        run: cargo check -p asteria-framework-client -p asteria-photos-mobile -p asteria-music-mobile --target aarch64-apple-ios --locked

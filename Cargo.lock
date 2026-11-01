@@ -479,6 +479,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "asteria-music-mobile"
+version = "0.1.0"
+dependencies = [
+ "asteria-music-gui",
+]
+
+[[package]]
 name = "asteria-music-server"
 version = "0.1.0"
 dependencies = [
@@ -547,6 +554,13 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "asteria-photos-mobile"
+version = "0.1.0"
+dependencies = [
+ "asteria-photos-gui",
 ]
 
 [[package]]

@@ -10,11 +10,13 @@ members = [
     "photos/crates/asteria-photos-gui",
     "photos/headless",
     "photos/desktop",
+    "photos/mobile",
     "music/crates/asteria-music-api",
     "music/crates/asteria-music-server",
     "music/crates/asteria-music-gui",
     "music/headless",
     "music/desktop",
+    "music/mobile",
 ]
 
 [workspace.package]
