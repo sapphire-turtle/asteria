@@ -451,6 +451,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "asteria-music-headless"
+version = "0.1.0"
+dependencies = [
+ "asteria-framework-server",
+ "asteria-music-api",
+ "asteria-music-server",
+ "lofty",
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "asteria-music-server"
 version = "0.1.0"
 dependencies = [
@@ -460,12 +476,9 @@ dependencies = [
  "blake3",
  "chrono",
  "lofty",
- "reqwest",
- "rmcp",
  "serde",
  "serde_json",
  "tempfile",
- "tokio",
  "tracing",
  "unicode-normalization",
  "uuid",
@@ -500,6 +513,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asteria-photos-headless"
+version = "0.1.0"
+dependencies = [
+ "asteria-framework",
+ "asteria-framework-server",
+ "asteria-photos-server",
+ "grain-id",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "asteria-photos-server"
 version = "0.1.0"
 dependencies = [
@@ -507,10 +533,6 @@ dependencies = [
  "asteria-framework-api",
  "asteria-framework-server",
  "asteria-photos-api",
- "grain-id",
- "reqwest",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]

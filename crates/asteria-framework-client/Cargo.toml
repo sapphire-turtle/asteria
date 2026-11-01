@@ -27,7 +27,7 @@ url.workspace = true
 tempfile.workspace = true
 # A real server on a temporary library, run in-process (as in asteria-framework-server's tests).
 asteria-framework-server = { path = "../asteria-framework-server" }
-asteria-photos-api = { path = "../asteria-photos-api" }
-asteria-music-api = { path = "../asteria-music-api" }
+asteria-photos-api = { path = "../../photos/crates/asteria-photos-api" }
+asteria-music-api = { path = "../../music/crates/asteria-music-api" }
 axum.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net"] }

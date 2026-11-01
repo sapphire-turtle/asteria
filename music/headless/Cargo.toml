@@ -1,0 +1,27 @@
+[package]
+# The server without the window, for hosts with no GUI. Its binary is `asteria-music`, the
+# command `asteria-music-desktop` also answers to once packaged (spec §2).
+name = "asteria-music-headless"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "asteria-music"
+path = "src/main.rs"
+
+[dependencies]
+asteria-framework-server = { path = "../../crates/asteria-framework-server" }
+asteria-music-server = { path = "../crates/asteria-music-server" }
+
+[dev-dependencies]
+asteria-music-api = { path = "../crates/asteria-music-api" }
+lofty.workspace = true
+reqwest.workspace = true
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt"] }

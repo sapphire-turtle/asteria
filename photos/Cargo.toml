@@ -10,13 +10,13 @@ publish = false
 path = "src/lib.rs"
 
 [[bin]]
-name = "asteria-photos"
+name = "asteria-photos-desktop"
 path = "src/main.rs"
 
 [dependencies]
 asteria-framework-api = { path = "../crates/asteria-framework-api", version = "2.3.0" }
 asteria-framework-client = { path = "../crates/asteria-framework-client" }
-asteria-photos-api = { path = "../crates/asteria-photos-api" }
+asteria-photos-api = { path = "crates/asteria-photos-api" }
 corundum-framework = { workspace = true, features = ["gui", "serde", "eframe"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

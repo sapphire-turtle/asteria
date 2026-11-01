@@ -4,13 +4,15 @@
 
 ## Running the photos server
 
+`asteria-photos` is the server without a window, for hosts with no GUI. Install it with `cargo install --path photos/headless`; the desktop app (`asteria-photos-desktop`) runs the same commands.
+
 ```sh
 # Create the library (or adopt an existing one) and a config; prints the owner's token once.
-asteria-photos-server init --library ~/Pictures --owner me --config ~/.config/asteria/photos.toml
+asteria-photos init --library ~/Pictures --owner me --config ~/.config/asteria/photos.toml
 # Add a token for another user listed in <library>/.asteria/users.toml.
-asteria-photos-server token add --config ~/.config/asteria/photos.toml --user <USER_ID>
+asteria-photos token add --config ~/.config/asteria/photos.toml --user <USER_ID>
 # Serve (Ctrl-C stops it cleanly).
-asteria-photos-server serve --config ~/.config/asteria/photos.toml
+asteria-photos serve --config ~/.config/asteria/photos.toml
 ```
 
 - `init` refuses to overwrite an existing config unless you pass `--force`. Only the token goes to stdout.
@@ -25,13 +27,15 @@ asteria-photos-server serve --config ~/.config/asteria/photos.toml
 
 ## Running the music server
 
+`asteria-music` is the server without a window (`cargo install --path music/headless`); the desktop app (`asteria-music-desktop`) runs the same commands.
+
 ```sh
 # Create the library (or adopt an existing one) and a config; prints the owner's token once.
-asteria-music-server init --library ~/Music --owner me --config ~/.config/asteria/music.toml
+asteria-music init --library ~/Music --owner me --config ~/.config/asteria/music.toml
 # Add a token for another user listed in <library>/.asteria/users.toml.
-asteria-music-server token add --config ~/.config/asteria/music.toml --user <USER_ID>
+asteria-music token add --config ~/.config/asteria/music.toml --user <USER_ID>
 # Serve (Ctrl-C stops it cleanly).
-asteria-music-server serve --config ~/.config/asteria/music.toml
+asteria-music serve --config ~/.config/asteria/music.toml
 ```
 
 - The commands, the config, the token handling, the cache and data directories (`asteria-music` in place of `asteria-photos`), the lock and the plain-HTTP warning are the same as for the photos server above. The default address is `127.0.0.1:7811`.
@@ -62,7 +66,7 @@ sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-m
 cargo run -p asteria-photos --release
 ```
 
-- The client browses a library served by `asteria-photos-server`; it does not need libvips or ffmpeg (the server makes the thumbnails).
+- The client browses a library served by `asteria-photos serve`; it does not need libvips or ffmpeg (the server makes the thumbnails).
 - On first start there is no server yet and Settings opens on the Servers page with the add form. Enter a name, the address (such as `http://192.168.1.10:7810`) and the access token that `init` (or `token add`) printed, press "Test connection" to check them, then Save. Open Library on the rail to see the photos.
 - You can register several servers. The status bar (bottom right; on a narrow window only its icon) shows which one is in use and whether it is connected; pick another one from its menu to switch, or choose "Manage servers..." (Settings › Servers) to add, edit or delete. The server in use is remembered for the next start, and switching always starts at the library's root.
 - If the server cannot be reached, rejects the token or speaks an incompatible version, the library shows the reason with a "Try again" button; there is no offline cache yet.
@@ -78,7 +82,7 @@ sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-m
 cargo run -p asteria-music --release
 ```
 
-- The client plays a library served by `asteria-music-server`; it does not need libvips or ffmpeg (the server makes the covers and the low-quality copies).
+- The client plays a library served by `asteria-music serve`; it does not need libvips or ffmpeg (the server makes the covers and the low-quality copies).
 - On first start there is no server yet and Settings opens on the Servers page with the add form. Enter a name, the address (such as `http://192.168.1.10:7811`) and the access token that `init` (or `token add`) printed, press "Test connection" to check them, then Save. Servers are registered, switched and stored as in the photos client (in `servers.toml`, under `asteria-music` in place of `asteria-photos`).
 - Pick an album, an artist or a playlist to see its tracks and play them. Playback starts before the file has been fully downloaded, and seeking to a position that has not arrived yet waits for that part.
 - "Play in low quality" is one setting for the whole app, saved in `playback.toml` in the app's config directory along with the volume. When it is on, the server converts each track to low-bitrate Ogg Opus (the offline copy, which needs `ffmpeg` with libopus on the server) and the client plays that; it is meant for slow connections. The first play of a track can show "Preparing" while the server converts it. A change takes effect from the next track you open.

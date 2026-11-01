@@ -10,7 +10,7 @@ publish = false
 path = "src/lib.rs"
 
 [[bin]]
-name = "asteria-music"
+name = "asteria-music-desktop"
 path = "src/main.rs"
 
 [features]
@@ -19,7 +19,7 @@ test-support = []
 
 [dependencies]
 asteria-framework-client = { path = "../crates/asteria-framework-client" }
-asteria-music-api = { path = "../crates/asteria-music-api" }
+asteria-music-api = { path = "crates/asteria-music-api" }
 tracing.workspace = true
 url.workspace = true
 reqwest.workspace = true
@@ -42,7 +42,7 @@ tokio = { workspace = true, features = ["net"] }
 tempfile.workspace = true
 # The stub servers in tests/support share the client crate's helpers, which want these.
 asteria-framework-api = { path = "../crates/asteria-framework-api", version = "2.3.0" }
-asteria-photos-api = { path = "../crates/asteria-photos-api" }
+asteria-photos-api = { path = "../photos/crates/asteria-photos-api" }
 grain-id.workspace = true
 # The fakes of the player, for the integration tests.
 asteria-music = { path = ".", features = ["test-support"] }
