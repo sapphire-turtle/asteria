@@ -1269,9 +1269,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af887352836e20a9dffcafed8c3a01da5467aeb2acbc0d439fbe578bbbd91116"
+checksum = "16dbbaadebe2d0a8530dd44e3a954ff47f344ac1a7b5b9e8ebf669ed3b8fb7e1"
 dependencies = [
  "corundum-framework-gui",
  "corundum-framework-platform",
@@ -1279,9 +1279,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-gui"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eee2de3daba4059cc02629f01c32cb9989cdc5c235c0cbf80c932229844665b5"
+checksum = "35f5902e2072ed146495b1bbfb1c7ba1251853a3d31f2eacbb90f623957d0f28"
 dependencies = [
  "corundum-framework-platform",
  "eframe",
@@ -1307,9 +1307,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-platform"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d50d826d8ff6f8d3992815894fc15e44a34880f9682ee8d99eac7b8493bd105f"
+checksum = "dd562a148d3817f6e6c51b49658686a409b69446499f2a76cf781799b2b2aedf"
 dependencies = [
  "dirs",
  "jni",
