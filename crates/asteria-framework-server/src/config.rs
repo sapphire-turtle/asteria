@@ -71,10 +71,29 @@ impl ServerConfig {
 }
 
 /// Reads the config at `path`, as every server command does. An older config's `[[token]]`
-/// entries are imported as API keys of the library (`token-1`, `token-2`…, their hashes as
-/// they are, so the tokens keep working), and the config is then saved without them. If any
-/// entry cannot be imported, nothing is saved and the error is returned.
+/// entries are imported as API keys of the library (named `token-<n>`, their hashes as they
+/// are, so the tokens keep working), and the config is then saved without them. If any entry
+/// cannot be imported, nothing is saved and the error is returned.
 pub fn load_and_migrate(app: &str, path: &Path) -> Result<ServerConfig> {
+    migrate(app, path, |cfg| {
+        let library = Library::open(&cfg.library.canonicalize()?)?;
+        keys_dir_for(app, &library.config().id)
+    })
+}
+
+/// [`load_and_migrate`] with the keys in `keys_dir` instead of the library's own directory.
+/// For tests.
+#[doc(hidden)]
+pub fn load_and_migrate_in(keys_dir: &Path, app: &str, path: &Path) -> Result<ServerConfig> {
+    migrate(app, path, |_| Ok(keys_dir.to_path_buf()))
+}
+
+/// `keys_dir` is asked for only when there is something to import.
+fn migrate(
+    app: &str,
+    path: &Path,
+    keys_dir: impl FnOnce(&ServerConfig) -> Result<PathBuf>,
+) -> Result<ServerConfig> {
     let raw = read_raw(path)?;
     let cfg = ServerConfig {
         library: raw.library,
@@ -100,16 +119,17 @@ pub fn load_and_migrate(app: &str, path: &Path) -> Result<ServerConfig> {
             })
         })
         .collect::<Result<Vec<KeyHash>>>()?;
-    let library = Library::open(&cfg.library.canonicalize()?)?;
-    let mut keys = open_keys(app, &library.config().id)?;
-    for (i, hash) in hashes.into_iter().enumerate() {
-        // Imported by an earlier run whose save failed: not again.
+    let mut keys = KeyStore::open(&keys_dir(&cfg)?)?.token_prefix(&format!("{app}-"));
+    let mut names = Vec::new();
+    for hash in hashes {
+        // Imported by an earlier run whose save failed (and maybe retired since): not again.
         if keys.list().iter().any(|k| k.hash == hash) {
             continue;
         }
+        let name = free_name(&keys, "token-", 1);
         keys.import(Key {
             id: KeyId::generate(),
-            name: format!("token-{}", i + 1),
+            name: name.clone(),
             description: None,
             subject: None,
             hash,
@@ -117,14 +137,31 @@ pub fn load_and_migrate(app: &str, path: &Path) -> Result<ServerConfig> {
             rotated_at: None,
             retired_at: None,
         })?;
+        names.push(name);
     }
     cfg.save(path)?;
-    tracing::info!(
-        imported = raw.token.len(),
-        config = %path.display(),
-        "the config's tokens are API keys now"
-    );
+    if !names.is_empty() {
+        eprintln!(
+            "imported {} tokens from {} as API keys {}",
+            names.len(),
+            path.display(),
+            names.join(", ")
+        );
+    }
     Ok(cfg)
+}
+
+/// `<prefix><n>` for the first `n` from `from` that no unretired key is called.
+pub(crate) fn free_name(keys: &KeyStore, prefix: &str, from: u32) -> String {
+    (from..)
+        .map(|n| format!("{prefix}{n}"))
+        .find(|name| {
+            !keys
+                .list()
+                .iter()
+                .any(|k| &k.name == name && !k.is_retired())
+        })
+        .expect("a free name")
 }
 
 /// `<config_dir>/<app>/server.toml`: the config file when none is named.

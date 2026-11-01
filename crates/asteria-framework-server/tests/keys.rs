@@ -9,9 +9,7 @@ use std::time::Duration;
 use asteria_framework::Library;
 use asteria_framework::journal::OpKind;
 use asteria_framework_server::keys::{KeyVerifier, Verdict};
-use asteria_framework_server::{
-    ServerConfig, default_config_path, keys_dir_for, load_and_migrate, open_keys,
-};
+use asteria_framework_server::{ServerConfig, default_config_path, load_and_migrate_in};
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use common::*;
@@ -47,7 +45,7 @@ async fn a_new_key_works_without_a_restart() {
     let e = env();
     // The verifier has read the store once already.
     call(&e.app, &e.owner_token, "server.info", json!({})).await;
-    let mut keys = open_keys(APP, &e.lib.config().id).unwrap();
+    let mut keys = key_store(&e.keys_dir);
     let (_, token) = keys.add("later", None, None).unwrap();
     assert!(token.expose().starts_with("asteria-photos-"));
     let (status, _, _) = info(&e, Some(&format!("Bearer {}", token.expose()))).await;
@@ -59,10 +57,7 @@ async fn a_retired_key_stops_working() {
     let e = env_ttl(Duration::ZERO);
     let bearer = format!("Bearer {}", e.other_token);
     assert_eq!(info(&e, Some(&bearer)).await.0, StatusCode::OK);
-    open_keys(APP, &e.lib.config().id)
-        .unwrap()
-        .retire("other")
-        .unwrap();
+    key_store(&e.keys_dir).retire("other").unwrap();
     assert_eq!(info(&e, Some(&bearer)).await.0, StatusCode::UNAUTHORIZED);
     // The other key is untouched.
     let owner = format!("Bearer {}", e.owner_token);
@@ -137,38 +132,65 @@ fn old_config(dir: &std::path::Path, tokens: &[&str]) -> (Library, std::path::Pa
 #[test]
 fn old_tokens_are_imported_and_dropped_from_the_config() {
     let dir = tempfile::tempdir().unwrap();
-    let (lib, path) = old_config(dir.path(), &["first-token", "second-token"]);
-    let _data = DataDir::of(&lib.config().id);
-    let cfg = load_and_migrate(APP, &path).unwrap();
+    let (_, path) = old_config(dir.path(), &["first-token", "second-token"]);
+    let keys_dir = dir.path().join("keys");
+    let cfg = load_and_migrate_in(&keys_dir, APP, &path).unwrap();
     assert_eq!(cfg.library, dir.path().join("lib"));
     assert_eq!(cfg.listen, "127.0.0.1:7810".parse().unwrap());
 
-    let keys = open_keys(APP, &lib.config().id).unwrap();
+    let keys = key_store(&keys_dir);
     let names: Vec<&str> = keys.list().iter().map(|k| k.name.as_str()).collect();
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(names.contains(&"token-1") && names.contains(&"token-2"));
     let text = fs::read_to_string(&path).unwrap();
     assert!(!text.contains("token"), "{text}");
-    assert_eq!(load_and_migrate(APP, &path).unwrap(), cfg);
+    assert_eq!(load_and_migrate_in(&keys_dir, APP, &path).unwrap(), cfg);
+    assert_eq!(key_store(&keys_dir).list().len(), 2);
     assert_eq!(ServerConfig::load(&path).unwrap(), cfg);
 
-    let verifier = KeyVerifier::new(&keys_dir_for(APP, &lib.config().id).unwrap());
+    let verifier = KeyVerifier::new(&keys_dir);
     for t in ["first-token", "second-token"] {
         assert!(matches!(verifier.verify(t), Verdict::Accepted(_)), "{t}");
     }
     assert_eq!(verifier.verify("third-token"), Verdict::Refused);
 }
 
+/// An imported key takes the first `token-<n>` no unretired key has, so a name never
+/// names two keys.
+#[test]
+fn imported_keys_take_free_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, path) = old_config(dir.path(), &["first-token", "second-token"]);
+    let keys_dir = dir.path().join("keys");
+    let mut keys = key_store(&keys_dir);
+    keys.add("token-1", None, None).unwrap();
+    keys.add("token-2", None, None).unwrap();
+    keys.retire("token-2").unwrap();
+    load_and_migrate_in(&keys_dir, APP, &path).unwrap();
+    let keys = key_store(&keys_dir);
+    let live: Vec<&str> = keys
+        .list()
+        .iter()
+        .filter(|k| !k.is_retired())
+        .map(|k| k.name.as_str())
+        .collect();
+    assert_eq!(live.len(), 3, "{live:?}");
+    for name in ["token-1", "token-2", "token-3"] {
+        assert!(live.contains(&name), "{name} missing from {live:?}");
+    }
+    assert_eq!(keys.authenticate("first-token").unwrap().name, "token-2");
+    assert_eq!(keys.authenticate("second-token").unwrap().name, "token-3");
+}
+
 #[test]
 fn a_failed_import_leaves_the_config_alone() {
     let dir = tempfile::tempdir().unwrap();
-    let (lib, path) = old_config(dir.path(), &["first-token"]);
-    let data = DataDir::of(&lib.config().id);
-    fs::create_dir_all(&data.0).unwrap();
+    let (_, path) = old_config(dir.path(), &["first-token"]);
     // A file where the keys' directory would go.
-    fs::write(data.0.join("keys"), b"").unwrap();
+    let keys_dir = dir.path().join("keys");
+    fs::write(&keys_dir, b"").unwrap();
     let before = fs::read(&path).unwrap();
-    assert!(load_and_migrate(APP, &path).is_err());
+    assert!(load_and_migrate_in(&keys_dir, APP, &path).is_err());
     assert_eq!(fs::read(&path).unwrap(), before);
 }
 
@@ -176,18 +198,20 @@ fn a_failed_import_leaves_the_config_alone() {
 fn a_bad_old_hash_imports_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let (lib, path) = old_config(dir.path(), &["first-token"]);
-    let _data = DataDir::of(&lib.config().id);
+    let keys_dir = dir.path().join("keys");
     let text = fs::read_to_string(&path).unwrap()
         + &format!(
             "\n[[token]]\nuser = \"{}\"\nhash = \"blake3:zz\"\n",
             lib.owner()
         );
     fs::write(&path, &text).unwrap();
-    let err = load_and_migrate(APP, &path).unwrap_err().to_string();
+    let err = load_and_migrate_in(&keys_dir, APP, &path)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("hash"), "{err}");
     assert!(!err.contains("zz"), "{err}");
     assert_eq!(fs::read_to_string(&path).unwrap(), text);
-    assert!(open_keys(APP, &lib.config().id).unwrap().list().is_empty());
+    assert!(!keys_dir.exists() || key_store(&keys_dir).list().is_empty());
 }
 
 #[test]

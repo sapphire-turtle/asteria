@@ -6,12 +6,11 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use asteria_framework::{Library, LibraryId, MediaKind};
-use asteria_framework_server::keys::KeyVerifier;
+use asteria_framework::{Library, MediaKind};
+use asteria_framework_server::keys::{KeyStore, KeyVerifier};
 use asteria_framework_server::upload::UploadStore;
 use asteria_framework_server::{
-    AppExtension, AppState, Cache, Processor, data_dir_for, keys_dir_for, open_keys, router, scan,
-    spawn_writer,
+    AppExtension, AppState, Cache, Processor, router, scan, spawn_writer,
 };
 use axum::Router;
 use axum::body::Body;
@@ -26,18 +25,11 @@ use tower::ServiceExt;
 /// The app the test servers run as; names the directory of their keys.
 pub const APP: &str = "asteria-photos";
 
-/// Removes `<data_dir>/<app>/<library id>/` (where the keys are) when dropped: the tests'
-/// libraries are new, so the directory is theirs alone.
-pub struct DataDir(pub PathBuf);
-impl DataDir {
-    pub fn of(library: &LibraryId) -> DataDir {
-        DataDir(data_dir_for(APP, library).unwrap())
-    }
-}
-impl Drop for DataDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
+/// The store of the keys in `dir`, as `open_keys` opens the library's own.
+pub fn key_store(dir: &Path) -> KeyStore {
+    KeyStore::open(dir)
+        .unwrap()
+        .token_prefix(&format!("{APP}-"))
 }
 
 pub struct Photos;
@@ -59,8 +51,9 @@ pub struct Env {
     pub owner_token: String,
     /// The token of a second key, `other`; it acts as the owner too.
     pub other_token: String,
+    /// The keys' directory, in the temporary directory (not the app's data directory).
+    pub keys_dir: PathBuf,
     pub _rescan_rx: tokio::sync::mpsc::Receiver<()>,
-    pub _data: DataDir,
 }
 
 pub fn env() -> Env {
@@ -113,12 +106,11 @@ fn env_full(
     scan(&lib, &cache, ext.as_ref()).unwrap();
     let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
 
-    let id = lib.config().id;
-    let data = DataDir::of(&id);
-    let mut keys = open_keys(APP, &id).unwrap();
+    let keys_dir = dir.path().join("keys");
+    let mut keys = key_store(&keys_dir);
     let owner_token = keys.add("owner", None, None).unwrap().1.expose().to_owned();
     let other_token = keys.add("other", None, None).unwrap().1.expose().to_owned();
-    let verifier = KeyVerifier::new(&keys_dir_for(APP, &id).unwrap());
+    let verifier = KeyVerifier::new(&keys_dir);
     let verifier = match ttl {
         Some(ttl) => verifier.cache_ttl(ttl),
         None => verifier,
@@ -148,8 +140,8 @@ fn env_full(
         processor,
         owner_token,
         other_token,
+        keys_dir,
         _rescan_rx: rescan_rx,
-        _data: data,
     }
 }
 

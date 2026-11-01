@@ -13,10 +13,11 @@ use asteria_framework::Library;
 use asteria_framework::fsutil::cleanup_tmp_files;
 use asteria_framework::paths::META_DIR;
 use clap::{Arg, ArgAction, ArgMatches, Command, FromArgMatches, Subcommand, value_parser};
-use corundum_framework::keys::{KeyCommand, KeyVerifier};
+use corundum_framework::keys::{KeyCommand, KeyId, KeyStore, KeyVerifier, Token};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::free_name;
 use crate::upload::UploadStore;
 use crate::watch::{DEFAULT_DEBOUNCE, DEFAULT_PERIOD};
 use crate::{
@@ -198,16 +199,6 @@ fn init(
         )
         .into());
     }
-    if config_path.exists() {
-        // An older config's tokens become keys before the file is replaced; one that cannot
-        // be read does not stop `--force`.
-        if let Err(e) = load_and_migrate(spec.app, config_path) {
-            eprintln!(
-                "warning: {} could not be read ({e}); replacing it",
-                config_path.display()
-            );
-        }
-    }
     std::fs::create_dir_all(library)?;
     let root = library.canonicalize()?;
     let lib = match Library::init(&root, owner) {
@@ -225,18 +216,7 @@ fn init(
         std::fs::create_dir_all(parent)?;
     }
     let mut keys = open_keys(spec.app, &lib.config().id)?;
-    let has_owner = keys
-        .list()
-        .iter()
-        .any(|k| k.name == OWNER_KEY && !k.is_retired());
-    let (_, token) = if has_owner {
-        // Only the key's token is ever shown, and only once: a new one replaces it.
-        let rotated = keys.rotate(OWNER_KEY)?;
-        eprintln!("the key `{OWNER_KEY}` existed; it has a new token now");
-        rotated
-    } else {
-        keys.add(OWNER_KEY, None, None)?
-    };
+    let token = owner_key(&mut keys, force)?;
     let cfg = ServerConfig {
         library: root,
         listen,
@@ -245,6 +225,40 @@ fn init(
     eprintln!("wrote {}", config_path.display());
     println!("{}", token.expose());
     Ok(())
+}
+
+/// The key `init` makes. With `force`, every unretired key is retired first, so that only the
+/// new one works (as `--force` replaced every token when they were in the config; an older
+/// config's `[[token]]` entries are not imported, and go with the file). Without it no key is
+/// touched: when `owner` is taken, the new key is `owner-2`, `owner-3`…
+fn owner_key(keys: &mut KeyStore, force: bool) -> AnyResult<Token> {
+    if force {
+        let live: Vec<KeyId> = keys
+            .list()
+            .iter()
+            .filter(|k| !k.is_retired())
+            .map(|k| k.id.clone())
+            .collect();
+        for id in &live {
+            keys.retire(id.as_str())?;
+        }
+        eprintln!(
+            "retired {} existing keys; only the new owner key works now",
+            live.len()
+        );
+    }
+    let taken = keys
+        .list()
+        .iter()
+        .any(|k| k.name == OWNER_KEY && !k.is_retired());
+    let name = if taken {
+        let name = free_name(keys, &format!("{OWNER_KEY}-"), 2);
+        eprintln!("a key `{OWNER_KEY}` exists already; the new key is `{name}`");
+        name
+    } else {
+        OWNER_KEY.to_owned()
+    };
+    Ok(keys.add(&name, None, None)?.1)
 }
 
 /// Runs `command` on the API keys of the library the config at `config_path` names.
@@ -533,6 +547,59 @@ mod tests {
             config_path(&spec, m).unwrap(),
             default_config_path("asteria-test").unwrap()
         );
+    }
+
+    fn store() -> (tempfile::TempDir, KeyStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = KeyStore::open(&dir.path().join("keys")).unwrap();
+        (dir, keys)
+    }
+
+    #[test]
+    fn init_makes_the_owner_key() {
+        let (_dir, mut keys) = store();
+        let token = owner_key(&mut keys, false).unwrap();
+        assert_eq!(keys.authenticate(token.expose()).unwrap().name, OWNER_KEY);
+    }
+
+    /// Without `--force` no key stops working: a second `owner` is `owner-2`, then `owner-3`.
+    #[test]
+    fn init_without_force_keeps_every_key() {
+        let (_dir, mut keys) = store();
+        let first = owner_key(&mut keys, false).unwrap();
+        let second = owner_key(&mut keys, false).unwrap();
+        let third = owner_key(&mut keys, false).unwrap();
+        let name = |t: &Token| keys.authenticate(t.expose()).unwrap().name.clone();
+        assert_eq!(name(&first), "owner");
+        assert_eq!(name(&second), "owner-2");
+        assert_eq!(name(&third), "owner-3");
+    }
+
+    /// `--force` revokes every key, imported old tokens included; only the new one works.
+    #[test]
+    fn init_with_force_retires_every_key() {
+        let (dir, mut keys) = store();
+        let old = owner_key(&mut keys, false).unwrap();
+        let (_, phone) = keys.add("phone", None, None).unwrap();
+        let config = dir.path().join("server.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "library = \"/srv/lib\"\nlisten = \"127.0.0.1:7810\"\n\n[[token]]\nuser = \"123abcd\"\nhash = \"{}\"\n",
+                corundum_framework::keys::KeyHash::of_blake3("old-token")
+            ),
+        )
+        .unwrap();
+        crate::load_and_migrate_in(&dir.path().join("keys"), "asteria-test", &config).unwrap();
+        let mut keys = KeyStore::open(&dir.path().join("keys")).unwrap();
+        assert!(keys.authenticate("old-token").is_some());
+
+        let new = owner_key(&mut keys, true).unwrap();
+        for refused in [old.expose(), phone.expose(), "old-token"] {
+            assert!(keys.authenticate(refused).is_none());
+        }
+        assert_eq!(keys.authenticate(new.expose()).unwrap().name, OWNER_KEY);
+        assert_eq!(keys.list().iter().filter(|k| !k.is_retired()).count(), 1);
     }
 
     /// `--config` goes before or after the key command.
