@@ -1,0 +1,14 @@
+[package]
+name = "asteria-music-api"
+version = "2.4.0"
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+publish = false
+
+[dependencies]
+asteria-framework-api = { path = "../../../crates/asteria-framework-api", version = "2.3.0" }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

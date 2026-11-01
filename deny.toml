@@ -58,10 +58,16 @@ exceptions = [
     { name = "asteria-framework", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-framework-server", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-framework-client", allow = ["GPL-3.0-or-later"] },
-    { name = "asteria-photos", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-photos-gui", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-photos-desktop", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-photos-mobile", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-photos-server", allow = ["GPL-3.0-or-later"] },
-    { name = "asteria-music", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-photos-headless", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-music-gui", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-music-desktop", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-music-mobile", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-music-server", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-music-headless", allow = ["GPL-3.0-or-later"] },
     # egui's fallback UI font is under the OFL and the Ubuntu Font Licence: they govern the
     # typefaces it embeds, not code, so they are scoped to this crate rather than allowed
     # for every dependency.

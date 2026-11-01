@@ -1,0 +1,24 @@
+[package]
+# The server without the window, for hosts with no GUI. Its binary is `asteria-photos`, the
+# command `asteria-photos-desktop` also answers to once packaged (spec §2).
+name = "asteria-photos-headless"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "asteria-photos"
+path = "src/main.rs"
+
+[dependencies]
+asteria-framework-server = { path = "../../crates/asteria-framework-server" }
+asteria-photos-server = { path = "../crates/asteria-photos-server" }
+
+[dev-dependencies]
+asteria-framework = { path = "../../crates/asteria-framework" }
+grain-id.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

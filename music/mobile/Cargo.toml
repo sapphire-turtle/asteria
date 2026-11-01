@@ -1,0 +1,15 @@
+[package]
+# The phone app: a pure client, with no server and no Velopack in it. For now only the
+# skeleton the iOS check builds; the iOS and Android entry points come in Plan 11.
+name = "asteria-music-mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+asteria-music-gui = { path = "../crates/asteria-music-gui" }

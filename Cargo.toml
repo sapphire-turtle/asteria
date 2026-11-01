@@ -2,15 +2,21 @@
 resolver = "3"
 members = [
     "crates/asteria-framework-api",
-    "crates/asteria-photos-api",
-    "crates/asteria-music-api",
     "crates/asteria-framework",
     "crates/asteria-framework-server",
     "crates/asteria-framework-client",
-    "photos",
-    "photos-server",
-    "music-server",
-    "music",
+    "photos/crates/asteria-photos-api",
+    "photos/crates/asteria-photos-server",
+    "photos/crates/asteria-photos-gui",
+    "photos/headless",
+    "photos/desktop",
+    "photos/mobile",
+    "music/crates/asteria-music-api",
+    "music/crates/asteria-music-server",
+    "music/crates/asteria-music-gui",
+    "music/headless",
+    "music/desktop",
+    "music/mobile",
 ]
 
 [workspace.package]

@@ -4,13 +4,15 @@
 
 ## photos サーバーの起動
 
+`asteria-photos` は、GUI のないホスト向けのウィンドウを持たないサーバー。`cargo install --path photos/headless` で入れる。デスクトップアプリ（`asteria-photos-desktop`）も同じコマンドを実行できる。
+
 ```sh
 # ライブラリ（既存でも可）と設定ファイルを作り、所有者のトークンを一度だけ表示する。
-asteria-photos-server init --library ~/Pictures --owner me --config ~/.config/asteria/photos.toml
+asteria-photos init --library ~/Pictures --owner me --config ~/.config/asteria/photos.toml
 # <library>/.asteria/users.toml にいる別のユーザーのトークンを追加する。
-asteria-photos-server token add --config ~/.config/asteria/photos.toml --user <USER_ID>
+asteria-photos token add --config ~/.config/asteria/photos.toml --user <USER_ID>
 # 起動する（Ctrl-C で安全に停止）。
-asteria-photos-server serve --config ~/.config/asteria/photos.toml
+asteria-photos serve --config ~/.config/asteria/photos.toml
 ```
 
 - `init` は既存の設定ファイルを `--force` なしでは上書きしない。標準出力に出るのはトークンだけ。
@@ -25,13 +27,15 @@ asteria-photos-server serve --config ~/.config/asteria/photos.toml
 
 ## music サーバーの起動
 
+`asteria-music` は、ウィンドウを持たないサーバー（`cargo install --path music/headless`）。デスクトップアプリ（`asteria-music-desktop`）も同じコマンドを実行できる。
+
 ```sh
 # ライブラリ（既存でも可）と設定ファイルを作り、所有者のトークンを一度だけ表示する。
-asteria-music-server init --library ~/Music --owner me --config ~/.config/asteria/music.toml
+asteria-music init --library ~/Music --owner me --config ~/.config/asteria/music.toml
 # <library>/.asteria/users.toml にいる別のユーザーのトークンを追加する。
-asteria-music-server token add --config ~/.config/asteria/music.toml --user <USER_ID>
+asteria-music token add --config ~/.config/asteria/music.toml --user <USER_ID>
 # 起動する（Ctrl-C で安全に停止）。
-asteria-music-server serve --config ~/.config/asteria/music.toml
+asteria-music serve --config ~/.config/asteria/music.toml
 ```
 
 - コマンド、設定ファイル、トークンの扱い、キャッシュとデータのディレクトリ（`asteria-photos` の代わりに `asteria-music`）、ロック、素の HTTP についての注意は、上の photos サーバーと同じ。既定の待ち受けは `127.0.0.1:7811`。
@@ -59,10 +63,12 @@ claude mcp add --transport http asteria <URL>/mcp --header "Authorization: Beare
 ```sh
 # Linux では eframe のためにいくつかのシステムパッケージが要る（Debian/Ubuntu の名前）。
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev
-cargo run -p asteria-photos --release
+cargo run -p asteria-photos-desktop --release
+# 引数を付けると、同じバイナリがサーバーの CLI になる（`asteria-photos serve` と同じ）。
+cargo run -p asteria-photos-desktop --release -- serve --config ~/.config/asteria/photos.toml
 ```
 
-- クライアントは `asteria-photos-server` が配信するライブラリを見るもの。サムネイルはサーバーが作るので、libvips や ffmpeg は要らない。
+- クライアントは `asteria-photos serve` が配信するライブラリを見るもの。サムネイルはサーバーが作るので、libvips や ffmpeg は要らない。
 - 初回はサーバーが未登録なので、設定が「サーバー」ページで追加フォームを開いた状態で始まる。名前、アドレス（`http://192.168.1.10:7810` など）、`init`（または `token add`）が表示したアクセストークンを入れ、「接続を確かめる」で確かめてから保存する。左のレールで「ライブラリ」を開くと写真が見える。
 - サーバーは複数登録できる。ステータスバー（右下。幅が狭いときはアイコンだけ）に使用中のサーバーと接続の状態が出る。メニューから別のサーバーを選ぶと切り替わり、「サーバーを管理…」（設定 › サーバー）では追加、編集、削除ができる。使用中のサーバーは次回の起動でも覚えていて、切り替えるとライブラリのルートから表示し直す。
 - サーバーにつながらない、トークンが通らない、バージョンが合わない、といったときは、ライブラリに理由と「もう一度」ボタンが出る。オフライン用のキャッシュはまだない。
@@ -75,10 +81,12 @@ cargo run -p asteria-photos --release
 ```sh
 # Linux では eframe のためにいくつかのシステムパッケージと、音の出力のための ALSA が要る（Debian/Ubuntu の名前）。
 sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev libasound2-dev
-cargo run -p asteria-music --release
+cargo run -p asteria-music-desktop --release
+# 引数を付けると、同じバイナリがサーバーの CLI になる（`asteria-music serve` と同じ）。
+cargo run -p asteria-music-desktop --release -- serve --config ~/.config/asteria/music.toml
 ```
 
-- クライアントは `asteria-music-server` が配信するライブラリを再生するもの。カバーと低音質のコピーはサーバーが作るので、libvips や ffmpeg は要らない。
+- クライアントは `asteria-music serve` が配信するライブラリを再生するもの。カバーと低音質のコピーはサーバーが作るので、libvips や ffmpeg は要らない。
 - 初回はサーバーが未登録なので、設定が「サーバー」ページで追加フォームを開いた状態で始まる。名前、アドレス（`http://192.168.1.10:7811` など）、`init`（または `token add`）が表示したアクセストークンを入れ、「接続を確かめる」で確かめてから保存する。サーバーの登録、切り替え、保存のしかたは photos クライアントと同じ（`servers.toml`。`asteria-photos` の代わりに `asteria-music` の下）。
 - アルバム、アーティスト、プレイリストを選ぶと曲が並び、再生できる。再生はファイルを取り終える前に始まり、まだ届いていない位置へのシークは、その部分が届くまで待つ。
 - 「低音質で再生する」はアプリ全体で一つの設定で、音量といっしょにアプリの設定ディレクトリの `playback.toml` に保存される。オンにすると、サーバーが曲を低ビットレートの Ogg Opus（オフライン用のコピー。サーバーに libopus つきの `ffmpeg` が要る）に変換し、クライアントはそれを再生する。回線が遅いときのためのもの。曲を初めて再生するときは、サーバーが変換するあいだ「準備中」と出ることがある。変更は次に開く曲から効く。
