@@ -6,8 +6,9 @@ name: Release
 #
 # - each desktop app as Velopack packages for Linux (AppImage), macOS (.pkg and a portable
 #   zip, one universal package) and Windows (Setup.exe and a portable zip), from which an
-#   installed app updates itself; Windows and macOS carry ffmpeg (and on Windows libvips)
-#   pinned in packaging/tools.env;
+#   installed app updates itself; on Windows both carry libvips, and photos also carries
+#   ffmpeg on Windows and macOS, pinned in packaging/tools.env (music makes its offline audio
+#   itself and needs no ffmpeg);
 # - each headless server as `asteria-<app>-headless-<os>-<arch>[.exe]`, which its `update`
 #   command looks for.
 #
@@ -91,6 +92,10 @@ jobs:
           - app: music
             title: Asteria Music
             category: AudioVideo
+          # Music on macOS carries nothing: sips makes its cover thumbnails.
+          - app: music
+            os: macos-latest
+            tools: ''
     runs-on: ${{ matrix.os }}
     env:
       APP: ${{ matrix.app }}
@@ -162,19 +167,19 @@ jobs:
 
       # fetch-tools.sh checks the x86_64 ffmpeg's encoders by running it under Rosetta.
       - name: Install Rosetta (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && matrix.tools != ''
         run: |
           if ! arch -x86_64 /usr/bin/true 2> /dev/null; then
             sudo softwareupdate --install-rosetta --agree-to-license
           fi
 
       # Beside the main executable, where the server looks first. Linux has none: there the
-      # tools come from the package manager.
+      # tools come from the package manager. What each app carries: packaging/fetch-tools.sh.
       - name: Fetch the bundled tools
         if: matrix.tools != ''
         env:
           TOOLS: ${{ matrix.tools }}
-        run: bash packaging/fetch-tools.sh "$TOOLS" pack
+        run: bash packaging/fetch-tools.sh "$TOOLS" "$APP" pack
 
       # A keychain of its own with the Developer ID Application and Installer certificates and
       # the notary profile, for vpk to sign and notarize the app and its .pkg. Without the
