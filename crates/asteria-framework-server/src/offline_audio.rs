@@ -309,6 +309,8 @@ struct OpusSource {
     /// Granule position of the next sample to decode (counting the pre-skip).
     cursor: u64,
     buf: Vec<f32>,
+    /// Samples per channel of the last packet that decoded.
+    last_len: usize,
     ended: bool,
 }
 
@@ -360,6 +362,7 @@ impl OpusSource {
             gain: 10f32.powf(f32::from(gain_q8) / (256.0 * 20.0)),
             cursor: 0,
             buf: vec![0.0; opus_pure::MAX_PACKET_SAMPLES * channels],
+            last_len: FRAME,
             ended: false,
         })
     }
@@ -413,11 +416,18 @@ impl Source for OpusSource {
                     if bad >= MAX_BAD_PACKETS {
                         return Err(unprocessable("damaged Opus", e));
                     }
-                    // Skipped, but its time still passes.
-                    self.cursor += opus_pure::packet::samples_48k(&p.data).unwrap_or(0) as u64;
-                    continue;
+                    // Skipped as silence of its length, so what follows keeps its time; when
+                    // even the length cannot be read, that of the last packet that decoded.
+                    let n = opus_pure::packet::samples_48k(&p.data)
+                        .unwrap_or(self.last_len)
+                        .min(opus_pure::MAX_PACKET_SAMPLES);
+                    self.buf[..n * self.channels].fill(0.0);
+                    n
                 }
             };
+            if bad == 0 {
+                self.last_len = n;
+            }
             let first = self.cursor;
             self.cursor += n as u64;
             // The last page's granule position cuts the padding of the last frame.
