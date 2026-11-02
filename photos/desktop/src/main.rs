@@ -12,6 +12,7 @@ use asteria_framework_client::profiles::Profiles;
 use asteria_framework_desktop::{
     AboutPage, LocalServerPage, LocalServerSpec, first_run_pages, service_spec, take_setup_request,
 };
+use asteria_framework_server::Tool;
 use corundum_framework::egui;
 use corundum_framework::gui::first_run::FirstRun;
 use corundum_framework::gui::store::Store;
@@ -31,6 +32,7 @@ static LOCAL: LocalServerSpec = LocalServerSpec {
     server: asteria_photos_server::spec,
     service,
     url: "http://127.0.0.1:7810",
+    tools: &[Tool::Vipsthumbnail, Tool::Ffmpeg],
 };
 
 /// What the Velopack package is: the data directory's name, the command it puts on `PATH`
@@ -217,6 +219,7 @@ fn app(paths: &AppPaths, ctx: &egui::Context) -> Box<PhotosApp> {
                 command: "asteria-photos",
             },
             LAUNCHER,
+            LOCAL.tools,
         )),
     ]))
 }

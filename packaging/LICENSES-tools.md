@@ -1,12 +1,15 @@
 # Third-party tools in this package
 
 The asteria desktop packages for Windows and macOS carry these programs unmodified, so that a
-server on this computer can make thumbnails and smaller copies without installing anything.
+server on this computer can make thumbnails without installing anything: Asteria Photos
+carries FFmpeg (Windows and macOS) and libvips (Windows); Asteria Music carries libvips
+(Windows) only, as it makes its offline copies of music itself. Only the programs this
+package carries, and their licence texts, are in it.
 asteria itself is under the GPL-3.0-or-later (with MIT and Apache-2.0 for some parts; see the
 project's repository, https://github.com/sapphire-turtle/asteria). The licence texts are in
 this directory.
 
-## FFmpeg (Windows and macOS)
+## FFmpeg (Asteria Photos, Windows and macOS)
 
 - `ffmpeg.exe` (Windows) and `ffmpeg` (macOS), FFmpeg 9.0.2.
 - Licence: GNU General Public License, version 3 (both builds are configured with
@@ -22,7 +25,7 @@ this directory.
   https://git.martin-riedl.de/ffmpeg/build-script; the configuration and the library
   versions are listed beside each download on that site.
 
-## libvips (Windows)
+## libvips (Windows, both apps)
 
 - `vips/bin/` (`vipsthumbnail.exe`, libvips and the libraries it loads), libvips 8.18.7.
 - Licence: GNU Lesser General Public License, version 2.1 or later, for libvips. Text:

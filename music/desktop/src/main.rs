@@ -10,6 +10,7 @@ use asteria_framework_client::profiles::Profiles;
 use asteria_framework_desktop::{
     AboutPage, LocalServerPage, LocalServerSpec, first_run_pages, service_spec, take_setup_request,
 };
+use asteria_framework_server::Tool;
 use corundum_framework::egui;
 use corundum_framework::gui::first_run::FirstRun;
 use corundum_framework::gui::store::Store;
@@ -31,6 +32,8 @@ static LOCAL: LocalServerSpec = LocalServerSpec {
     server: asteria_music_server::spec,
     service,
     url: "http://127.0.0.1:7811",
+    // Cover thumbnails; offline audio is made in the server.
+    tools: &[Tool::Vipsthumbnail],
 };
 
 /// What the Velopack package is: the data directory's name, the command it puts on `PATH`
@@ -185,6 +188,7 @@ fn app(paths: &AppPaths, ctx: &egui::Context, spawn_player: &SpawnPlayer) -> Box
                     command: "asteria-music",
                 },
                 LAUNCHER,
+                LOCAL.tools,
             )),
         ]),
     )

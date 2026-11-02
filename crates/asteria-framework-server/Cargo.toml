@@ -33,6 +33,11 @@ tower = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
 image = { workspace = true, features = ["jpeg"] }
 webp.workspace = true
+symphonia.workspace = true
+ogg.workspace = true
+opus-pure.workspace = true
+rubato.workspace = true
+opus.workspace = true
 
 [dev-dependencies]
 blake3.workspace = true

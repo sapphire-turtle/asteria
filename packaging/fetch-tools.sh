@@ -3,27 +3,44 @@
 # that becomes the package (`vpk pack --packDir`), beside the main executable, where the
 # server looks first:
 #
-#   windows: <dest>/ffmpeg.exe and <dest>/vips/bin/vipsthumbnail.exe with libvips's DLLs
-#   macos:   <dest>/ffmpeg, one universal binary of the arm64 and x86_64 builds
+#   photos on windows: <dest>/ffmpeg.exe and <dest>/vips/bin/vipsthumbnail.exe with
+#                      libvips's DLLs
+#   photos on macos:   <dest>/ffmpeg, one universal binary of the arm64 and x86_64 builds
+#   music on windows:  <dest>/vips/bin/vipsthumbnail.exe with libvips's DLLs (cover
+#                      thumbnails; the server makes offline audio itself)
+#   music on macos:    nothing (macOS's sips makes the cover thumbnails)
 #
 # and their licences into <dest>/tools/LICENSES. Each download is checked against the
-# SHA-256 in packaging/tools.env, and ffmpeg must list the libopus and libwebp encoders, or
-# the script fails and the release stops. The programs are only run on the OS they are for;
-# elsewhere (a Linux machine trying the script) the checks are skipped with a note.
+# SHA-256 in packaging/tools.env, and ffmpeg must list the libwebp encoder, or the script
+# fails and the release stops. The programs are only run on the OS they are for; elsewhere
+# (a Linux machine trying the script) the checks are skipped with a note.
 #
-# usage: packaging/fetch-tools.sh <windows|macos> <dest>
+# usage: packaging/fetch-tools.sh <windows|macos> <photos|music> <dest>
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=packaging/tools.env
 . "$here/tools.env"
 
-if [ $# -ne 2 ] || { [ "$1" != windows ] && [ "$1" != macos ]; }; then
-  echo "usage: $0 <windows|macos> <dest>" >&2
+if [ $# -ne 3 ] || { [ "$1" != windows ] && [ "$1" != macos ]; } ||
+  { [ "$2" != photos ] && [ "$2" != music ]; }; then
+  echo "usage: $0 <windows|macos> <photos|music> <dest>" >&2
   exit 2
 fi
 os=$1
-dest=$2
+app=$2
+dest=$3
+
+# What the package carries: ffmpeg for photos' video thumbnails, and on Windows libvips for
+# both apps' image thumbnails.
+ffmpeg=no
+vips=no
+[ "$app" = photos ] && ffmpeg=yes
+[ "$os" = windows ] && vips=yes
+if [ $ffmpeg = no ] && [ $vips = no ]; then
+  echo "The $app package for $os carries no tools."
+  exit 0
+fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -53,32 +70,32 @@ fetch() {
   echo "$1: SHA-256 matches"
 }
 
-# check_encoders <command...>: fails unless the ffmpeg the command runs lists the encoders
-# the server needs: libopus (music's offline copies) and libwebp (video thumbnails).
+# check_encoders <command...>: fails unless the ffmpeg the command runs lists the encoder
+# the server needs: libwebp (video thumbnails).
 check_encoders() {
   local encoders
   encoders=$("$@" -hide_banner -encoders)
-  for encoder in libopus libwebp; do
-    if ! grep -qw "$encoder" <<< "$encoders"; then
-      echo "error: $* has no $encoder encoder" >&2
-      exit 1
-    fi
-  done
-  echo "$*: libopus and libwebp present"
+  if ! grep -qw libwebp <<< "$encoders"; then
+    echo "error: $* has no libwebp encoder" >&2
+    exit 1
+  fi
+  echo "$*: libwebp present"
 }
 
 case $os in
   windows)
-    fetch ffmpeg.zip "$WIN_FFMPEG_URL" "$WIN_FFMPEG_SHA256"
-    fetch vips.zip "$WIN_VIPS_URL" "$WIN_VIPS_SHA256"
-    unzip -q "$work/ffmpeg.zip" -d "$work/ffmpeg"
-    unzip -q "$work/vips.zip" -d "$work/vips"
-    # Each archive holds one directory named after its version.
-    ffmpeg_dir=$(echo "$work"/ffmpeg/*/)
-    vips_dir=$(echo "$work"/vips/*/)
+    if [ $ffmpeg = yes ]; then
+      fetch ffmpeg.zip "$WIN_FFMPEG_URL" "$WIN_FFMPEG_SHA256"
+      unzip -q "$work/ffmpeg.zip" -d "$work/ffmpeg"
+      # The archive holds one directory named after its version.
+      ffmpeg_dir=$(echo "$work"/ffmpeg/*/)
+      cp "$ffmpeg_dir/bin/ffmpeg.exe" "$dest/ffmpeg.exe"
+      cp "$ffmpeg_dir/LICENSE.txt" "$licenses/ffmpeg-LICENSE.txt"
+    fi
 
-    cp "$ffmpeg_dir/bin/ffmpeg.exe" "$dest/ffmpeg.exe"
-    cp "$ffmpeg_dir/LICENSE.txt" "$licenses/ffmpeg-LICENSE.txt"
+    fetch vips.zip "$WIN_VIPS_URL" "$WIN_VIPS_SHA256"
+    unzip -q "$work/vips.zip" -d "$work/vips"
+    vips_dir=$(echo "$work"/vips/*/)
     # bin: the programs, the DLLs they load and libvips's modules; etc: the configuration
     # files libvips's dependencies look for beside bin.
     mkdir -p "$dest/vips"
@@ -89,7 +106,9 @@ case $os in
 
     case $(uname -s) in
       MINGW* | MSYS* | CYGWIN*)
-        check_encoders "$dest/ffmpeg.exe"
+        if [ $ffmpeg = yes ]; then
+          check_encoders "$dest/ffmpeg.exe"
+        fi
         "$dest/vips/bin/vipsthumbnail.exe" --vips-version
         ;;
       *)

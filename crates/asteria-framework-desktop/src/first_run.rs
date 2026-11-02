@@ -218,7 +218,7 @@ impl FirstRunPage for ToolsPage {
             not_running(ui, self.spec.app);
             ui.add_space(12.0);
         }
-        tools_ui(ui);
+        tools_ui(ui, self.spec.tools);
         PageAction::Stay
     }
 }

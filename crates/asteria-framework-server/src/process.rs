@@ -1,7 +1,8 @@
-//! Rendering with `vipsthumbnail` (image thumbnails) and `ffmpeg` (video thumbnails and
-//! offline audio).
+//! Rendering with `vipsthumbnail` (image thumbnails) and `ffmpeg` (video thumbnails), and
+//! offline audio made in the server (see [`crate::offline_audio`]).
 //!
-//! Renders are limited to `max_jobs` at a time, bounded by a timeout (the child is killed),
+//! Renders are limited to `max_jobs` at a time, bounded by a timeout (a child is killed, an
+//! encode is told to stop),
 //! and shared: concurrent requests for the same `(hash, preset)` wait for one render.
 //! At most `max_jobs * 32` renders are queued or running; beyond that a request gets
 //! [`ProcessError::Busy`]. A queued render whose requests have all gone away is dropped
@@ -14,7 +15,7 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::{Semaphore, watch};
 
+use crate::offline_audio::{self, EncodeError};
 use crate::sips;
 
 /// Environment variable naming the `vipsthumbnail` executable.
@@ -56,11 +58,11 @@ pub fn find_image_tool() -> Option<ImageTool> {
 }
 
 /// An external program the server runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tool {
     /// Image thumbnails (libvips-tools).
     Vipsthumbnail,
-    /// Video thumbnails and offline audio.
+    /// Video thumbnails.
     Ffmpeg,
 }
 
@@ -216,7 +218,7 @@ const AUDIO_JOBS: usize = 1;
 pub enum Preset {
     Thumb,
     Preview,
-    /// Ogg Opus for listening offline; made from audio by ffmpeg.
+    /// Ogg Opus for listening offline; made from audio in the server, with no external tool.
     OfflineAudio,
 }
 
@@ -292,6 +294,19 @@ pub enum ProcessError {
     Busy,
 }
 
+/// Makes offline audio from a source into a file, stopping when the flag is set.
+type AudioEncoder = dyn Fn(&Path, &Path, &AtomicBool) -> Result<(), ProcessError> + Send + Sync;
+
+/// [`offline_audio::encode_offline_audio`] with its errors as [`ProcessError`]s. A cancelled
+/// encode ran out of time.
+fn encode_audio(src: &Path, dest: &Path, cancel: &AtomicBool) -> Result<(), ProcessError> {
+    offline_audio::encode_offline_audio(src, dest, cancel).map_err(|e| match e {
+        EncodeError::Cancelled => ProcessError::TimedOut,
+        EncodeError::Unprocessable(reason) => ProcessError::Unprocessable(reason),
+        EncodeError::Io(e) => ProcessError::Io(e),
+    })
+}
+
 type Outcome = Result<PathBuf, ProcessError>;
 /// The sending side of one render's result; waiters `subscribe` to it, so its
 /// `receiver_count` is the number of requests still waiting.
@@ -328,6 +343,8 @@ struct Inner {
     /// The sRGB profile `sips` converts to; without the file it converts nothing.
     srgb_profile: PathBuf,
     ffmpeg: OsString,
+    /// What makes offline audio: [`offline_audio`] unless a test replaced it.
+    audio_encoder: Arc<AudioEncoder>,
     /// Renders queued or running, by key. Its length is the queue size.
     inflight: Mutex<HashMap<(String, Preset), Pending>>,
     on_unprocessable: OnceLock<Hook>,
@@ -343,6 +360,15 @@ impl Drop for Cleanup {
         for p in &self.0 {
             let _ = std::fs::remove_file(p);
         }
+    }
+}
+
+/// Sets the flag when dropped, on every exit path.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
     }
 }
 
@@ -428,6 +454,7 @@ impl Processor {
                 image,
                 srgb_profile: SRGB_PROFILE.into(),
                 ffmpeg: ffmpeg.into(),
+                audio_encoder: Arc::new(encode_audio),
                 inflight: Mutex::new(HashMap::new()),
                 on_unprocessable: OnceLock::new(),
                 started: AtomicUsize::new(0),
@@ -451,6 +478,19 @@ impl Processor {
         Arc::get_mut(&mut self.inner)
             .expect("a new processor is not shared yet")
             .audio_timeout = timeout;
+        self
+    }
+
+    /// Replaces what makes offline audio, for tests: it gets the source, the file to write
+    /// and the cancel flag, which is set when the encode runs out of time.
+    #[doc(hidden)]
+    pub fn with_audio_encoder(
+        mut self,
+        encoder: impl Fn(&Path, &Path, &AtomicBool) -> Result<(), ProcessError> + Send + Sync + 'static,
+    ) -> Processor {
+        Arc::get_mut(&mut self.inner)
+            .expect("a new processor is not shared yet")
+            .audio_encoder = Arc::new(encoder);
         self
     }
 
@@ -771,7 +811,7 @@ impl Inner {
                 self.run_ffmpeg(path, &tmp, preset).await
             }
             (MediaKind::Audio, Preset::OfflineAudio, Source::File(path)) => {
-                self.run_ffmpeg_audio(path, &tmp).await
+                self.encode_audio(path, &tmp).await
             }
             _ => Err(ProcessError::Unprocessable(
                 "cannot render this kind of media with this preset".into(),
@@ -888,24 +928,31 @@ impl Inner {
         }
     }
 
-    /// Transcodes the first audio stream to Ogg Opus without tags or cover art.
-    async fn run_ffmpeg_audio(&self, src: &Path, tmp: &Path) -> Result<(), ProcessError> {
-        let mut cmd = Command::new(&self.ffmpeg);
-        cmd.args(["-nostdin", "-v", "error", "-y"])
-            // As for video: plain files in ordinary audio containers only.
-            .args(["-protocol_whitelist", "file"])
-            .args(["-format_whitelist", "flac,mp3,mov,mp4,m4a,ogg,wav,aac"])
-            .arg("-i")
-            .arg(src)
-            .args(["-map", "0:a:0", "-map_metadata", "-1", "-vn"])
-            .args(["-c:a", "libopus", "-b:a", "96k", "-vbr", "on", "-f", "ogg"])
-            .arg(tmp);
-        match run_tool(cmd, "ffmpeg", self.audio_timeout, tmp).await {
-            Err(ProcessError::Unprocessable(reason)) if reason == "timeout" => {
+    /// Makes offline audio in a blocking thread within the audio timeout. When time is up
+    /// the encode is told to stop, and the result comes once it has. It is told to stop too
+    /// if this future is dropped (the runtime shutting down), which would otherwise wait for
+    /// the whole encode.
+    async fn encode_audio(&self, src: &Path, tmp: &Path) -> Result<(), ProcessError> {
+        let cancel = CancelOnDrop(Arc::new(AtomicBool::new(false)));
+        let encoder = self.audio_encoder.clone();
+        let (src, dest, flag) = (src.to_path_buf(), tmp.to_path_buf(), cancel.0.clone());
+        let mut task = tokio::task::spawn_blocking(move || encoder(&src, &dest, &flag));
+        let joined = match tokio::time::timeout(self.audio_timeout, &mut task).await {
+            Ok(joined) => joined,
+            Err(_) => {
+                cancel.0.store(true, Ordering::SeqCst);
+                let _ = task.await;
                 tracing::warn!("an offline-audio encode timed out; not recording it");
-                Err(ProcessError::TimedOut)
+                return Err(ProcessError::TimedOut);
             }
-            other => other,
+        };
+        match joined {
+            Ok(result) => result,
+            Err(e) if e.is_panic() => {
+                tracing::error!("an offline-audio encode panicked");
+                Err(ProcessError::Unprocessable("the encoder panicked".into()))
+            }
+            Err(e) => Err(ProcessError::Io(format!("the encode did not finish: {e}"))),
         }
     }
 }
@@ -1028,13 +1075,6 @@ async fn run_child(
             .map(str::trim)
             .find(|l| !l.is_empty() && !l.contains("VIPS-WARNING"))
             .unwrap_or("no error output");
-        if name == "ffmpeg"
-            && (stderr.contains("Unknown encoder 'libopus'")
-                || stderr.contains("Encoder libopus not found"))
-        {
-            tracing::error!("this ffmpeg was built without libopus");
-            return Err(ProcessError::ToolMissing("ffmpeg with libopus"));
-        }
         if is_io_failure(&stderr) {
             return Err(ProcessError::Io(format!(
                 "{name} failed ({status}): {detail}"

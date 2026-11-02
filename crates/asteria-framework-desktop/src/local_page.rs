@@ -170,7 +170,7 @@ impl LocalServerPage {
         }
         ui.add_space(16.0);
         ui.heading(tr!(ui, "asteria-desktop-tools-title"));
-        tools_ui(ui);
+        tools_ui(ui, self.spec.tools);
     }
 
     fn ready_ui(&mut self, ui: &mut egui::Ui, library: &std::path::Path, listen: SocketAddr) {

@@ -40,6 +40,7 @@ pub static SPEC: LocalServerSpec = LocalServerSpec {
     server,
     service,
     url: "http://127.0.0.1:7899",
+    tools: &[asteria_framework_server::Tool::Vipsthumbnail],
 };
 
 /// A context with the crate's strings and the accessibility tree on.
