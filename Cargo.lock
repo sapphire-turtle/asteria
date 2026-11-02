@@ -444,6 +444,7 @@ dependencies = [
  "asteria-music-gui",
  "asteria-music-server",
  "corundum-framework",
+ "corundum-framework-build",
  "tempfile",
  "tracing-subscriber",
 ]
@@ -536,6 +537,7 @@ dependencies = [
  "asteria-photos-gui",
  "asteria-photos-server",
  "corundum-framework",
+ "corundum-framework-build",
  "tempfile",
  "tracing-subscriber",
 ]
@@ -1309,6 +1311,16 @@ dependencies = [
  "corundum-framework-platform",
  "corundum-framework-service",
  "corundum-framework-update",
+]
+
+[[package]]
+name = "corundum-framework-build"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0247fc5751c8b54f7c0b8dd43a6f0b1511c05919a2103c10b61352e921c4c0ab"
+dependencies = [
+ "corundum-framework-platform",
+ "winresource",
 ]
 
 [[package]]
@@ -5073,7 +5085,7 @@ checksum = "609c5606d9d357b26e4ee1a7a01beac396628d0fa01ebbade2a09cefb88e65af"
 dependencies = [
  "fastrand",
  "tempfile",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7296,6 +7308,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2bc6d36480b829272a5bdabf08e6dca8004761c1da7e35efef800540c66221b"
+dependencies = [
+ "toml",
+ "version_check",
 ]
 
 [[package]]

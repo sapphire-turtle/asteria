@@ -13,14 +13,28 @@ publish = false
 name = "asteria-music-desktop"
 path = "src/main.rs"
 
+# The Windows console shim the package puts on `PATH` as `asteria-music.exe`, so the GUI
+# binary answers in a terminal.
+[[bin]]
+name = "asteria-music-console"
+path = "src/bin/console.rs"
+
+# The icon files `vpk pack --icon` takes, for the release workflow.
+[[example]]
+name = "icons"
+path = "examples/icons.rs"
+
 [dependencies]
 asteria-framework-client = { path = "../../crates/asteria-framework-client" }
 asteria-framework-desktop = { path = "../../crates/asteria-framework-desktop" }
 asteria-framework-server = { path = "../../crates/asteria-framework-server" }
 asteria-music-gui = { path = "../crates/asteria-music-gui" }
 asteria-music-server = { path = "../crates/asteria-music-server" }
-corundum-framework = { workspace = true, features = ["gui", "serde", "eframe", "service"] }
+corundum-framework = { workspace = true, features = ["gui", "serde", "eframe", "service", "gui-package", "single-instance", "console"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[build-dependencies]
+corundum-framework-build.workspace = true
 
 [dev-dependencies]
 # The player's fakes, for the window's tests.

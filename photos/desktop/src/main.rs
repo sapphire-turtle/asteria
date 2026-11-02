@@ -1,3 +1,4 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 //! `asteria-photos-desktop`: with no arguments it opens the window; with any, it is the
 //! server's command line, the same as `asteria-photos` (headless). It also takes the files
 //! dropped on the window to the app, and offers the server on this computer: the first run
@@ -9,14 +10,17 @@ use std::path::PathBuf;
 
 use asteria_framework_client::profiles::Profiles;
 use asteria_framework_desktop::{
-    LocalServerPage, LocalServerSpec, first_run_pages, service_spec, take_setup_request,
+    AboutPage, LocalServerPage, LocalServerSpec, first_run_pages, service_spec, take_setup_request,
 };
 use corundum_framework::egui;
 use corundum_framework::gui::first_run::FirstRun;
 use corundum_framework::gui::store::Store;
 use corundum_framework::gui::tr;
 use corundum_framework::gui::window::{self, WindowOptions};
+use corundum_framework::package::{CliSpec, PackageSpec, Services};
 use corundum_framework::platform::dirs::AppDirs;
+use corundum_framework::platform::instance::Instance;
+use corundum_framework::platform::launcher::LauncherSpec;
 use corundum_framework::service::ServiceSpec;
 
 use asteria_photos_gui::{APP_NAME, AppPaths, PhotosApp};
@@ -27,6 +31,29 @@ static LOCAL: LocalServerSpec = LocalServerSpec {
     server: asteria_photos_server::spec,
     service,
     url: "http://127.0.0.1:7810",
+};
+
+/// What the Velopack package is: the data directory's name, the command it puts on `PATH`
+/// and the server's service, which an update stops and starts again.
+static PACKAGE: PackageSpec = PackageSpec {
+    app_name: APP_NAME,
+    on_installed: None,
+    on_uninstalling: None,
+    before_apply: None,
+    cli: Some(CliSpec {
+        command: "asteria-photos",
+    }),
+    services: Services::new(&[service]),
+};
+
+/// The app's entry in the app menu.
+const LAUNCHER: LauncherSpec = LauncherSpec {
+    id: "asteria-photos",
+    name: "Asteria Photos",
+    description: "Your photo library, served from your own computer",
+    category: "Graphics",
+    icon_svg: include_bytes!("../../../docs/icons/asteria-photos.svg"),
+    bundle_prefix: "net.sapphire-turtle",
 };
 
 /// The background service that runs `asteria-photos serve`.
@@ -104,10 +131,10 @@ fn init_logging() {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    if std::env::args_os().nth(1).is_some() {
-        asteria_framework_server::cli::main(asteria_photos_server::spec())
-    }
-    run()
+    // Before `start`, so that what goes wrong in Velopack's hooks is logged.
+    init_logging();
+    let instance = asteria_framework_desktop::start(&LOCAL, &PACKAGE);
+    run(instance)
 }
 
 /// What the window shows: the first run, or the app.
@@ -178,10 +205,16 @@ fn first_run(paths: &AppPaths) -> FirstRun {
 
 /// The app over `paths`, with Settings → Local server.
 fn app(paths: &AppPaths, ctx: &egui::Context) -> Box<PhotosApp> {
-    Box::new(
-        PhotosApp::new(paths.clone(), ctx)
-            .with_extra_settings(vec![Box::new(LocalServerPage::new(&LOCAL))]),
-    )
+    Box::new(PhotosApp::new(paths.clone(), ctx).with_extra_settings(vec![
+        Box::new(LocalServerPage::new(&LOCAL)),
+        Box::new(AboutPage::new(
+            "Asteria Photos",
+            CliSpec {
+                command: "asteria-photos",
+            },
+            LAUNCHER,
+        )),
+    ]))
 }
 
 impl corundum_framework::eframe::App for DesktopApp {
@@ -190,14 +223,17 @@ impl corundum_framework::eframe::App for DesktopApp {
     }
 }
 
-/// Open the window and run the app until it closes.
-fn run() -> Result<(), Box<dyn Error>> {
-    init_logging();
+/// Open the window and run the app until it closes. `instance` is the single-instance lock
+/// `start` took, kept by the window.
+fn run(instance: Instance) -> Result<(), Box<dyn Error>> {
     // Before anything opens the settings: on Windows they move from Roaming to Local.
     asteria_framework_client::migrate_dirs(APP_NAME)?;
     let dirs = AppDirs::new(APP_NAME).ok_or("this system has no config or cache directory")?;
     let paths = paths(&dirs);
-    let options = WindowOptions::new(APP_NAME).remember(Store::new(&dirs));
+    let options = WindowOptions::new(APP_NAME)
+        .remember(Store::new(&dirs))
+        .instance(instance)
+        .launcher(LAUNCHER);
     window::run(options, move |cc| {
         Box::new(DesktopApp::new(paths, &cc.egui_ctx))
     })?;
@@ -221,6 +257,14 @@ mod tests {
         fn bytes(&self) -> Result<Vec<u8>, String> {
             Err("not read".into())
         }
+    }
+
+    #[test]
+    fn the_package_is_the_apps_command_and_server() {
+        assert_eq!(PACKAGE.app_name, APP_NAME);
+        assert_eq!(PACKAGE.cli.map(|c| c.command), Some("asteria-photos"));
+        assert_eq!(LAUNCHER.id, "asteria-photos");
+        assert_eq!(LAUNCHER.name, "Asteria Photos");
     }
 
     #[test]
