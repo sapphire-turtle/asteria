@@ -69,8 +69,12 @@ pub fn start(local: &'static LocalServerSpec, package: &'static PackageSpec) -> 
         console::attach_parent();
         asteria_framework_server::cli::main((local.server)());
     }
-    let start = corundum_framework::package::start(package);
-    tracing::debug!("package start: {start:?}");
+    // Only inside a package: elsewhere (`cargo run`, a `cargo install`ed desktop) there is
+    // no Velopack to start, and its "not installed" error would read like a real failure.
+    if corundum_framework::platform::package::current().is_some() {
+        let start = corundum_framework::package::start(package);
+        tracing::debug!("package start: {start:?}");
+    }
     if entry == Entry::Cli {
         console::attach_parent();
         asteria_framework_server::cli::main((local.server)());
@@ -93,6 +97,11 @@ pub fn updater() -> Option<Updater> {
 fn start_updates(package: &'static PackageSpec) {
     let updater = match Updater::new(package, source()) {
         Ok(updater) => updater,
+        // Outside a package there is nothing to update: not worth a warning.
+        Err(corundum_framework::package::Error::NotPackaged) => {
+            tracing::debug!("not in a package: no updater");
+            return;
+        }
         Err(e) => {
             tracing::warn!("no updater: {e}");
             return;

@@ -21,8 +21,8 @@ path = "src/bin/console.rs"
 
 # The icon files `vpk pack --icon` takes, for the release workflow.
 [[example]]
-name = "icons"
-path = "examples/icons.rs"
+name = "music-icons"
+path = "examples/music-icons.rs"
 
 [dependencies]
 asteria-framework-client = { path = "../../crates/asteria-framework-client" }
