@@ -2,6 +2,7 @@
 //! line on `PATH` (macOS and Linux), its entry in the app menu, and the licences.
 
 use asteria_framework_client::settings::ExtraSettingsPage;
+use asteria_framework_server::Tool;
 use corundum_framework::egui;
 use corundum_framework::gui::settings::LauncherRow;
 use corundum_framework::gui::tr;
@@ -20,14 +21,23 @@ pub struct AboutPage {
     #[cfg(not(windows))]
     cli: corundum_framework::gui::settings::CliRow,
     launcher: LauncherRow,
+    /// The licence line: which tools the app's packages carry.
+    licence: &'static str,
     /// Made on the first `ui`.
     updates: Option<UpdatesPanel>,
 }
 
 impl AboutPage {
     /// The page for the app called `label`, whose package puts `cli` on `PATH` and lists it
-    /// in the app menu as `launcher`.
-    pub fn new(label: &'static str, cli: CliSpec, launcher: LauncherSpec) -> AboutPage {
+    /// in the app menu as `launcher`. `tools` are the external tools its server uses (its
+    /// [`LocalServerSpec::tools`](crate::LocalServerSpec)), which name what the licence line
+    /// says its packages carry.
+    pub fn new(
+        label: &'static str,
+        cli: CliSpec,
+        launcher: LauncherSpec,
+        tools: &[Tool],
+    ) -> AboutPage {
         #[cfg(windows)]
         let _ = cli;
         AboutPage {
@@ -35,6 +45,7 @@ impl AboutPage {
             #[cfg(not(windows))]
             cli: corundum_framework::gui::settings::CliRow::new(cli),
             launcher: LauncherRow::new(launcher),
+            licence: licence_id(tools),
             updates: None,
         }
     }
@@ -78,7 +89,21 @@ impl ExtraSettingsPage for AboutPage {
         self.cli.ui(ui);
         self.launcher.ui(ui);
         ui.add_space(16.0);
-        ui.label(egui::RichText::new(tr!(ui, "asteria-desktop-about-licence")).weak());
+        ui.label(egui::RichText::new(tr!(ui, self.licence)).weak());
+    }
+}
+
+/// The licence line for an app whose server uses `tools`. The packages carry ffmpeg on
+/// Windows and macOS when the app uses it, and libvips on Windows when it uses
+/// vipsthumbnail (macOS has sips); see packaging/fetch-tools.sh.
+fn licence_id(tools: &[Tool]) -> &'static str {
+    match (
+        tools.contains(&Tool::Ffmpeg),
+        tools.contains(&Tool::Vipsthumbnail),
+    ) {
+        (true, _) => "asteria-desktop-about-licence-ffmpeg-vips",
+        (false, true) => "asteria-desktop-about-licence-vips",
+        (false, false) => "asteria-desktop-about-licence-none",
     }
 }
 
@@ -88,10 +113,12 @@ mod tests {
 
     use super::*;
 
-    const IDS: [&str; 3] = [
+    const IDS: [&str; 5] = [
         "asteria-desktop-about",
         "asteria-desktop-about-version",
-        "asteria-desktop-about-licence",
+        "asteria-desktop-about-licence-ffmpeg-vips",
+        "asteria-desktop-about-licence-vips",
+        "asteria-desktop-about-licence-none",
     ];
 
     /// A context with this crate's strings in `lang`.
@@ -122,5 +149,34 @@ mod tests {
         assert!(
             i18n::tr_args(&en, IDS[1], &[("version", i18n::Arg::from("0.1.0"))]).contains("0.1.0")
         );
+    }
+
+    #[test]
+    fn the_licence_names_only_what_the_app_bundles() {
+        assert_eq!(
+            licence_id(&[Tool::Vipsthumbnail, Tool::Ffmpeg]),
+            "asteria-desktop-about-licence-ffmpeg-vips"
+        );
+        assert_eq!(
+            licence_id(&[Tool::Vipsthumbnail]),
+            "asteria-desktop-about-licence-vips"
+        );
+        assert_eq!(licence_id(&[]), "asteria-desktop-about-licence-none");
+        for lang in ["en", "ja"] {
+            let ctx = ctx_in(lang);
+            let music = i18n::tr_args(&ctx, licence_id(&[Tool::Vipsthumbnail]), &[]);
+            assert!(!music.contains("ffmpeg"), "{lang}: {music}");
+            assert!(music.contains("libvips"), "{lang}: {music}");
+            let photos = i18n::tr_args(&ctx, licence_id(&[Tool::Vipsthumbnail, Tool::Ffmpeg]), &[]);
+            assert!(
+                photos.contains("ffmpeg") && photos.contains("libvips"),
+                "{lang}: {photos}"
+            );
+            let none = i18n::tr_args(&ctx, licence_id(&[]), &[]);
+            assert!(
+                !none.contains("ffmpeg") && !none.contains("libvips"),
+                "{lang}: {none}"
+            );
+        }
     }
 }

@@ -188,6 +188,7 @@ fn app(paths: &AppPaths, ctx: &egui::Context, spawn_player: &SpawnPlayer) -> Box
                     command: "asteria-music",
                 },
                 LAUNCHER,
+                LOCAL.tools,
             )),
         ]),
     )

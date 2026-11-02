@@ -219,6 +219,7 @@ fn app(paths: &AppPaths, ctx: &egui::Context) -> Box<PhotosApp> {
                 command: "asteria-photos",
             },
             LAUNCHER,
+            LOCAL.tools,
         )),
     ]))
 }
