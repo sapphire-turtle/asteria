@@ -25,6 +25,7 @@ pub use paths::LocalPaths;
 pub use service::service_spec;
 pub use tools::tools_ui;
 
+use asteria_framework_server::Tool;
 use asteria_framework_server::cli::AppSpec;
 use corundum_framework::service::ServiceSpec;
 
@@ -47,4 +48,7 @@ pub struct LocalServerSpec {
     /// (`http://127.0.0.1:7810`). The first run registers the address the server actually
     /// listens on, which is this unless an existing config says otherwise.
     pub url: &'static str,
+    /// The external programs the server uses for this app, shown on the first run and the
+    /// settings page. Empty when it needs none.
+    pub tools: &'static [Tool],
 }

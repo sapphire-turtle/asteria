@@ -34,9 +34,9 @@ asteria-desktop-not-running = The server is not running. To start it, run:
 
 # The external tools.
 asteria-desktop-tools-title = External tools
-asteria-desktop-tools-intro = The server makes thumbnails and smaller copies with these programs. Without them it still runs, just without those.
+asteria-desktop-tools-intro = The server makes thumbnails with these programs. Without them it still runs, just without thumbnails.
 asteria-desktop-tools-vips-purpose = Image thumbnails.
-asteria-desktop-tools-ffmpeg-purpose = Video thumbnails, and smaller copies of music for offline use.
+asteria-desktop-tools-ffmpeg-purpose = Video thumbnails.
 asteria-desktop-tools-found = Found: { $path }
 asteria-desktop-tools-missing = Not found.
 asteria-desktop-tools-sips = Not installed: images are made with sips, which macOS has built in.
@@ -45,6 +45,7 @@ asteria-desktop-tools-macos = Install it with Homebrew: brew install { $package 
 asteria-desktop-tools-windows-vips = Download libvips for Windows (github.com/libvips/build-win64-mxe/releases), and add its bin folder to PATH.
 asteria-desktop-tools-windows-ffmpeg = Download FFmpeg for Windows (ffmpeg.org/download.html), and add its bin folder to PATH.
 asteria-desktop-tools-env = Or set { $var } to the program's path.
+asteria-desktop-tools-none = The server of this app needs no external tools.
 asteria-desktop-tools-check-again = Check again
 
 # The "Local server" settings page.

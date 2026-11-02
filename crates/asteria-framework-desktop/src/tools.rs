@@ -16,15 +16,13 @@ struct Found {
     sips: bool,
 }
 
-const TOOLS: [Tool; 2] = [Tool::Vipsthumbnail, Tool::Ffmpeg];
-
-fn found_id() -> egui::Id {
-    egui::Id::unique("asteria_desktop_tools_found")
+fn found_id(tools: &[Tool]) -> egui::Id {
+    egui::Id::unique(("asteria_desktop_tools_found", tools))
 }
 
-fn look_up() -> Found {
+fn look_up(tools: &[Tool]) -> Found {
     Found {
-        paths: TOOLS.iter().map(|&tool| find_tool(tool)).collect(),
+        paths: tools.iter().map(|&tool| find_tool(tool)).collect(),
         sips: matches!(find_image_tool(), Some(ImageTool::Sips(_))),
     }
 }
@@ -68,22 +66,27 @@ fn install_hint(ui: &egui::Ui, tool: Tool) -> String {
     }
 }
 
-/// The external tools: for each, where it is, or that it is missing and how to install it.
-/// Without them the server still runs; it only makes no thumbnails or smaller copies. Shared
-/// by the first run and the settings page.
-pub fn tools_ui(ui: &mut egui::Ui) {
+/// The app's external tools (its [`LocalServerSpec::tools`](crate::LocalServerSpec)): for
+/// each, where it is, or that it is missing and how to install it. Without them the server
+/// still runs; it only makes no thumbnails. Shared by the first run and the settings page.
+pub fn tools_ui(ui: &mut egui::Ui, tools: &[Tool]) {
+    if tools.is_empty() {
+        ui.label(tr!(ui, "asteria-desktop-tools-none"));
+        return;
+    }
     let ctx = ui.ctx().clone();
-    let found = match ctx.data(|d| d.get_temp::<Found>(found_id())) {
+    let id = found_id(tools);
+    let found = match ctx.data(|d| d.get_temp::<Found>(id)) {
         Some(found) => found,
         None => {
-            let found = look_up();
-            ctx.data_mut(|d| d.insert_temp(found_id(), found.clone()));
+            let found = look_up(tools);
+            ctx.data_mut(|d| d.insert_temp(id, found.clone()));
             found
         }
     };
     ui.label(tr!(ui, "asteria-desktop-tools-intro"));
     ui.add_space(8.0);
-    for (&tool, path) in TOOLS.iter().zip(&found.paths) {
+    for (&tool, path) in tools.iter().zip(&found.paths) {
         let (name, var, purpose) = about(tool);
         ui.strong(name);
         ui.label(tr!(ui, purpose));
@@ -113,6 +116,6 @@ pub fn tools_ui(ui: &mut egui::Ui) {
         .button(tr!(ui, "asteria-desktop-tools-check-again"))
         .clicked()
     {
-        ctx.data_mut(|d| d.insert_temp(found_id(), look_up()));
+        ctx.data_mut(|d| d.insert_temp(id, look_up(tools)));
     }
 }
