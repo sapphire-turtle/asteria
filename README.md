@@ -8,9 +8,9 @@ Every release on [the releases page](https://github.com/sapphire-turtle/asteria/
 
 The desktop app is the window, the server's command line (`asteria-photos` / `asteria-music`) and, if you want one, a server on this computer, in one install. Download the file for your system (`photos` or `music` in the name):
 
-- Windows: `asteria-photos-desktop-photos-win-Setup.exe` installs it for you alone (in `%LocalAppData%\asteria-photos-desktop`, with a Start menu entry) and puts `asteria-photos` on `Path`; uninstall it from Settings › Apps. `...-photos-win-Portable.zip` runs without installing.
-- macOS: `asteria-photos-desktop-photos-osx-Setup.pkg`, one package for Apple silicon and Intel Macs. `...-photos-osx-Portable.zip` holds the app on its own. Settings › About offers to put `asteria-photos` on `PATH`.
-- Linux: `asteria-photos-desktop-photos-linux.AppImage`; make it executable (`chmod +x`) and run it. Settings › About offers to put `asteria-photos` on `PATH`.
+- Windows: `asteria-photos-desktop-win-Setup.exe` installs it for you alone (in `%LocalAppData%\asteria-photos-desktop`, with a Start menu entry) and puts `asteria-photos` on `Path`; uninstall it from Settings › Apps. `...-win-Portable.zip` runs without installing.
+- macOS: `asteria-photos-desktop-osx-Setup.pkg`, one package for Apple silicon and Intel Macs. `...-osx-Portable.zip` holds the app on its own. Settings › About offers to put `asteria-photos` on `PATH`.
+- Linux: `asteria-photos-desktop.AppImage`; make it executable (`chmod +x`) and run it. Settings › About offers to put `asteria-photos` on `PATH`.
 
 An installed app looks for a new release once a day, downloads it in the background, and applies it when you choose to (Settings › About), or at its next start.
 

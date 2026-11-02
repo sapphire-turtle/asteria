@@ -8,9 +8,9 @@
 
 desktop アプリは、ウィンドウ、サーバーのコマンドライン（`asteria-photos` / `asteria-music`）、必要ならこのコンピューターのサーバーまでを1回のインストールでそろえる。使うシステム向けのファイルを落とす（名前に `photos` か `music` が入る）。
 
-- Windows：`asteria-photos-desktop-photos-win-Setup.exe` は自分のユーザーだけに入れ（`%LocalAppData%\asteria-photos-desktop`、スタートメニューの項目つき）、`asteria-photos` を `Path` に入れる。アンインストールは設定 › アプリから。`...-photos-win-Portable.zip` はインストールせずに動く。
-- macOS：`asteria-photos-desktop-photos-osx-Setup.pkg`。Apple シリコンと Intel の Mac に共通の1つのパッケージ。`...-photos-osx-Portable.zip` はアプリだけ。設定 › 情報で `asteria-photos` を `PATH` に置ける。
-- Linux：`asteria-photos-desktop-photos-linux.AppImage`。実行できるようにして（`chmod +x`）起動する。設定 › 情報で `asteria-photos` を `PATH` に置ける。
+- Windows：`asteria-photos-desktop-win-Setup.exe` は自分のユーザーだけに入れ（`%LocalAppData%\asteria-photos-desktop`、スタートメニューの項目つき）、`asteria-photos` を `Path` に入れる。アンインストールは設定 › アプリから。`...-win-Portable.zip` はインストールせずに動く。
+- macOS：`asteria-photos-desktop-osx-Setup.pkg`。Apple シリコンと Intel の Mac に共通の1つのパッケージ。`...-osx-Portable.zip` はアプリだけ。設定 › 情報で `asteria-photos` を `PATH` に置ける。
+- Linux：`asteria-photos-desktop.AppImage`。実行できるようにして（`chmod +x`）起動する。設定 › 情報で `asteria-photos` を `PATH` に置ける。
 
 インストールしたアプリは1日ごとに新しいリリースを探してバックグラウンドで落とし、利用者が選んだとき（設定 › 情報）か次の起動時に適用する。
 

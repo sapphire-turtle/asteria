@@ -693,7 +693,7 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
 - **リリースの単位**：タグ `v<version>`（ワークスペース共通のバージョン）を push すると `release.yml` が動き、1つの GitHub リリースに次を載せる。
   - desktop の Velopack パッケージ：photos と music それぞれの linux（AppImage）、osx（`.pkg` とポータブル zip）、win（`Setup.exe` とポータブル zip）。
     - packId は `asteria-photos-desktop` / `asteria-music-desktop`。データのディレクトリ名（`asteria-<app>`）と変える。Windows では `%LocalAppData%\<packId>` に入り、アンインストールでそこが消えるため。
-    - チャネルは `<app>-<os>`（`photos-linux`、`music-win` など）。同じリリースに2つのアプリの `releases.<channel>.json` が並ぶので、アプリ名で分ける。Velopack はインストールしたときのチャネルで更新を探す。
+    - チャネルは `<app>-<os>`（`photos-linux`、`music-win` など）。同じリリースに2つのアプリの `releases.<channel>.json` が並ぶので、アプリ名で分ける。Velopack はインストールしたときのチャネルで更新を探す。インストーラーとポータブル版のファイル名からはアプリ名のチャネルを外す（`asteria-photos-desktop-win-Setup.exe`、`asteria-photos-desktop.AppImage`。sapphire-turtle/.github の `release-velopack.yml` が付け直す）。
     - 実行ファイル名（#41）：macOS と Linux はパッケージの中で `asteria-<app>` に改名し、`--mainExe asteria-<app>`。Windows は GUI の `asteria-<app>-desktop.exe` のまま `--mainExe` にし、横にコンソールのシム（cargo のバイナリ `asteria-<app>-console`）を `asteria-<app>.exe` として置く。
     - `--packTitle` は `Asteria Photos` / `Asteria Music`（ランチャーの名前と同じ）。
   - headless のバイナリ：sapphire-turtle/.github の共有ワークフロー `release-binary.yml` で、`asteria-<app>-headless-<os>-<arch>[.exe]`（linux-x86_64、linux-aarch64、macos-aarch64、windows-x86_64）。名前は corundum-framework-update が探す形。
