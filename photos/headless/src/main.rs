@@ -1,6 +1,8 @@
-//! `asteria-photos`: the Asteria Photos server's command line (`init`, `api-key`, `serve`), for
+//! `asteria-photos`: the Asteria Photos server's command line (`init`, `api-key`, `serve`, `update`), for
 //! hosts without a window.
 
 fn main() {
-    asteria_framework_server::cli::main(asteria_photos_server::spec())
+    let mut spec = asteria_photos_server::spec();
+    spec.release_asset = Some("asteria-photos-headless");
+    asteria_framework_server::cli::main(spec)
 }

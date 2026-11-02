@@ -18,6 +18,7 @@ pub mod process;
 pub mod profile;
 mod rpc;
 pub mod scan;
+pub(crate) mod sips;
 pub mod state;
 pub mod upload;
 pub mod upload_commit;
@@ -39,7 +40,9 @@ pub use error::ServerError;
 pub use ext::{AppExtension, ExtContext, McpTool, Rewrite, ThumbSource};
 pub use hashing::{RelinkReport, hash_pending, relink_orphans};
 pub use local::{LocalServer, setup_local, setup_local_at};
-pub use process::{Preset, ProcessError, Processor, Tool, find_tool, tool_program};
+pub use process::{
+    ImageTool, Preset, ProcessError, Processor, Tool, find_image_tool, find_tool, tool_program,
+};
 pub use rpc::{media_item, rpc_error};
 pub use scan::{ScanReport, scan, scan_cancellable};
 pub use state::AppState;

@@ -1,3 +1,4 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 //! `asteria-music-desktop`: with no arguments it opens the window; with any, it is the
 //! server's command line, the same as `asteria-music` (headless). It offers the server on
 //! this computer: the first run when no server is registered, and Settings → Local server
@@ -7,13 +8,16 @@ use std::error::Error;
 
 use asteria_framework_client::profiles::Profiles;
 use asteria_framework_desktop::{
-    LocalServerPage, LocalServerSpec, first_run_pages, service_spec, take_setup_request,
+    AboutPage, LocalServerPage, LocalServerSpec, first_run_pages, service_spec, take_setup_request,
 };
 use corundum_framework::egui;
 use corundum_framework::gui::first_run::FirstRun;
 use corundum_framework::gui::store::Store;
 use corundum_framework::gui::window::{self, WindowOptions};
+use corundum_framework::package::{CliSpec, PackageSpec, Services};
 use corundum_framework::platform::dirs::AppDirs;
+use corundum_framework::platform::instance::Instance;
+use corundum_framework::platform::launcher::LauncherSpec;
 use corundum_framework::service::ServiceSpec;
 
 use asteria_music_gui::player::Player;
@@ -27,6 +31,29 @@ static LOCAL: LocalServerSpec = LocalServerSpec {
     server: asteria_music_server::spec,
     service,
     url: "http://127.0.0.1:7811",
+};
+
+/// What the Velopack package is: the data directory's name, the command it puts on `PATH`
+/// and the server's service, which an update stops and starts again.
+static PACKAGE: PackageSpec = PackageSpec {
+    app_name: APP_NAME,
+    on_installed: None,
+    on_uninstalling: None,
+    before_apply: None,
+    cli: Some(CliSpec {
+        command: "asteria-music",
+    }),
+    services: Services::new(&[service]),
+};
+
+/// The app's entry in the app menu.
+const LAUNCHER: LauncherSpec = LauncherSpec {
+    id: "asteria-music",
+    name: "Asteria Music",
+    description: "Your music library, served from your own computer",
+    category: "AudioVideo",
+    icon_svg: include_bytes!("../../../docs/icons/asteria-music.svg"),
+    bundle_prefix: "net.sapphire-turtle",
 };
 
 /// The background service that runs `asteria-music serve`.
@@ -64,10 +91,14 @@ fn init_logging() {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    if std::env::args_os().nth(1).is_some() {
-        asteria_framework_server::cli::main(asteria_music_server::spec())
+    // Before `start`, so that what goes wrong in Velopack's hooks is logged; not for `serve`,
+    // whose server sets up its own logging.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if asteria_framework_desktop::entry(&args) != asteria_framework_desktop::Entry::Serve {
+        init_logging();
     }
-    run()
+    let instance = asteria_framework_desktop::start(&LOCAL, &PACKAGE);
+    run(instance)
 }
 
 /// Starts the playback thread for an app made in `ctx`.
@@ -146,8 +177,16 @@ fn first_run(paths: &AppPaths) -> FirstRun {
 /// The app over `paths`, with a new player and Settings → Local server.
 fn app(paths: &AppPaths, ctx: &egui::Context, spawn_player: &SpawnPlayer) -> Box<MusicApp> {
     Box::new(
-        MusicApp::new(paths.clone(), ctx, spawn_player(ctx))
-            .with_extra_settings(vec![Box::new(LocalServerPage::new(&LOCAL))]),
+        MusicApp::new(paths.clone(), ctx, spawn_player(ctx)).with_extra_settings(vec![
+            Box::new(LocalServerPage::new(&LOCAL)),
+            Box::new(AboutPage::new(
+                "Asteria Music",
+                CliSpec {
+                    command: "asteria-music",
+                },
+                LAUNCHER,
+            )),
+        ]),
     )
 }
 
@@ -157,14 +196,17 @@ impl corundum_framework::eframe::App for DesktopApp {
     }
 }
 
-/// Open the window and run the app until it closes.
-fn run() -> Result<(), Box<dyn Error>> {
-    init_logging();
+/// Open the window and run the app until it closes. `instance` is the single-instance lock
+/// `start` took, kept by the window.
+fn run(instance: Instance) -> Result<(), Box<dyn Error>> {
     // Before anything opens the settings: on Windows they move from Roaming to Local.
     asteria_framework_client::migrate_dirs(APP_NAME)?;
     let dirs = AppDirs::new(APP_NAME).ok_or("this system has no config or cache directory")?;
     let paths = paths(&dirs);
-    let options = WindowOptions::new(APP_NAME).remember(Store::new(&dirs));
+    let options = WindowOptions::new(APP_NAME)
+        .remember(Store::new(&dirs))
+        .instance(instance)
+        .launcher(LAUNCHER);
     window::run(options, move |cc| {
         let spawn_player: SpawnPlayer = Box::new(|ctx| {
             Player::spawn(
@@ -291,6 +333,14 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         ctx
+    }
+
+    #[test]
+    fn the_package_is_the_apps_command_and_server() {
+        assert_eq!(PACKAGE.app_name, APP_NAME);
+        assert_eq!(PACKAGE.cli.map(|c| c.command), Some("asteria-music"));
+        assert_eq!(LAUNCHER.id, "asteria-music");
+        assert_eq!(LAUNCHER.name, "Asteria Music");
     }
 
     #[test]

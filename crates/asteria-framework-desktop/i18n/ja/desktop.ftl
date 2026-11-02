@@ -39,6 +39,7 @@ asteria-desktop-tools-vips-purpose = 画像のサムネイル。
 asteria-desktop-tools-ffmpeg-purpose = 動画のサムネイルと、オフライン用の音楽の小さい版。
 asteria-desktop-tools-found = 見つかりました：{ $path }
 asteria-desktop-tools-missing = 見つかりません。
+asteria-desktop-tools-sips = 入っていません。画像は macOS に入っている sips で作ります。
 asteria-desktop-tools-linux = ディストリビューションのパッケージマネージャーで、パッケージ { $package } を入れてください。
 asteria-desktop-tools-macos = Homebrew で入れてください：brew install { $package }
 asteria-desktop-tools-windows-vips = Windows 版の libvips（github.com/libvips/build-win64-mxe/releases）をダウンロードし、その bin フォルダを PATH に足してください。
@@ -59,3 +60,8 @@ asteria-desktop-page-service = バックグラウンドのサーバー
 asteria-desktop-page-service-note = バックグラウンドのサービスを使わないときは、自分でサーバーを起動します：
 asteria-desktop-page-keys = API キー
 asteria-desktop-page-keys-failed = API キーを開けませんでした：{ $error }
+
+# 設定の「情報」ページ。
+asteria-desktop-about = 情報
+asteria-desktop-about-version = バージョン { $version }
+asteria-desktop-about-licence = Asteria は GPL-3.0-or-later のフリーソフトウェアです。Windows と macOS のパッケージには ffmpeg（GPLv3）、Windows にはさらに libvips（LGPL）が入っています。それぞれのライセンスとソースの場所は、プログラムの横の tools/LICENSES にあります。

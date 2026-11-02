@@ -2,9 +2,26 @@
 
 # project-asteria
 
+## インストール
+
+[リリースのページ](https://github.com/sapphire-turtle/asteria/releases)の各リリースに、2つの desktop アプリのインストール用パッケージと、ウィンドウの無い2つのサーバーの単体のファイルがある。プレリリース（`v0.1.0-rc.1` など）にはその印が付く。
+
+desktop アプリは、ウィンドウ、サーバーのコマンドライン（`asteria-photos` / `asteria-music`）、必要ならこのコンピューターのサーバーまでを1回のインストールでそろえる。使うシステム向けのファイルを落とす（名前に `photos` か `music` が入る）。
+
+- Windows：`asteria-photos-desktop-photos-win-Setup.exe` は自分のユーザーだけに入れ（`%LocalAppData%\asteria-photos-desktop`、スタートメニューの項目つき）、`asteria-photos` を `Path` に入れる。アンインストールは設定 › アプリから。`...-photos-win-Portable.zip` はインストールせずに動く。
+- macOS：`asteria-photos-desktop-photos-osx-Setup.pkg`。Apple シリコンと Intel の Mac に共通の1つのパッケージ。`...-photos-osx-Portable.zip` はアプリだけ。設定 › 情報で `asteria-photos` を `PATH` に置ける。
+- Linux：`asteria-photos-desktop-photos-linux.AppImage`。実行できるようにして（`chmod +x`）起動する。設定 › 情報で `asteria-photos` を `PATH` に置ける。
+
+インストールしたアプリは1日ごとに新しいリリースを探してバックグラウンドで落とし、利用者が選んだとき（設定 › 情報）か次の起動時に適用する。
+
+- Windows と macOS のパッケージには、サーバーが使う外部ツール（ffmpeg と、Windows では libvips の `vipsthumbnail`）が入っている。ライセンスは `tools/LICENSES`（ffmpeg は GPLv3、libvips は LGPL）。Linux ではパッケージマネージャーで入れる（[このコンピューターのサーバー](#このコンピューターのサーバー)を参照）。
+- パッケージはまだ署名していない。Windows ではインストーラーの前に SmartScreen が警告し（「詳細情報」›「実行」）、macOS では Gatekeeper が署名の無いパッケージを最初は開かない（システム設定 › プライバシーとセキュリティの「このまま開く」で許可する）。リリースのワークフローに Developer ID を入れれば、macOS のパッケージは署名と公証つきになる。
+
+ウィンドウの無いサーバーは `asteria-photos-headless-<platform>` と `asteria-music-headless-<platform>`（`linux-x86_64`、`linux-aarch64`、`macos-aarch64`、`windows-x86_64.exe`）。ファイル名を `asteria-photos`（または `asteria-music`。Windows では `.exe` を残す）に変え、実行できるようにして `PATH` に置く。`asteria-photos update` で最新のリリースに置き換わる（`--check` は有無を知らせるだけ、`-y` は確認しない）。置き換えた後は、動いている `serve` を起動し直す。プレリリース（rc）のバイナリには、`update` は後のプレリリースを勧めないので、それは手でダウンロードする。`cargo install` で入れたサーバーは `cargo install` で更新し、desktop アプリは自分で更新する。
+
 ## photos サーバーの起動
 
-`asteria-photos` は、GUI のないホスト向けのウィンドウを持たないサーバー。`cargo install --path photos/headless` で入れる。デスクトップアプリ（`asteria-photos-desktop`）も同じコマンドを実行できる。
+`asteria-photos` は、GUI のないホスト向けのウィンドウを持たないサーバー。`cargo install --path photos/headless` で入れる。デスクトップアプリ（`asteria-photos-desktop`）も同じコマンドを実行できる。Windows では `cargo install` で入れたデスクトップアプリは GUI のプログラムなので、コマンドラインにはパッケージの `asteria-photos`（コンソール用の shim）か、ウィンドウの無いサーバーを使う。
 
 ```sh
 # ライブラリ（既存でも可）と設定ファイルを作り、キー `owner` のトークンを一度だけ表示する。
@@ -29,7 +46,7 @@ asteria-photos serve
 
 ## music サーバーの起動
 
-`asteria-music` は、ウィンドウを持たないサーバー（`cargo install --path music/headless`）。デスクトップアプリ（`asteria-music-desktop`）も同じコマンドを実行できる。
+`asteria-music` は、ウィンドウを持たないサーバー（`cargo install --path music/headless`）。デスクトップアプリ（`asteria-music-desktop`）も同じコマンドを実行できる。Windows では `cargo install` で入れたデスクトップアプリは GUI のプログラムなので、コマンドラインにはパッケージの `asteria-music`（コンソール用の shim）か、ウィンドウの無いサーバーを使う。
 
 ```sh
 # ライブラリ（既存でも可）と設定ファイルを作り、キー `owner` のトークンを一度だけ表示する。
@@ -103,8 +120,8 @@ desktop アプリは、このコンピューターのフォルダをライブラ
 - サーバーはサムネイルや小さいコピーを外部ツールで作る。無くてもサーバーは動き、それが作れないだけ。サーバーが動くマシンに入れる：
   - `vipsthumbnail`（libvips に含まれる）：画像のサムネイルとカバー。Debian/Ubuntu は `sudo apt install libvips-tools`（ほかのディストリビューションも似た名前のパッケージ）、macOS は `brew install vips`、Windows は github.com/libvips/build-win64-mxe/releases の libvips を入れ、その `bin` フォルダを `PATH` に足す。
   - `ffmpeg`：動画のサムネイルと、music のオフライン用の小さいコピー（libopus つきのもの）。`sudo apt install ffmpeg`、`brew install ffmpeg`、Windows は ffmpeg.org/download.html から入れ、その `bin` フォルダを `PATH` に足す。
-  - または `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` にプログラムの場所を入れる。入れなければ `PATH`、続けて `/opt/homebrew/bin` と `/usr/local/bin`（macOS）または `/usr/local/bin`（Linux）を探す。ページの「もう一度確かめる」で探し直す。
-- Windows での既知の制限：バックグラウンドのサービスはログオン時にコンソールの窓を開き、それを閉じるとサーバーが止まる（今の desktop アプリはコンソールのプログラムのため。後の版で直す。corundum-framework#89）。
+  - desktop アプリの Windows と macOS のパッケージには、はじめから入っている（macOS は ffmpeg。`vipsthumbnail` が無ければ画像のサムネイルはシステムの `sips` で作る。Windows は両方）。
+  - または `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` にプログラムの場所を入れる。入れなければ実行ファイルの横（パッケージが置く場所）、`PATH`、続けて `/opt/homebrew/bin` と `/usr/local/bin`（macOS）または `/usr/local/bin`（Linux）を探す。ページの「もう一度確かめる」で探し直す。
 
 ## photos クライアントからのアップロード
 

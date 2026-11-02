@@ -39,6 +39,7 @@ asteria-desktop-tools-vips-purpose = Image thumbnails.
 asteria-desktop-tools-ffmpeg-purpose = Video thumbnails, and smaller copies of music for offline use.
 asteria-desktop-tools-found = Found: { $path }
 asteria-desktop-tools-missing = Not found.
+asteria-desktop-tools-sips = Not installed: images are made with sips, which macOS has built in.
 asteria-desktop-tools-linux = Install the package { $package } with your distribution's package manager.
 asteria-desktop-tools-macos = Install it with Homebrew: brew install { $package }
 asteria-desktop-tools-windows-vips = Download libvips for Windows (github.com/libvips/build-win64-mxe/releases), and add its bin folder to PATH.
@@ -59,3 +60,8 @@ asteria-desktop-page-service = Background server
 asteria-desktop-page-service-note = Without the background service, start the server yourself:
 asteria-desktop-page-keys = API keys
 asteria-desktop-page-keys-failed = The API keys could not be opened: { $error }
+
+# Settings › About.
+asteria-desktop-about = About
+asteria-desktop-about-version = Version { $version }
+asteria-desktop-about-licence = Asteria is free software under GPL-3.0-or-later. Packages for Windows and macOS include ffmpeg (GPLv3) and, on Windows, libvips (LGPL); their licences and sources are listed in tools/LICENSES beside the program.

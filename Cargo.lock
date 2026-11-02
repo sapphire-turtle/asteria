@@ -386,6 +386,7 @@ dependencies = [
  "asteria-framework-server",
  "corundum-framework",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -400,8 +401,10 @@ dependencies = [
  "chrono",
  "clap",
  "corundum-framework",
+ "corundum-framework-update",
  "grain-id",
  "http-body-util",
+ "image",
  "lofty",
  "notify",
  "redb",
@@ -419,6 +422,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "walkdir",
+ "webp",
 ]
 
 [[package]]
@@ -440,6 +444,7 @@ dependencies = [
  "asteria-music-gui",
  "asteria-music-server",
  "corundum-framework",
+ "corundum-framework-build",
  "tempfile",
  "tracing-subscriber",
 ]
@@ -532,6 +537,7 @@ dependencies = [
  "asteria-photos-gui",
  "asteria-photos-server",
  "corundum-framework",
+ "corundum-framework-build",
  "tempfile",
  "tracing-subscriber",
 ]
@@ -1304,6 +1310,17 @@ dependencies = [
  "corundum-framework-package",
  "corundum-framework-platform",
  "corundum-framework-service",
+ "corundum-framework-update",
+]
+
+[[package]]
+name = "corundum-framework-build"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0247fc5751c8b54f7c0b8dd43a6f0b1511c05919a2103c10b61352e921c4c0ab"
+dependencies = [
+ "corundum-framework-platform",
+ "winresource",
 ]
 
 [[package]]
@@ -1313,8 +1330,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92f9840be85d8d9bc6d203e8cb044012a2fb1885cbac20dc41a407f6f2ac55ff"
 dependencies = [
  "corundum-framework-keys",
+ "corundum-framework-package",
  "corundum-framework-platform",
  "corundum-framework-service",
+ "corundum-framework-update",
  "eframe",
  "egui",
  "egui_extras",
@@ -1329,7 +1348,9 @@ dependencies = [
  "objc2-ui-kit 0.3.2",
  "raw-window-handle",
  "rfd",
+ "semver",
  "serde",
+ "tokio",
  "toml",
  "tracing",
  "ttf-parser",
@@ -1379,6 +1400,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63482a44c3905280262230d715538b56ac5d1644d391cfa43bc72ee0fb77ac32"
 dependencies = [
  "dirs",
+ "interprocess",
  "jni",
  "ndk-context",
  "objc2-foundation 0.3.2",
@@ -1407,11 +1429,14 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88470f8b198d8a56eeb68d55ef39bfeed5b68ae7281003926da5ed5c00d1fac4"
 dependencies = [
+ "clap",
  "corundum-framework-platform",
  "reqwest",
+ "self-replace",
  "semver",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
  "windows",
@@ -1590,6 +1615,12 @@ checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
  "libloading",
 ]
+
+[[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 
 [[package]]
 name = "document-features"
@@ -2797,6 +2828,8 @@ dependencies = [
  "num-traits",
  "png 0.18.1",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2851,6 +2884,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c033f80b2c113cdf91ab7a33faa9cbc014726dcad99880c8609af2a370edf37d"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "interprocess"
+version = "2.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4a4fff6c51dece332bdbf3af5fe376c49cfc8dced782725e95be0bb489e35d7"
+dependencies = [
+ "doctest-file",
+ "libc",
+ "recvmsg",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3085,6 +3131,16 @@ dependencies = [
  "libc",
  "plain",
  "redox_syscall 0.9.5",
+]
+
+[[package]]
+name = "libwebp-sys"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54cd30df7c7165ce74a456e4ca9732c603e8dc5e60784558c1c6dc047f876733"
+dependencies = [
+ "cc",
+ "glob",
 ]
 
 [[package]]
@@ -4477,6 +4533,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
+
+[[package]]
 name = "redb"
 version = "4.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5013,6 +5075,17 @@ checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "self-replace"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "609c5606d9d357b26e4ee1a7a01beac396628d0fa01ebbade2a09cefb88e65af"
+dependencies = [
+ "fastrand",
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6661,6 +6734,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "webp"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c071456adef4aca59bf6a583c46b90ff5eb0b4f758fc347cea81290288f37ce1"
+dependencies = [
+ "image",
+ "libwebp-sys",
+]
+
+[[package]]
 name = "webpki-root-certs"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6866,6 +6949,12 @@ dependencies = [
  "static_assertions",
  "web-sys",
 ]
+
+[[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
 name = "winapi-util"
@@ -7219,6 +7308,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2bc6d36480b829272a5bdabf08e6dca8004761c1da7e35efef800540c66221b"
+dependencies = [
+ "toml",
+ "version_check",
 ]
 
 [[package]]

@@ -140,3 +140,20 @@ fn api_key_add_prints_only_the_token_and_list_shows_the_keys() {
     }
     assert!(!text.contains(token.trim()));
 }
+
+/// `serve` is the server even though the desktop sets up logging for its other starts: the
+/// server's own logging must not panic over it. A missing config is then the error.
+#[test]
+fn serve_fails_on_a_missing_config_without_panicking() {
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join("missing.toml");
+    let out = run(
+        home.path(),
+        &["serve", "--config", config.to_str().unwrap()],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{out:?}");
+    assert_ne!(out.status.code(), Some(101), "{out:?}");
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(stderr.contains("missing.toml"), "{stderr}");
+}

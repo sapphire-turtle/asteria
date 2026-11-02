@@ -1,6 +1,8 @@
-//! `asteria-music`: the Asteria Music server's command line (`init`, `api-key`, `serve`), for
+//! `asteria-music`: the Asteria Music server's command line (`init`, `api-key`, `serve`, `update`), for
 //! hosts without a window.
 
 fn main() {
-    asteria_framework_server::cli::main(asteria_music_server::spec())
+    let mut spec = asteria_music_server::spec();
+    spec.release_asset = Some("asteria-music-headless");
+    asteria_framework_server::cli::main(spec)
 }
