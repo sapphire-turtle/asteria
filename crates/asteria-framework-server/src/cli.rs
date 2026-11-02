@@ -225,27 +225,16 @@ fn update(spec: &AppSpec, args: &UpdateArgs) -> AnyResult<i32> {
         );
         return Ok(1);
     }
-    let modified = || {
-        std::env::current_exe()
-            .and_then(|p| p.metadata()?.modified())
-            .ok()
-    };
-    let before = modified();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let code = runtime.block_on(corundum_framework_update::run(
+    // `run` says to restart a running server after it replaced this program.
+    Ok(runtime.block_on(corundum_framework_update::run(
         args,
         &release_source(spec),
         &program,
         env!("CARGO_PKG_VERSION"),
-    ))?;
-    if code == 0 && modified() != before {
-        println!(
-            "Restart a running `{program} serve` (or its background service) to use the new version."
-        );
-    }
-    Ok(code)
+    ))?)
 }
 
 /// Parses the command line (init / api-key / serve / update), moves the app's directories from
@@ -362,12 +351,13 @@ fn library_root(cfg: &ServerConfig, config_path: &Path) -> AnyResult<PathBuf> {
 }
 
 fn serve(spec: &AppSpec, config_path: &Path, listen: Option<SocketAddr>) -> AnyResult<()> {
-    tracing_subscriber::fmt()
+    // Fails only if the embedding program installed a subscriber already, which then logs.
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .init();
+        .try_init();
     let cfg = load_and_migrate(spec.app, config_path)?;
     let listen = listen.unwrap_or(cfg.listen);
     let root = library_root(&cfg, config_path)?;

@@ -131,8 +131,12 @@ fn init_logging() {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Before `start`, so that what goes wrong in Velopack's hooks is logged.
-    init_logging();
+    // Before `start`, so that what goes wrong in Velopack's hooks is logged; not for `serve`,
+    // whose server sets up its own logging.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if asteria_framework_desktop::entry(&args) != asteria_framework_desktop::Entry::Serve {
+        init_logging();
+    }
     let instance = asteria_framework_desktop::start(&LOCAL, &PACKAGE);
     run(instance)
 }
