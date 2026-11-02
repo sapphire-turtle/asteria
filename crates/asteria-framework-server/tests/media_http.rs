@@ -503,28 +503,17 @@ impl asteria_framework_server::AppExtension for Music {
     }
 }
 
-/// A one-second tone of `freq` Hz in FLAC, so each frequency is different content.
+/// A short tone of `freq` Hz (440 or 880) in FLAC, so each frequency is different content.
 fn flac(e: &Env, name: &str, freq: u32) {
-    let st = std::process::Command::new("ffmpeg")
-        .args(["-nostdin", "-v", "error", "-f", "lavfi", "-i"])
-        .arg(format!("sine=frequency={freq}:duration=1"))
-        .arg("-y")
-        .arg(e.root.join(name))
-        .status()
-        .unwrap();
-    assert!(st.success());
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../asteria-framework/tests/fixtures/sine{freq}.flac"
+    ));
+    std::fs::copy(fixture, e.root.join(name)).unwrap();
 }
 
 fn rescan(e: &Env, ext: &Music) {
     asteria_framework_server::scan(&e.lib, &e.cache, ext).unwrap();
     hash_all(e);
-}
-
-fn has_libopus() -> bool {
-    std::process::Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libopus"))
 }
 
 #[tokio::test]
@@ -544,9 +533,6 @@ async fn offline_audio_is_404_for_images() {
 
 #[tokio::test]
 async fn offline_audio_is_ogg_with_ranges() {
-    if !have_tool("ffmpeg") || !has_libopus() {
-        return;
-    }
     let music = || Music {
         cover: None,
         none: false,
@@ -568,7 +554,7 @@ async fn offline_audio_is_ogg_with_ranges() {
 
 #[tokio::test]
 async fn thumb_source_image_bytes_are_rendered_once_per_key() {
-    if !have_tool("vipsthumbnail") || !have_tool("ffmpeg") {
+    if !have_tool("vipsthumbnail") {
         return;
     }
     let red = std::fs::read(
@@ -582,7 +568,7 @@ async fn thumb_source_image_bytes_are_rendered_once_per_key() {
     };
     let e = env_ext(Arc::new(music()));
     flac(&e, "one.flac", 440);
-    flac(&e, "two.flac", 660);
+    flac(&e, "two.flac", 880);
     rescan(&e, &music());
     let (a, b) = (item_id(&e, "one.flac"), item_id(&e, "two.flac"));
     let (ua, ub) = (format!("/media/{a}/thumb"), format!("/media/{b}/thumb"));
@@ -624,45 +610,4 @@ async fn thumb_source_none_is_404_not_422() {
     assert_eq!(s, StatusCode::NOT_FOUND);
     assert_eq!(e.cache.unprocessable(&hash, "thumb").unwrap(), None);
     assert_eq!(e.processor.renders_started(), 0);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn libopus_missing_is_not_unprocessable() {
-    if !have_tool("ffmpeg") {
-        return;
-    }
-    let tools = tempfile::tempdir().unwrap();
-    let fake = script(
-        tools.path(),
-        "ffmpeg.sh",
-        "echo \"Unknown encoder 'libopus'\" >&2\nexit 1",
-    );
-    let music = || Music {
-        cover: None,
-        none: false,
-    };
-    let e =
-        env_with(|t| Processor::with_tools(t, 1, Duration::from_secs(30), "vipsthumbnail", &fake));
-    flac(&e, "t.flac", 440);
-    rescan(&e, &music());
-    let id = item_id(&e, "t.flac");
-    let hash = e
-        .cache
-        .get_by_path("t.flac")
-        .unwrap()
-        .unwrap()
-        .hash
-        .unwrap()
-        .file_hash;
-    let (s, h, _) = get(
-        &e.app,
-        Some(&e.owner_token),
-        &format!("/media/{id}/offline-audio"),
-        None,
-    )
-    .await;
-    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(h["retry-after"], "2");
-    assert_eq!(e.cache.unprocessable(&hash, "offline-audio").unwrap(), None);
 }

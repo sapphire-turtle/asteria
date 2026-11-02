@@ -13,6 +13,7 @@ pub mod hashing;
 pub mod local;
 mod mcp;
 mod media_http;
+mod offline_audio;
 pub(crate) mod organize;
 pub mod process;
 pub mod profile;

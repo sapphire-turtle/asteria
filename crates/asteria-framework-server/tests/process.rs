@@ -1,6 +1,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use asteria_framework::MediaKind;
@@ -125,7 +126,6 @@ async fn short_video_falls_back_to_first_frame() {
     assert!(std::fs::metadata(out).unwrap().len() > 0);
 }
 
-#[cfg(unix)]
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../asteria-framework/tests/fixtures")
@@ -548,59 +548,73 @@ fn offline_audio_preset_parses_and_names() {
     );
 }
 
-/// Makes a one-second sine tone at `out` (the format follows the extension).
-fn tone(out: &Path, extra: &[&str]) {
-    let st = std::process::Command::new("ffmpeg")
-        .args(["-nostdin", "-v", "error", "-f", "lavfi", "-i"])
-        .arg("sine=frequency=440:duration=1")
-        .args(extra)
-        .arg("-y")
-        .arg(out)
-        .status()
-        .unwrap();
-    assert!(st.success());
+/// A processor without any external tool: offline audio needs none.
+fn toolless(thumbs: PathBuf) -> Processor {
+    Processor::with_tools(
+        thumbs,
+        1,
+        Duration::from_secs(30),
+        "/nonexistent/vipsthumbnail",
+        "/nonexistent/ffmpeg",
+    )
 }
 
-fn has_libopus() -> bool {
-    std::process::Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libopus"))
+/// A 16-bit PCM mono WAV of `secs` seconds of a 440 Hz tone at 44.1 kHz.
+fn wav(out: &Path, secs: u32) {
+    let frames = 44_100 * secs;
+    let mut b = Vec::new();
+    b.extend(b"RIFF");
+    b.extend((36 + frames * 2).to_le_bytes());
+    b.extend(b"WAVEfmt ");
+    b.extend(16u32.to_le_bytes());
+    b.extend(1u16.to_le_bytes());
+    b.extend(1u16.to_le_bytes());
+    b.extend(44_100u32.to_le_bytes());
+    b.extend(88_200u32.to_le_bytes());
+    b.extend(2u16.to_le_bytes());
+    b.extend(16u16.to_le_bytes());
+    b.extend(b"data");
+    b.extend((frames * 2).to_le_bytes());
+    for i in 0..frames {
+        let s = (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44_100.0).sin() * 16_000.0;
+        b.extend((s as i16).to_le_bytes());
+    }
+    std::fs::write(out, b).unwrap();
+}
+
+fn is_ogg_opus(b: &[u8]) -> bool {
+    b.len() > 36 && &b[..4] == b"OggS" && &b[28..36] == b"OpusHead"
 }
 
 #[tokio::test]
-async fn offline_audio_renders_ogg_opus() {
-    if !have("ffmpeg") {
-        return;
-    }
+async fn offline_audio_renders_ogg_opus_without_any_tool() {
     let dir = tempfile::tempdir().unwrap();
-    let flac = dir.path().join("sine440.flac");
-    tone(&flac, &[]);
-    let m4a = dir.path().join("sine440.m4a");
-    tone(&m4a, &["-c:a", "aac"]);
-    let p = Processor::new(dir.path().join("thumbs"), 1, Duration::from_secs(30));
-    let r = p
-        .render(&flac, MediaKind::Audio, HASH, Preset::OfflineAudio)
-        .await;
-    if !has_libopus() {
-        assert_eq!(r, Err(ProcessError::ToolMissing("ffmpeg with libopus")));
-        return;
-    }
-    let out = r.unwrap();
+    let p = toolless(dir.path().join("thumbs"));
+    let out = p
+        .render(
+            &fixture("sine440.flac"),
+            MediaKind::Audio,
+            HASH,
+            Preset::OfflineAudio,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         out,
         dir.path()
             .join("thumbs/offline-audio/ab/abcdef0123456789.ogg")
     );
-    let b = std::fs::read(&out).unwrap();
-    assert_eq!(&b[..4], b"OggS");
-    assert!(b.windows(8).any(|w| w == b"OpusHead"));
-    // The mov-family demuxer is on the whitelist too.
+    assert!(is_ogg_opus(&std::fs::read(&out).unwrap()));
     let out = p
-        .render(&m4a, MediaKind::Audio, "blake3:ee99", Preset::OfflineAudio)
+        .render(
+            &fixture("sine440.mp3"),
+            MediaKind::Audio,
+            "blake3:ee99",
+            Preset::OfflineAudio,
+        )
         .await
         .unwrap();
-    assert_eq!(&std::fs::read(out).unwrap()[..4], b"OggS");
+    assert!(is_ogg_opus(&std::fs::read(out).unwrap()));
     // Other media are not audio, and no temporary files remain.
     let r = p
         .render(
@@ -615,23 +629,32 @@ async fn offline_audio_renders_ogg_opus() {
 }
 
 #[tokio::test]
-async fn offline_audio_refuses_concat_scripts() {
-    if !have("ffmpeg") || !has_libopus() {
-        return;
-    }
+async fn a_broken_audio_file_is_unprocessable_and_recorded() {
+    use std::sync::{Arc, Mutex};
     let dir = tempfile::tempdir().unwrap();
-    let real = dir.path().join("real.wav");
-    tone(&real, &[]);
-    let evil = dir.path().join("evil.mp3");
-    std::fs::write(&evil, "ffconcat version 1.0\nfile 'real.wav'\n").unwrap();
-    let p = Processor::new(dir.path().join("thumbs"), 1, Duration::from_secs(30));
-    let r = p
-        .render(&evil, MediaKind::Audio, HASH, Preset::OfflineAudio)
-        .await;
-    assert!(matches!(r, Err(ProcessError::Unprocessable(_))), "{r:?}");
-    p.render(&real, MediaKind::Audio, "blake3:ee99", Preset::OfflineAudio)
-        .await
-        .unwrap();
+    let broken = dir.path().join("x.flac");
+    std::fs::write(
+        &broken,
+        (0..4000u32)
+            .map(|n| (n * 37 % 251) as u8)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    // What ffmpeg once had to be kept from following.
+    let concat = dir.path().join("evil.mp3");
+    std::fs::write(&concat, "ffconcat version 1.0\nfile 'x.flac'\n").unwrap();
+    let p = toolless(dir.path().join("thumbs"));
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let r2 = recorded.clone();
+    p.set_unprocessable_hook(move |h, _, _| r2.lock().unwrap().push(h.to_string()));
+    for (src, hash) in [(&broken, HASH), (&concat, "blake3:ee99")] {
+        let r = p
+            .render(src, MediaKind::Audio, hash, Preset::OfflineAudio)
+            .await;
+        assert!(matches!(r, Err(ProcessError::Unprocessable(_))), "{r:?}");
+    }
+    assert_eq!(*recorded.lock().unwrap(), [HASH, "blake3:ee99"]);
+    assert!(leftovers(&dir.path().join("thumbs")).is_empty());
 }
 
 #[tokio::test]
@@ -661,18 +684,36 @@ fn quick_vips(dir: &Path) -> PathBuf {
     )
 }
 
+/// An offline-audio encoder that holds its slot until it is cancelled, then says so in
+/// `stopped`.
+fn hanging_encoder(
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> impl Fn(&Path, &Path, &AtomicBool) -> Result<(), ProcessError> + Send + Sync + 'static {
+    move |_, _, cancel| {
+        while !cancel.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        stopped.store(true, Ordering::SeqCst);
+        Err(ProcessError::TimedOut)
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn thumbnails_do_not_wait_for_offline_audio() {
     let dir = tempfile::tempdir().unwrap();
-    let slow = script(dir.path(), "ffmpeg.sh", "exec sleep 30");
-    let p = std::sync::Arc::new(Processor::with_tools(
-        dir.path().join("thumbs"),
-        1,
-        Duration::from_secs(60),
-        quick_vips(dir.path()),
-        &slow,
-    ));
+    let stopped = std::sync::Arc::new(AtomicBool::new(false));
+    let p = std::sync::Arc::new(
+        Processor::with_tools(
+            dir.path().join("thumbs"),
+            1,
+            Duration::from_secs(60),
+            quick_vips(dir.path()),
+            "/nonexistent/ffmpeg",
+        )
+        .with_audio_timeout(Duration::from_secs(5))
+        .with_audio_encoder(hanging_encoder(stopped)),
+    );
     let audio = {
         let p = p.clone();
         tokio::spawn(async move {
@@ -710,46 +751,51 @@ async fn thumbnails_do_not_wait_for_offline_audio() {
     audio.abort();
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn an_offline_audio_timeout_is_retryable_and_not_recorded() {
+async fn an_offline_audio_timeout_cancels_the_encode_and_is_not_recorded() {
     use std::sync::{Arc, Mutex};
     let dir = tempfile::tempdir().unwrap();
-    let hang = script(dir.path(), "ffmpeg.sh", "exec sleep 10");
-    let p = Processor::with_tools(
-        dir.path().join("thumbs"),
-        1,
-        Duration::from_secs(60),
-        "vipsthumbnail",
-        &hang,
-    )
-    .with_audio_timeout(Duration::from_millis(500));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let p = toolless(dir.path().join("thumbs"))
+        .with_audio_timeout(Duration::from_millis(200))
+        .with_audio_encoder(hanging_encoder(stopped.clone()));
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let r2 = recorded.clone();
-    p.set_unprocessable_hook(move |h, _, reason| {
-        r2.lock().unwrap().push((h.to_string(), reason.to_string()))
-    });
+    p.set_unprocessable_hook(move |h, _, _| r2.lock().unwrap().push(h.to_string()));
     let r = p
         .render(&red(), MediaKind::Audio, HASH, Preset::OfflineAudio)
         .await;
     assert_eq!(r, Err(ProcessError::TimedOut));
-    assert!(recorded.lock().unwrap().is_empty());
-    // A decode failure is still recorded.
-    let fail = script(dir.path(), "fail.sh", "echo 'invalid data' >&2\nexit 1");
-    let p = Processor::with_tools(
-        dir.path().join("thumbs"),
-        1,
-        Duration::from_secs(60),
-        "vipsthumbnail",
-        &fail,
+    assert!(
+        stopped.load(Ordering::SeqCst),
+        "the encode was told to stop, and had stopped, before the result came"
     );
-    let r2 = recorded.clone();
-    p.set_unprocessable_hook(move |h, _, reason| {
-        r2.lock().unwrap().push((h.to_string(), reason.to_string()))
-    });
+    assert!(recorded.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_long_real_encode_times_out_and_leaves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let long = dir.path().join("long.wav");
+    wav(&long, 120);
+    let thumbs = dir.path().join("thumbs");
+    let p = toolless(thumbs.clone()).with_audio_timeout(Duration::from_millis(100));
+    let start = std::time::Instant::now();
+    let r = p
+        .render(&long, MediaKind::Audio, HASH, Preset::OfflineAudio)
+        .await;
+    assert_eq!(r, Err(ProcessError::TimedOut));
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert!(leftovers(&thumbs).is_empty());
+    assert!(!p.thumb_path(HASH, Preset::OfflineAudio).unwrap().exists());
+}
+
+#[tokio::test]
+async fn a_panicking_encode_is_unprocessable() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = toolless(dir.path().join("thumbs")).with_audio_encoder(|_, _, _| panic!("boom"));
     let r = p
         .render(&red(), MediaKind::Audio, HASH, Preset::OfflineAudio)
         .await;
     assert!(matches!(r, Err(ProcessError::Unprocessable(_))), "{r:?}");
-    assert_eq!(recorded.lock().unwrap().len(), 1);
 }

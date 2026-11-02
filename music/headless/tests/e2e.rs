@@ -256,10 +256,6 @@ mod linux {
         have("vipsthumbnail", &["--version"]).is_some()
     }
 
-    fn have_opus() -> bool {
-        have("ffmpeg", &["-hide_banner", "-encoders"]).is_some_and(|s| s.contains("libopus"))
-    }
-
     /// Requests a derived media until it is ready. With the tool installed a 200 is required
     /// (a 503 while the content hash is computed is retried); without it a 503 is accepted.
     /// Returns the 200 response, if there was one.
@@ -428,7 +424,8 @@ mod linux {
                 assert!(body.starts_with(b"RIFF") && &body[8..12] == b"WEBP");
             }
         }
-        if let Some(resp) = derived(&api, &folder_id, "offline-audio", have_opus()) {
+        // The server makes offline audio itself: it is always there.
+        if let Some(resp) = derived(&api, &folder_id, "offline-audio", true) {
             assert_eq!(resp.headers()["content-type"], "audio/ogg");
             assert!(resp.bytes().unwrap().starts_with(b"OggS"));
         }
