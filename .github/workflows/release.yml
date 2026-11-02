@@ -1,0 +1,330 @@
+name: Release
+
+# Publishes a release of asteria (spec §5.9): pushing a tag `v<version>`, where <version> is
+# the workspace version in Cargo.toml, creates its GitHub release (a pre-release when the
+# version has a `-`, such as 0.1.0-rc.1) and attaches
+#
+# - each desktop app as Velopack packages for Linux (AppImage), macOS (.pkg and a portable
+#   zip, one universal package) and Windows (Setup.exe and a portable zip), from which an
+#   installed app updates itself; Windows and macOS carry ffmpeg (and on Windows libvips)
+#   pinned in packaging/tools.env;
+# - each headless server as `asteria-<app>-headless-<os>-<arch>[.exe]`, which its `update`
+#   command looks for.
+#
+# Modelled on corundum-framework's demo-release.yml. The macOS packages are signed with a
+# Developer ID and notarized when the repository has the MACOS_CERTIFICATE and APPLE_API_KEY
+# secrets (see "Set up signing (macOS)"); the others are not signed yet, so Windows SmartScreen
+# warns before the installer runs.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # vpk and the velopack crate (in corundum-framework-package) are released together; keep
+  # this the version corundum-framework uses.
+  VPK_VERSION: 1.2.161
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag against the workspace version
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::The tag $GITHUB_REF_NAME is not v$version, the workspace version in Cargo.toml"
+            exit 1
+          fi
+
+      # Before the other jobs, which only add files to it.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          case $GITHUB_REF_NAME in
+            *-*) prerelease=(--prerelease) ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            ${prerelease[@]+"${prerelease[@]}"}
+
+  pack:
+    needs: check
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [photos, music]
+        # The oldest Ubuntu runner, so the AppImage runs on older glibc too.
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-22.04
+            channel: linux
+            icon: icon.png
+            tools: ''
+          - os: macos-latest
+            channel: osx
+            icon: icon.icns
+            tools: macos
+          - os: windows-latest
+            channel: win
+            icon: icon.ico
+            tools: windows
+          - app: photos
+            title: Asteria Photos
+            category: Graphics
+          - app: music
+            title: Asteria Music
+            category: AudioVideo
+    runs-on: ${{ matrix.os }}
+    env:
+      APP: ${{ matrix.app }}
+      # The cargo package, and its window's binary.
+      PACKAGE: asteria-${{ matrix.app }}-desktop
+      # Not the data directory's name (`asteria-<app>`): on Windows the package is installed
+      # in %LocalAppData%\<package id>, which its uninstall deletes.
+      PACK_ID: asteria-${{ matrix.app }}-desktop
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The version from the tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      # rustup installs the rust-toolchain.toml toolchain on first use.
+      - name: Install the pinned toolchain
+        run: cargo --version
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # eframe's window system libraries, and cpal's ALSA.
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev libasound2-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.app }}
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install vpk
+        run: dotnet tool install -g vpk --version "$VPK_VERSION"
+
+      - name: Build
+        run: |
+          case $RUNNER_OS in
+            macOS)
+              # One universal package: the binary for both architectures, joined.
+              rustup target add x86_64-apple-darwin
+              for target in aarch64-apple-darwin x86_64-apple-darwin; do
+                cargo build --release --locked -p "$PACKAGE" --bin "$PACKAGE" --target "$target"
+              done
+              mkdir -p target/universal
+              lipo -create -output "target/universal/$PACKAGE" \
+                "target/aarch64-apple-darwin/release/$PACKAGE" \
+                "target/x86_64-apple-darwin/release/$PACKAGE"
+              lipo -info "target/universal/$PACKAGE"
+              ;;
+            Windows)
+              # The console shim too, for the install hook to put on `Path`.
+              cargo build --release --locked -p "$PACKAGE" --bin "$PACKAGE" --bin "asteria-$APP-console"
+              ;;
+            *)
+              cargo build --release --locked -p "$PACKAGE" --bin "$PACKAGE"
+              ;;
+          esac
+
+      - name: Render the icon
+        run: |
+          # On macOS for the target already built, rather than building everything a third time.
+          target=()
+          if [ "$RUNNER_OS" = macOS ]; then
+            target=(--target aarch64-apple-darwin)
+          fi
+          cargo run --release --locked -p "$PACKAGE" --example "$APP-icons" ${target[@]+"${target[@]}"} -- icons
+
+      # fetch-tools.sh checks the x86_64 ffmpeg's encoders by running it under Rosetta.
+      - name: Install Rosetta (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          if ! arch -x86_64 /usr/bin/true 2> /dev/null; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+
+      # Beside the main executable, where the server looks first. Linux has none: there the
+      # tools come from the package manager.
+      - name: Fetch the bundled tools
+        if: matrix.tools != ''
+        env:
+          TOOLS: ${{ matrix.tools }}
+        run: bash packaging/fetch-tools.sh "$TOOLS" pack
+
+      # A keychain of its own with the Developer ID Application and Installer certificates and
+      # the notary profile, for vpk to sign and notarize the app and its .pkg. Without the
+      # secrets (a fork, say) the package is made unsigned, as before.
+      - name: Set up signing (macOS)
+        if: runner.os == 'macOS'
+        env:
+          # The .p12 of both certificates, base64.
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          # An App Store Connect team key: the .p8's text, its key ID and its issuer ID.
+          API_KEY: ${{ secrets.APPLE_API_KEY }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          if [ -z "$CERTIFICATE" ]; then
+            echo "::warning::No MACOS_CERTIFICATE secret: the macOS package is not signed"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -base64 24)
+          security create-keychain -p "$password" "$keychain"
+          # Notarizing takes minutes; the keychain must not lock meanwhile.
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/productsign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
+          # vpk passes --keychain to codesign and notarytool but not to productbuild, which
+          # signs the .pkg and finds its identity only in the search list.
+          # Unquoted on purpose: the list is one keychain per line.
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+
+          printf '%s\n' "$API_KEY" > "$RUNNER_TEMP/api-key.p8"
+          xcrun notarytool store-credentials notary --keychain "$keychain" \
+            --key "$RUNNER_TEMP/api-key.p8" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID"
+          rm "$RUNNER_TEMP/api-key.p8"
+
+          # The identities by their kind, so the workflow names no team.
+          identity() {
+            security find-identity -v "$keychain" | sed -n "s/.*\"\($1: .*\)\"$/\1/p" | head -n 1
+          }
+          app=$(identity "Developer ID Application")
+          install=$(identity "Developer ID Installer")
+          if [ -z "$app" ] || [ -z "$install" ]; then
+            echo "MACOS_CERTIFICATE lacks a Developer ID Application or Installer identity"
+            security find-identity -v "$keychain"
+            exit 1
+          fi
+          {
+            echo "SIGN_KEYCHAIN=$keychain"
+            echo "SIGN_APP_IDENTITY=$app"
+            echo "SIGN_INSTALL_IDENTITY=$install"
+          } >> "$GITHUB_ENV"
+
+      - name: Pack
+        env:
+          # Both apps' files go to the same release; the app in the channel keeps their
+          # `releases.<channel>.json` apart.
+          CHANNEL: ${{ matrix.app }}-${{ matrix.channel }}
+          ICON: icons/${{ matrix.icon }}
+          TITLE: ${{ matrix.title }}
+          CATEGORY: ${{ matrix.category }}
+        run: |
+          mkdir -p pack
+          # The executable's name in the package (`--mainExe`, #41): the command's name, as the
+          # cargo binary's differs, apart from Windows, where the window keeps its cargo name
+          # and the console shim has the command's.
+          case $RUNNER_OS in
+            Linux)
+              main="asteria-$APP"
+              cp "target/release/$PACKAGE" "pack/$main"
+              extra=(--categories "$CATEGORY")
+              ;;
+            macOS)
+              main="asteria-$APP"
+              cp "target/universal/$PACKAGE" "pack/$main"
+              extra=(--bundleId "net.sapphire-turtle.asteria-$APP")
+              ;;
+            Windows)
+              main="$PACKAGE.exe"
+              cp "target/release/$PACKAGE.exe" "pack/$main"
+              cp "target/release/asteria-$APP-console.exe" "pack/asteria-$APP.exe"
+              extra=()
+              ;;
+          esac
+          # Set by "Set up signing (macOS)"; an array, as the identities have spaces.
+          sign=()
+          if [ -n "${SIGN_APP_IDENTITY:-}" ]; then
+            sign=(
+              --signAppIdentity "$SIGN_APP_IDENTITY"
+              --signInstallIdentity "$SIGN_INSTALL_IDENTITY"
+              --notaryProfile notary
+              --keychain "$SIGN_KEYCHAIN"
+            )
+          fi
+          vpk pack \
+            --packId "$PACK_ID" \
+            --packVersion "$VERSION" \
+            --packDir pack \
+            --mainExe "$main" \
+            --packTitle "$TITLE" \
+            --packAuthors "sapphire-turtle" \
+            --icon "$ICON" \
+            --channel "$CHANNEL" \
+            --delta None \
+            --outputDir releases \
+            ${extra[@]+"${extra[@]}"} \
+            ${sign[@]+"${sign[@]}"}
+          ls -la releases
+
+      - name: Remove the signing keychain (macOS)
+        if: always() && env.SIGN_KEYCHAIN != ''
+        run: security delete-keychain "$SIGN_KEYCHAIN"
+
+      # Kept with the run too, should the upload below fail.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: releases-${{ matrix.app }}-${{ matrix.channel }}
+          path: releases/
+
+      # Not --clobber: the file names carry the package id and the channel, so a name that
+      # is already there means two jobs made the same file.
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" releases/* --repo "$GITHUB_REPOSITORY"
+
+  # The headless servers, named after their packages (the commands are `asteria-<app>`, as
+  # in the desktop packages).
+  headless-photos:
+    needs: check
+    permissions:
+      contents: write
+    uses: sapphire-turtle/.github/.github/workflows/release-binary.yml@v1
+    with:
+      tag: ${{ github.ref_name }}
+      package: asteria-photos-headless
+      binary: asteria-photos
+      asset: asteria-photos-headless
+
+  headless-music:
+    needs: check
+    permissions:
+      contents: write
+    uses: sapphire-turtle/.github/.github/workflows/release-binary.yml@v1
+    with:
+      tag: ${{ github.ref_name }}
+      package: asteria-music-headless
+      binary: asteria-music
+      asset: asteria-music-headless

@@ -4,7 +4,7 @@
 fn main() -> std::io::Result<()> {
     use corundum_framework::platform::icon;
 
-    let dir = std::path::PathBuf::from(std::env::args().nth(1).expect("usage: icons <dir>"));
+    let dir = std::path::PathBuf::from(std::env::args().nth(1).expect("usage: music-icons <dir>"));
     std::fs::create_dir_all(&dir)?;
     let svg = include_bytes!("../../../docs/icons/asteria-music.svg");
     std::fs::write(dir.join("icon.ico"), icon::ico(svg)?)?;

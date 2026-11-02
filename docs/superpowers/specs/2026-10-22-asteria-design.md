@@ -706,10 +706,10 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
 - **ランチャー**：`WindowOptions::launcher` でアプリのメニューに載せる（AppImage と cargo で入れた版。macOS・Windows のパッケージでは corundum が飛ばす）。
 - **外部ツール**
   - 探す順番：`ASTERIA_*` の変数 → **実行ファイルの横（同梱）** → `PATH` → よく使われるディレクトリ。
-  - Windows は ffmpeg（libopus と libwebp を含む GPL ビルド）を `ffmpeg.exe`、libvips（vips-dev-w64、DLL ごと）を `vips\bin\vipsthumbnail.exe` として同梱する。
+  - Windows は ffmpeg（libopus と libwebp を含む GPL ビルド）を `ffmpeg.exe`、libvips（build-win64-mxe の `vips-dev-x64-all-<version>.zip`、DLL ごと）を `vips\bin\vipsthumbnail.exe` として同梱する。
   - macOS は ffmpeg（martin-riedl.de の静的ビルド、arm64 と x86_64）を同梱する。画像は §4.5 の sips を使う。
   - Linux は同梱しない（パッケージマネージャーで入れる。今の案内のまま）。
-  - ワークフローはツールをバージョン付きの URL と SHA-256 で固定し、取ってきたら `-encoders` に libopus と libwebp があることを確かめる（無ければリリースを止める）。パッケージには `tools/LICENSES`（ffmpeg は GPLv3、libvips は LGPL、それぞれのソースの場所）を入れる。asteria は GPL-3.0-or-later なので同梱できる。
+  - ワークフローはツールをバージョン付きの URL と SHA-256 で固定し（`packaging/tools.env`。2026-11-02 の時点で ffmpeg 9.0.2：Windows は BtbN の `autobuild-2026-11-01-12-49` の `win64-gpl-9.0`、macOS は martin-riedl.de の arm64 と x86_64 を `lipo` で1つに。libvips 8.18.7）、取ってきたら `-encoders` に libopus と libwebp があることを確かめる（無ければリリースを止める）。パッケージには `tools/LICENSES`（ffmpeg は GPLv3、libvips は LGPL、それぞれのソースの場所）を入れる。asteria は GPL-3.0-or-later なので同梱できる。
   - 2026-11-01 のスパイク（GitHub の macOS ランナー）で確かめたこと：sips は JPEG・PNG・HEIC・RAW（NEF）を読める、LaunchAgent からも動く、壊れたファイルは終了コード 13。静的な ffmpeg は .app の中でも、ad hoc とハードンドランタイムの署名でも動く。公証は未確認（シークレットが無い）。
 - **headless（と desktop）の `update` サブコマンド**：`update [--check] [-y]`（corundum-framework-update の `UpdateArgs` と `run`）。手で置いたリリースのバイナリだけを新しい版に置き換え、cargo で入れた版には `cargo install` を、Velopack 版にはアプリから更新するよう案内する。置き換えた後は、動いている `serve` を起動し直すよう案内する。
 - **確かめ方**：単体テスト（起動の分岐、同梱ツールの発見、sips の経路、`update` の案内）に加え、プレリリースのタグ（`v0.1.0-rc.1` など）でワークフローを通し、3 OS の実機でインストール → 更新 → アンインストールを確かめる。

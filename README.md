@@ -2,6 +2,23 @@
 
 # project-asteria
 
+## Installing
+
+Every release on [the releases page](https://github.com/sapphire-turtle/asteria/releases) carries the two desktop apps as installable packages and the two servers without a window as single files. Pre-releases (such as `v0.1.0-rc.1`) are marked as such.
+
+The desktop app is the window, the server's command line (`asteria-photos` / `asteria-music`) and, if you want one, a server on this computer, in one install. Download the file for your system (`photos` or `music` in the name):
+
+- Windows: `asteria-photos-desktop-photos-win-Setup.exe` installs it for you alone (in `%LocalAppData%\asteria-photos-desktop`, with a Start menu entry) and puts `asteria-photos` on `Path`; uninstall it from Settings › Apps. `...-photos-win-Portable.zip` runs without installing.
+- macOS: `asteria-photos-desktop-photos-osx-Setup.pkg`, one package for Apple silicon and Intel Macs. `...-photos-osx-Portable.zip` holds the app on its own. Settings › About offers to put `asteria-photos` on `PATH`.
+- Linux: `asteria-photos-desktop-photos-linux.AppImage`; make it executable (`chmod +x`) and run it. Settings › About offers to put `asteria-photos` on `PATH`.
+
+An installed app looks for a new release once a day, downloads it in the background, and applies it when you choose to (Settings › About), or at its next start.
+
+- The Windows and macOS packages include the external tools the server uses (ffmpeg, and on Windows libvips's `vipsthumbnail`), with their licences in `tools/LICENSES` (ffmpeg is GPLv3, libvips LGPL). On Linux install them with your package manager (see [A server on this computer](#a-server-on-this-computer)).
+- The packages are not signed yet: Windows SmartScreen warns before the installer runs ("More info" › "Run anyway"), and macOS Gatekeeper refuses to open the unsigned package at first (allow it with "Open Anyway" in System Settings › Privacy & Security). The macOS package is signed and notarized once the release workflow has a Developer ID.
+
+The servers without a window are `asteria-photos-headless-<platform>` and `asteria-music-headless-<platform>`, for `linux-x86_64`, `linux-aarch64`, `macos-aarch64` and `windows-x86_64.exe`. Rename the file to `asteria-photos` (or `asteria-music`; keep `.exe` on Windows), make it executable and put it on `PATH`. `asteria-photos update` replaces it with the newest release (`--check` only tells you whether there is one, `-y` does not ask); restart a running `serve` afterwards. A server installed with `cargo install` is updated with `cargo install` instead, and the desktop app updates itself.
+
 ## Running the photos server
 
 `asteria-photos` is the server without a window, for hosts with no GUI. Install it with `cargo install --path photos/headless`; the desktop app (`asteria-photos-desktop`) runs the same commands.
@@ -103,8 +120,8 @@ The desktop apps can set up a server for a folder on this computer, so one machi
 - The server makes thumbnails and smaller copies with external tools; without them it still runs, just without those. Install them where the server runs:
   - `vipsthumbnail` (from libvips), for image thumbnails and covers: `sudo apt install libvips-tools` (Debian/Ubuntu; other distributions name the package similarly), `brew install vips` on macOS, or on Windows the libvips build from github.com/libvips/build-win64-mxe/releases with its `bin` folder added to `PATH`.
   - `ffmpeg`, for video thumbnails and music's smaller offline copies (built with libopus): `sudo apt install ffmpeg`, `brew install ffmpeg`, or on Windows a build from ffmpeg.org/download.html with its `bin` folder added to `PATH`.
-  - Or point `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` at the programs. Otherwise they are looked for on `PATH`, then in `/opt/homebrew/bin` and `/usr/local/bin` (macOS) or `/usr/local/bin` (Linux). "Check again" on the page looks for them again.
-- Known limitation on Windows: the background service opens a console window at logon, and closing it stops the server (the desktop app is a console program for now; a later version fixes this, corundum-framework#89).
+  - The Windows and macOS packages of the desktop app already include them (ffmpeg on macOS, where image thumbnails are made with the system's `sips` when `vipsthumbnail` is missing; both on Windows).
+  - Or point `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` at the programs. Otherwise they are looked for beside the executable (where the packages put them), then on `PATH`, then in `/opt/homebrew/bin` and `/usr/local/bin` (macOS) or `/usr/local/bin` (Linux). "Check again" on the page looks for them again.
 
 ## Uploading from the photos client
 
