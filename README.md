@@ -14,14 +14,14 @@ The desktop app is the window, the server's command line (`asteria-photos` / `as
 
 An installed app looks for a new release once a day, downloads it in the background, and applies it when you choose to (Settings › About), or at its next start.
 
-- The Windows and macOS packages include the external tools the server uses (ffmpeg, and on Windows libvips's `vipsthumbnail`), with their licences in `tools/LICENSES` (ffmpeg is GPLv3, libvips LGPL). On Linux install them with your package manager (see [A server on this computer](#a-server-on-this-computer)).
+- The Windows and macOS packages include the external tools the server uses (for photos ffmpeg, and on Windows libvips's `vipsthumbnail` for both apps; music on macOS needs none), with their licences in `tools/LICENSES` (ffmpeg is GPLv3, libvips LGPL). On Linux install them with your package manager (see [A server on this computer](#a-server-on-this-computer)).
 - The packages are not signed yet: Windows SmartScreen warns before the installer runs ("More info" › "Run anyway"), and macOS Gatekeeper refuses to open the unsigned package at first (allow it with "Open Anyway" in System Settings › Privacy & Security). The macOS package is signed and notarized once the release workflow has a Developer ID.
 
 The servers without a window are `asteria-photos-headless-<platform>` and `asteria-music-headless-<platform>`, for `linux-x86_64`, `linux-aarch64`, `macos-aarch64` and `windows-x86_64.exe`. Rename the file to `asteria-photos` (or `asteria-music`; keep `.exe` on Windows), make it executable and put it on `PATH`. `asteria-photos update` replaces it with the newest release (`--check` only tells you whether there is one, `-y` does not ask); restart a running `serve` afterwards. A pre-release (rc) binary is not offered later pre-releases by `update`: download those by hand. A server installed with `cargo install` is updated with `cargo install` instead, and the desktop app updates itself.
 
 ## Running the photos server
 
-`asteria-photos` is the server without a window, for hosts with no GUI. Install it with `cargo install --path photos/headless`; the desktop app (`asteria-photos-desktop`) runs the same commands. On Windows a `cargo install`ed desktop app is a GUI program: for the command line use the packaged app's `asteria-photos` (its console shim) or the server without a window.
+`asteria-photos` is the server without a window, for hosts with no GUI. Install it with `cargo install --path photos/headless` (building the servers needs `cmake`, for the bundled libopus); the desktop app (`asteria-photos-desktop`) runs the same commands. On Windows a `cargo install`ed desktop app is a GUI program: for the command line use the packaged app's `asteria-photos` (its console shim) or the server without a window.
 
 ```sh
 # Create the library (or adopt an existing one) and a config; prints the token of the key `owner` once.
@@ -46,7 +46,7 @@ asteria-photos serve
 
 ## Running the music server
 
-`asteria-music` is the server without a window (`cargo install --path music/headless`); the desktop app (`asteria-music-desktop`) runs the same commands. On Windows a `cargo install`ed desktop app is a GUI program: for the command line use the packaged app's `asteria-music` (its console shim) or the server without a window.
+`asteria-music` is the server without a window (`cargo install --path music/headless`; building it needs `cmake`); the desktop app (`asteria-music-desktop`) runs the same commands. On Windows a `cargo install`ed desktop app is a GUI program: for the command line use the packaged app's `asteria-music` (its console shim) or the server without a window.
 
 ```sh
 # Create the library (or adopt an existing one) and a config; prints the token of the key `owner` once.
@@ -62,7 +62,7 @@ asteria-music serve
 - Playlists are the `.m3u8` and `.m3u` files in the library. An entry whose file has moved is found again by its content hash when the playlist carries one; an entry that cannot be found is reported as missing.
 - The tags and the playlists are only read. The server never writes to your music files or playlists.
 - The cover of an album is the picture embedded in a track, else an image named `cover`, `folder`, `front` or `album` (`.jpg`, `.jpeg`, `.png` or `.webp`) in the track's folder or, failing that, in the album folder above it (for a disc folder such as `CD1`).
-- Covers need `vipsthumbnail` (libvips-tools). The offline copy of a track (Ogg Opus, for listening where the original is too large) needs `ffmpeg` built with libopus. Without them those requests answer 503 and everything else works.
+- Covers need `vipsthumbnail` (libvips-tools; on macOS the system's `sips` stands in); without it those requests answer 503 and everything else works. The server makes the offline copy of a track (Ogg Opus, for listening where the original is too large) itself, with no external tool.
 
 ## Connecting an MCP client
 
@@ -108,7 +108,7 @@ cargo run -p asteria-music-desktop --release -- serve
 - The client plays a library served by `asteria-music serve`; it does not need libvips or ffmpeg (the server makes the covers and the low-quality copies).
 - On first start the window asks where your library is, as in the photos client. For another server (or later), Settings opens on the Servers page with the add form. Enter a name, the address (such as `http://192.168.1.10:7811`) and the access token that `init` (or `api-key add`) printed, press "Test connection" to check them, then Save. Servers are registered, switched and stored as in the photos client (in `servers.toml`, under `asteria-music` in place of `asteria-photos`).
 - Pick an album, an artist or a playlist to see its tracks and play them. Playback starts before the file has been fully downloaded, and seeking to a position that has not arrived yet waits for that part.
-- "Play in low quality" is one setting for the whole app, saved in `playback.toml` in the app's config directory along with the volume. When it is on, the server converts each track to low-bitrate Ogg Opus (the offline copy, which needs `ffmpeg` with libopus on the server) and the client plays that; it is meant for slow connections. The first play of a track can show "Preparing" while the server converts it. A change takes effect from the next track you open.
+- "Play in low quality" is one setting for the whole app, saved in `playback.toml` in the app's config directory along with the volume. When it is on, the server converts each track to low-bitrate Ogg Opus (the offline copy) and the client plays that; it is meant for slow connections. The first play of a track can show "Preparing" while the server converts it. A change takes effect from the next track you open.
 - Not there yet: showing the library by folder (#20), ratings (#19), shuffle and repeat (#17), gapless playback (#18), and the media keys (`sapphire-turtle/corundum-framework#50`).
 
 ## A server on this computer
@@ -117,10 +117,10 @@ The desktop apps can set up a server for a folder on this computer, so one machi
 
 - On first start, when no server is registered, choose "This computer", enter your user name (the OS user's is suggested; it becomes the owner of a library created here), and pick the library's folder (a folder that is already a library is used as it is, with its own owner). The app writes the server's config to its default place, creates an API key named `desktop` that acts as the owner, and registers the server as "This computer" (`http://127.0.0.1:7810`, or `:7811` for music) and uses it. It then offers to keep the server running in the background: a systemd user unit on Linux, a LaunchAgent on macOS, a logon task in the Task Scheduler on Windows. If you decline, start it yourself with `asteria-photos serve`. Last, it shows which external tools it found.
 - Settings › Local server shows the library and the address the server listens on, registers, starts, stops or removes the background service, manages the library's API keys (add one for each phone or other computer, retire one you no longer use), and shows the external tools. Without a local server yet, its "Set up a local server" button runs the first-start steps again.
-- The server makes thumbnails and smaller copies with external tools; without them it still runs, just without those. Install them where the server runs:
+- The server makes thumbnails with external tools; without them it still runs, just without thumbnails. Install them where the server runs:
   - `vipsthumbnail` (from libvips), for image thumbnails and covers: `sudo apt install libvips-tools` (Debian/Ubuntu; other distributions name the package similarly), `brew install vips` on macOS, or on Windows the libvips build from github.com/libvips/build-win64-mxe/releases with its `bin` folder added to `PATH`.
-  - `ffmpeg`, for video thumbnails and music's smaller offline copies (built with libopus): `sudo apt install ffmpeg`, `brew install ffmpeg`, or on Windows a build from ffmpeg.org/download.html with its `bin` folder added to `PATH`.
-  - The Windows and macOS packages of the desktop app already include them (ffmpeg on macOS, where image thumbnails are made with the system's `sips` when `vipsthumbnail` is missing; both on Windows).
+  - `ffmpeg`, for photos' video thumbnails (music does not use it; it makes its offline copies itself): `sudo apt install ffmpeg`, `brew install ffmpeg`, or on Windows a build from ffmpeg.org/download.html with its `bin` folder added to `PATH`.
+  - The Windows and macOS packages of the desktop app already include what the app uses (photos: ffmpeg on macOS, where image thumbnails are made with the system's `sips` when `vipsthumbnail` is missing, and both on Windows; music: `vipsthumbnail` on Windows, nothing on macOS).
   - Or point `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` at the programs. Otherwise they are looked for beside the executable (where the packages put them), then on `PATH`, then in `/opt/homebrew/bin` and `/usr/local/bin` (macOS) or `/usr/local/bin` (Linux). "Check again" on the page looks for them again.
 
 ## Uploading from the photos client

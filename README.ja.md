@@ -14,14 +14,14 @@ desktop アプリは、ウィンドウ、サーバーのコマンドライン（
 
 インストールしたアプリは1日ごとに新しいリリースを探してバックグラウンドで落とし、利用者が選んだとき（設定 › 情報）か次の起動時に適用する。
 
-- Windows と macOS のパッケージには、サーバーが使う外部ツール（ffmpeg と、Windows では libvips の `vipsthumbnail`）が入っている。ライセンスは `tools/LICENSES`（ffmpeg は GPLv3、libvips は LGPL）。Linux ではパッケージマネージャーで入れる（[このコンピューターのサーバー](#このコンピューターのサーバー)を参照）。
+- Windows と macOS のパッケージには、サーバーが使う外部ツール（photos には ffmpeg、Windows では両アプリに libvips の `vipsthumbnail`。macOS の music には何も要らない）が入っている。ライセンスは `tools/LICENSES`（ffmpeg は GPLv3、libvips は LGPL）。Linux ではパッケージマネージャーで入れる（[このコンピューターのサーバー](#このコンピューターのサーバー)を参照）。
 - パッケージはまだ署名していない。Windows ではインストーラーの前に SmartScreen が警告し（「詳細情報」›「実行」）、macOS では Gatekeeper が署名の無いパッケージを最初は開かない（システム設定 › プライバシーとセキュリティの「このまま開く」で許可する）。リリースのワークフローに Developer ID を入れれば、macOS のパッケージは署名と公証つきになる。
 
 ウィンドウの無いサーバーは `asteria-photos-headless-<platform>` と `asteria-music-headless-<platform>`（`linux-x86_64`、`linux-aarch64`、`macos-aarch64`、`windows-x86_64.exe`）。ファイル名を `asteria-photos`（または `asteria-music`。Windows では `.exe` を残す）に変え、実行できるようにして `PATH` に置く。`asteria-photos update` で最新のリリースに置き換わる（`--check` は有無を知らせるだけ、`-y` は確認しない）。置き換えた後は、動いている `serve` を起動し直す。プレリリース（rc）のバイナリには、`update` は後のプレリリースを勧めないので、それは手でダウンロードする。`cargo install` で入れたサーバーは `cargo install` で更新し、desktop アプリは自分で更新する。
 
 ## photos サーバーの起動
 
-`asteria-photos` は、GUI のないホスト向けのウィンドウを持たないサーバー。`cargo install --path photos/headless` で入れる。デスクトップアプリ（`asteria-photos-desktop`）も同じコマンドを実行できる。Windows では `cargo install` で入れたデスクトップアプリは GUI のプログラムなので、コマンドラインにはパッケージの `asteria-photos`（コンソール用の shim）か、ウィンドウの無いサーバーを使う。
+`asteria-photos` は、GUI のないホスト向けのウィンドウを持たないサーバー。`cargo install --path photos/headless` で入れる（サーバーのビルドには、同梱の libopus のために `cmake` が要る）。デスクトップアプリ（`asteria-photos-desktop`）も同じコマンドを実行できる。Windows では `cargo install` で入れたデスクトップアプリは GUI のプログラムなので、コマンドラインにはパッケージの `asteria-photos`（コンソール用の shim）か、ウィンドウの無いサーバーを使う。
 
 ```sh
 # ライブラリ（既存でも可）と設定ファイルを作り、キー `owner` のトークンを一度だけ表示する。
@@ -46,7 +46,7 @@ asteria-photos serve
 
 ## music サーバーの起動
 
-`asteria-music` は、ウィンドウを持たないサーバー（`cargo install --path music/headless`）。デスクトップアプリ（`asteria-music-desktop`）も同じコマンドを実行できる。Windows では `cargo install` で入れたデスクトップアプリは GUI のプログラムなので、コマンドラインにはパッケージの `asteria-music`（コンソール用の shim）か、ウィンドウの無いサーバーを使う。
+`asteria-music` は、ウィンドウを持たないサーバー（`cargo install --path music/headless`。ビルドには `cmake` が要る）。デスクトップアプリ（`asteria-music-desktop`）も同じコマンドを実行できる。Windows では `cargo install` で入れたデスクトップアプリは GUI のプログラムなので、コマンドラインにはパッケージの `asteria-music`（コンソール用の shim）か、ウィンドウの無いサーバーを使う。
 
 ```sh
 # ライブラリ（既存でも可）と設定ファイルを作り、キー `owner` のトークンを一度だけ表示する。
@@ -62,7 +62,7 @@ asteria-music serve
 - プレイリストは、ライブラリ内の `.m3u8` と `.m3u` のファイル。ファイルが移動したエントリは、プレイリストにコンテンツハッシュがあればそれで見つけ直す。見つからないエントリは「見つからない」として返す。
 - タグとプレイリストは読むだけ。サーバーが音楽ファイルやプレイリストに書き込むことはない。
 - アルバムのジャケットは、トラックに埋め込まれた画像、なければトラックのフォルダ、そこになければその上のアルバムのフォルダ（`CD1` のようなディスクのフォルダの場合）にある `cover`、`folder`、`front`、`album` という名前の画像（`.jpg`、`.jpeg`、`.png`、`.webp`）。
-- ジャケットには `vipsthumbnail`（libvips-tools）が必要。トラックのオフライン用の音声（Ogg Opus。原本が大きすぎる場所で聴くためのもの）には、libopus 付きでビルドされた `ffmpeg` が必要。どちらもなければ、その要求は 503 を返し、ほかは普通に動く。
+- ジャケットには `vipsthumbnail`（libvips-tools。macOS ではシステムの `sips` で代わりに作る）が必要。なければその要求は 503 を返し、ほかは普通に動く。トラックのオフライン用の音声（Ogg Opus。原本が大きすぎる場所で聴くためのもの）は、サーバーが外部ツールなしで作る。
 
 ## MCP クライアントの接続
 
@@ -108,7 +108,7 @@ cargo run -p asteria-music-desktop --release -- serve
 - クライアントは `asteria-music serve` が配信するライブラリを再生するもの。カバーと低音質のコピーはサーバーが作るので、libvips や ffmpeg は要らない。
 - 初回は photos クライアントと同じく、ウィンドウがライブラリの場所を尋ねる。ほかのサーバー（またはあとで）を選ぶと、設定が「サーバー」ページで追加フォームを開いた状態になる。名前、アドレス（`http://192.168.1.10:7811` など）、`init`（または `api-key add`）が表示したアクセストークンを入れ、「接続を確かめる」で確かめてから保存する。サーバーの登録、切り替え、保存のしかたは photos クライアントと同じ（`servers.toml`。`asteria-photos` の代わりに `asteria-music` の下）。
 - アルバム、アーティスト、プレイリストを選ぶと曲が並び、再生できる。再生はファイルを取り終える前に始まり、まだ届いていない位置へのシークは、その部分が届くまで待つ。
-- 「低音質で再生する」はアプリ全体で一つの設定で、音量といっしょにアプリの設定ディレクトリの `playback.toml` に保存される。オンにすると、サーバーが曲を低ビットレートの Ogg Opus（オフライン用のコピー。サーバーに libopus つきの `ffmpeg` が要る）に変換し、クライアントはそれを再生する。回線が遅いときのためのもの。曲を初めて再生するときは、サーバーが変換するあいだ「準備中」と出ることがある。変更は次に開く曲から効く。
+- 「低音質で再生する」はアプリ全体で一つの設定で、音量といっしょにアプリの設定ディレクトリの `playback.toml` に保存される。オンにすると、サーバーが曲を低ビットレートの Ogg Opus（オフライン用のコピー）に変換し、クライアントはそれを再生する。回線が遅いときのためのもの。曲を初めて再生するときは、サーバーが変換するあいだ「準備中」と出ることがある。変更は次に開く曲から効く。
 - まだないもの：フォルダでの表示（#20）、評価（#19）、シャッフルとリピート（#17）、ギャップレス再生（#18）、メディアキー（`sapphire-turtle/corundum-framework#50`）。
 
 ## このコンピューターのサーバー
@@ -117,10 +117,10 @@ desktop アプリは、このコンピューターのフォルダをライブラ
 
 - 初回、サーバーが未登録なら「このコンピューター」を選び、ライブラリのフォルダを選ぶ（既にライブラリのフォルダはそのまま使う）。アプリはサーバーの設定ファイルを既定の場所に書き、名前 `desktop` の API キーを作り、サーバーを「このコンピューター」（`http://127.0.0.1:7810`、music は `:7811`）として登録して選ぶ。続けて、サーバーをバックグラウンドで動かし続けるかを尋ねる（Linux は systemd のユーザーユニット、macOS は LaunchAgent、Windows はタスクスケジューラーのログオン時のタスク）。断ったときは `asteria-photos serve` で自分で起動する。最後に、見つかった外部ツールを出す。
 - 設定 › ローカルサーバーでは、ライブラリと待ち受けアドレスの表示、バックグラウンドのサービスの登録・起動・停止・削除、ライブラリの API キーの管理（スマートフォンやほかのコンピューターごとに足し、使わなくなったものは外す）、外部ツールの有無の表示ができる。ローカルサーバーがまだ無いときは、「ローカルサーバーを用意する」ボタンで初回の手順をもう一度たどれる。
-- サーバーはサムネイルや小さいコピーを外部ツールで作る。無くてもサーバーは動き、それが作れないだけ。サーバーが動くマシンに入れる：
+- サーバーはサムネイルを外部ツールで作る。無くてもサーバーは動き、サムネイルが作れないだけ。サーバーが動くマシンに入れる：
   - `vipsthumbnail`（libvips に含まれる）：画像のサムネイルとカバー。Debian/Ubuntu は `sudo apt install libvips-tools`（ほかのディストリビューションも似た名前のパッケージ）、macOS は `brew install vips`、Windows は github.com/libvips/build-win64-mxe/releases の libvips を入れ、その `bin` フォルダを `PATH` に足す。
-  - `ffmpeg`：動画のサムネイルと、music のオフライン用の小さいコピー（libopus つきのもの）。`sudo apt install ffmpeg`、`brew install ffmpeg`、Windows は ffmpeg.org/download.html から入れ、その `bin` フォルダを `PATH` に足す。
-  - desktop アプリの Windows と macOS のパッケージには、はじめから入っている（macOS は ffmpeg。`vipsthumbnail` が無ければ画像のサムネイルはシステムの `sips` で作る。Windows は両方）。
+  - `ffmpeg`：photos の動画のサムネイル（music は使わない。オフライン用のコピーは自分で作る）。`sudo apt install ffmpeg`、`brew install ffmpeg`、Windows は ffmpeg.org/download.html から入れ、その `bin` フォルダを `PATH` に足す。
+  - desktop アプリの Windows と macOS のパッケージには、そのアプリが使うものがはじめから入っている（photos：macOS は ffmpeg で、`vipsthumbnail` が無ければ画像のサムネイルはシステムの `sips` で作る。Windows は両方。music：Windows は `vipsthumbnail`、macOS は何もない）。
   - または `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` にプログラムの場所を入れる。入れなければ実行ファイルの横（パッケージが置く場所）、`PATH`、続けて `/opt/homebrew/bin` と `/usr/local/bin`（macOS）または `/usr/local/bin`（Linux）を探す。ページの「もう一度確かめる」で探し直す。
 
 ## photos クライアントからのアップロード

@@ -103,7 +103,8 @@ asteria/
 | GUI | eframe / egui |
 | 音声タグ | lofty |
 | EXIF | nom-exif 系 |
-| 画像・動画・音声の変換 | ffmpeg、libvips（`vips` コマンド）を子プロセスとして呼ぶ |
+| 画像・動画の変換 | ffmpeg、libvips（`vips` コマンド）を子プロセスとして呼ぶ |
+| 音声の変換（サーバーの `offline-audio`） | プロセス内で行う：symphonia と opus-pure（デコード）、rubato（48 kHz へ）、`opus` クレート（同梱の libopus でエンコード）、`ogg` クレート（多重化） |
 | 音声デコードと出力（クライアント） | symphonia、opus-pure（Opus）、cpal、rubato（サンプルレートの変換） |
 | OS のメディアキーと再生中の表示 | corundum-framework のメディアセッション（sapphire-turtle/corundum-framework#50） |
 | iOS の OS 機能 | objc2-photos、objc2-avf-audio、objc2-media-player、block2 |
@@ -338,7 +339,7 @@ asteria/
 
 ### 4.5 メディア処理
 
-- ffmpeg と vips を子プロセスとして呼ぶ。タイムアウトと同時実行数の上限を設ける。
+- 画像と動画は ffmpeg と vips を子プロセスとして呼ぶ。音声（`offline-audio`）はサーバーのプロセス内で作り、外部ツールを使わない（§4.9、2026-11-02 決定、#48）。どれもタイムアウトと同時実行数の上限を設ける。
 - 生成物は（ファイル全体のハッシュ、プリセット名）をキーにキャッシュする。ファイル全体のハッシュは `file/1` スコープの BLAKE3 で、スキャンのときに payload ハッシュと一緒に計算してキャッシュに持つ。EXIF の向きや ICC などメタデータだけを変えた場合も作り直される。photos の画像はメタデータをほとんど書き換えない（評価などはサイドカーに書く）ので、作り直しが増えることはない（2026-10-22 決定）。
 - リクエストが来たときに生成するのを基本とする。オフライン用に指定されたものだけ、先に生成しておく。
 - 失敗したファイルは「処理不可」として理由を記録する。ファイルが変わるまで再試行しない。外部ツールがないことは処理不可にしない。
@@ -356,7 +357,7 @@ asteria/
 | `thumb` | 長辺 256px の WebP |
 | `preview` | 長辺 1920px の WebP |
 | `offline-image` | 長辺 2048px の WebP |
-| `offline-audio` | Ogg Opus 96kbps。純 Rust のデコーダー（opus-pure か opuscule）が iPhone の Release で実時間の数百倍で復号できることを、検証用の試作で確かめた。詳細は §4.9 |
+| `offline-audio` | Ogg Opus 96kbps。サーバーがプロセス内で作る。純 Rust のデコーダー（opus-pure か opuscule）が iPhone の Release で実時間の数百倍で復号できることを、検証用の試作で確かめた。詳細は §4.9 |
 
 - music では、曲の `thumb` と `preview` はジャケットを描いたものになる（§4.9）。
 
@@ -506,10 +507,14 @@ music-server は photos-server と同じ形（Plan 8b からはライブラリ�
 
 **offline-audio**
 - プリセット `offline-audio` は Audio のアイテムだけが対象で、要求されたときに作る。先に作っておくのは、オフラインの対象を選べるようになる Plan 9 から。
-- ffmpeg で、最初の音声ストリームだけを Ogg Opus 96 kbps（VBR）に変換する。メタデータと埋め込み画像は落とす（`-map 0:a:0 -map_metadata -1`）。
+- サーバーがプロセス内で、最初の音声トラックだけを Ogg Opus 96 kbps（VBR）にする。メタデータと埋め込み画像は入れない（2026-11-02 決定、#48。それまでは ffmpeg の `-map 0:a:0 -map_metadata -1`）。music に外部ツールの ffmpeg は要らない。
+  - デコード：symphonia（FLAC、MP3、MP4 の AAC と ALAC、Vorbis、WAV）。Ogg Opus（最初のストリームが `OpusHead`）は opus-pure で、pre-skip と最後のページのグラニュール位置で前後を切る。Opus のチャンネルマッピングはファミリー 0（モノラルとステレオ）だけ。
+  - チャンネル：1 は 1、2 は 2 のまま。3 以上はステレオにまとめる。前の左右は 1、前のセンターは両側に 1/√2、ほかの左右のスピーカーはその側に 1/√2、ほかのセンターは両側に 1/2、LFE は捨てる。位置の分からないチャンネルは WAVE の順とみなす。最後に、各側の係数の合計が 1 を超えないように全体を縮める（ffmpeg の既定と同じで、5.1 なら前 0.41、センター 0.29、後ろ 0.29）。
+  - サンプルレートが 48 kHz でなければ rubato（FFT）で 48 kHz にする。
+  - エンコード：`opus` クレート（opusic-sys が同梱の libopus 1.6 を cmake でビルドする）、`Application::Audio`、96 kbps、VBR、20 ms のフレーム。
+  - 多重化：`ogg` クレート。`OpusHead`（バージョン 1、チャンネル数、pre-skip はエンコーダーの lookahead、入力のサンプルレートは元のもの、ゲイン 0、マッピングファミリー 0）と `OpusTags`（ベンダー `asteria`、コメントなし）をそれぞれ1ページに置き、音声は 50 パケット（1 秒）ごとにページを切る。グラニュール位置は RFC 7845 のとおり、そのページまでのパケットが復号する 48 kHz のサンプル数（pre-skip を含む）。最後のフレームの足りない分は無音で埋め、デコーダーが pre-skip と入力のすべてを出し切るまで無音のフレームを足し、最後のページのグラニュール位置（pre-skip ＋ 入力の長さ）で余りを切る。
 - キーは（ファイル全体のハッシュ、`offline-audio`）。`Content-Type: audio/ogg` で返し、Range に対応する。
-- タイムアウトはプリセットごとに持つ。サムネイルは今の値、`offline-audio` は10分。
-- ffmpeg に libopus がない場合は、ツールがないのと同じ扱い（503）にし、処理不可にはしない。
+- タイムアウトはプリセットごとに持つ。サムネイルは今の値、`offline-audio` は10分。エンコードはブロッキングのスレッドで動き（同時に1つ、待ちは32まで）、フレームごとに取り消しの印を見る。時間切れでは印を立てて止まるのを待ち、503（処理不可にはしない）。デコードできないファイルは処理不可、エンコード中のパニックも処理不可にする。
 - 再生用の原本は、今の `/media/{id}/original`（Range 対応）をそのまま使う。
 
 **プレイリスト（読むだけ）**
@@ -675,7 +680,7 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
   1. 「ライブラリはどこにありますか？」：「このコンピューター」（フォルダを選ぶ）、「ほかのサーバー」（今のサーバー登録の画面へ）、「あとで」。
   2. 「このコンピューター」なら：選んだフォルダで `init` する（既にライブラリならそのまま使う）。持ち主の名前は OS のユーザー名。設定ファイルは既定の場所（§4.1）。続けて、名前 `desktop` の API キーを作り、`http://127.0.0.1:7810`（music は `7811`）を「このコンピューター」として接続先に登録して選ぶ。
   3. 「サーバーをバックグラウンドで動かし続けますか？」：corundum の `first_run::ServicePage`。はいならサービスに登録して起動する。いいえなら、サーバーが動いていないので、そのことと起動のしかた（`asteria-<app> serve`）を出す。
-  4. 外部ツール：`vipsthumbnail` と `ffmpeg` があるかを出し、無ければ入れ方を案内する。無くても続けられる（サムネイルや低音質版が作れないだけ）。
+  4. 外部ツール：アプリのサーバーが使うツール（`LocalServerSpec::tools`。photos は `vipsthumbnail` と `ffmpeg`、music はジャケットのサムネイルの `vipsthumbnail` だけ）があるかを出し、無ければ入れ方を案内する。無くても続けられる（サムネイルが作れないだけ）。ツールを使わないアプリでは、使わないことだけを出す。
 - **サービス**：corundum-framework-service。名前はアプリ名（`asteria-photos` / `asteria-music`）、実行するのは自分の実行ファイルと `serve`。Linux は systemd のユーザーユニット、macOS は LaunchAgent、Windows はタスクスケジューラー（ログオン時）。
 - **設定の「ローカルサーバー」ページ**（desktop だけ）：ライブラリの場所と待ち受けアドレス、`settings::ServiceRow`（登録、起動、停止、削除）、API キーの管理（`KeysPage`、ローカルの `KeyStore` を直接扱う）、外部ツールの有無。
 - 外部ツールの有無は、サーバーがツールを探すのと同じ関数で desktop が確かめる（同じマシンなので結果は同じ）。ツールは `ASTERIA_*` の変数、`PATH`、よく使われるディレクトリ（macOS は `/opt/homebrew/bin` と `/usr/local/bin`、Linux は `/usr/local/bin`）の順に探し、サーバーは見つけた絶対パスを実行する（Finder から起動した GUI や LaunchAgent の `PATH` には Homebrew が入っていないため）。Velopack 版の同梱は §5.9。
@@ -706,10 +711,11 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
 - **ランチャー**：`WindowOptions::launcher` でアプリのメニューに載せる（AppImage と cargo で入れた版。macOS・Windows のパッケージでは corundum が飛ばす）。
 - **外部ツール**
   - 探す順番：`ASTERIA_*` の変数 → **実行ファイルの横（同梱）** → `PATH` → よく使われるディレクトリ。
-  - Windows は ffmpeg（libopus と libwebp を含む GPL ビルド）を `ffmpeg.exe`、libvips（build-win64-mxe の `vips-dev-x64-all-<version>.zip`、DLL ごと）を `vips\bin\vipsthumbnail.exe` として同梱する。
-  - macOS は ffmpeg（martin-riedl.de の静的ビルド、arm64 と x86_64）を同梱する。画像は §4.5 の sips を使う。
+  - Windows は libvips（build-win64-mxe の `vips-dev-x64-all-<version>.zip`、DLL ごと）を `vips\bin\vipsthumbnail.exe` として両アプリに同梱する。photos にはさらに ffmpeg（libwebp を含む GPL ビルド）を `ffmpeg.exe` として同梱する。
+  - macOS は photos にだけ ffmpeg（martin-riedl.de の静的ビルド、arm64 と x86_64）を同梱する。画像は §4.5 の sips を使う。music は何も同梱しない。
+  - music は `offline-audio` をプロセス内で作る（§4.9）ので ffmpeg を同梱しない（2026-11-02 決定、#48）。ジャケットのサムネイルには vips（macOS では sips）を使う。どのアプリが何を同梱するかは `packaging/fetch-tools.sh <windows|macos> <photos|music> <dest>` が決める。
   - Linux は同梱しない（パッケージマネージャーで入れる。今の案内のまま）。
-  - ワークフローはツールをバージョン付きの URL と SHA-256 で固定し（`packaging/tools.env`。2026-11-02 の時点で ffmpeg 9.0.2：Windows は BtbN の `autobuild-2026-11-01-12-49` の `win64-gpl-9.0`、macOS は martin-riedl.de の arm64 と x86_64 を `lipo` で1つに。libvips 8.18.7）、取ってきたら `-encoders` に libopus と libwebp があることを確かめる（無ければリリースを止める）。パッケージには `tools/LICENSES`（ffmpeg は GPLv3、libvips は LGPL、それぞれのソースの場所）を入れる。asteria は GPL-3.0-or-later なので同梱できる。
+  - ワークフローはツールをバージョン付きの URL と SHA-256 で固定し（`packaging/tools.env`。2026-11-02 の時点で ffmpeg 9.0.2：Windows は BtbN の `autobuild-2026-11-01-12-49` の `win64-gpl-9.0`、macOS は martin-riedl.de の arm64 と x86_64 を `lipo` で1つに。libvips 8.18.7）、取ってきたら `-encoders` に libwebp があることを確かめる（無ければリリースを止める）。パッケージには `tools/LICENSES`（そのパッケージが同梱するツールのもの：ffmpeg は GPLv3、libvips は LGPL、それぞれのソースの場所）を入れる。asteria は GPL-3.0-or-later なので同梱できる。
   - 2026-11-01 のスパイク（GitHub の macOS ランナー）で確かめたこと：sips は JPEG・PNG・HEIC・RAW（NEF）を読める、LaunchAgent からも動く、壊れたファイルは終了コード 13。静的な ffmpeg は .app の中でも、ad hoc とハードンドランタイムの署名でも動く。公証は未確認（シークレットが無い）。
 - **headless（と desktop）の `update` サブコマンド**：`update [--check] [-y]`（corundum-framework-update の `UpdateArgs` と `run`）。手で置いたリリースのバイナリだけを新しい版に置き換え、cargo で入れた版には `cargo install` を、Velopack 版にはアプリから更新するよう案内する。置き換えた後は、動いている `serve` を起動し直すよう案内する。
 - **確かめ方**：単体テスト（起動の分岐、同梱ツールの発見、sips の経路、`update` の案内）に加え、プレリリースのタグ（`v0.1.0-rc.1` など）でワークフローを通し、3 OS の実機でインストール → 更新 → アンインストールを確かめる。
@@ -738,7 +744,7 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
 - **操作のマージ**：proptest を使い、操作が届く順番によらず結果が同じになることを確認する。
 - **キャッシュの作り直し**：キャッシュを削除して作り直したとき、元と同じ状態になることを確認する。
 - **結合テスト**：一時ディレクトリのライブラリでサーバーを起動し、JSON-RPC、バイナリの送受信、MCP を通しで確認する。
-- **CI**：Linux（x86_64 と arm64）、macOS、Windows でビルドとテストを行い、`cargo deny` を実行する。macOS では iOS 向けのビルドが通ることも確認する。vips と ffmpeg を入れるのは Linux のジョブだけで、ほかではこれらを使うテストは理由を出してスキップする。シンボリックリンクやシェルスクリプトに頼るテストは Unix だけで動かす。
+- **CI**：Linux（x86_64 と arm64）、macOS、Windows でビルドとテストを行い、`cargo deny` を実行する。macOS では iOS 向けのビルドが通ることも確認する。サーバーのビルドには cmake が要る（`opus` クレートが同梱の libopus をビルドするため。GitHub のランナーには入っている）。vips と ffmpeg を入れるのは Linux のジョブだけで、ほかではこれらを使うテストは理由を出してスキップする。シンボリックリンクやシェルスクリプトに頼るテストは Unix だけで動かす。
 - **結合テスト（photos-server の e2e）**は Linux だけで動かす（`XDG_CACHE_HOME` でキャッシュを分け、`kill -INT` で止めるため）。
 - **再生エンジン（music）**：
   - 取得は、同じプロセスで動かす Range 対応のテスト用サーバー（遅らせる、途中で切る、503 を返す）で、読んだバイト列が原本と一致すること、未取得の位置へのシークで取り直すこと、止まった取得が失敗になること、一時ファイルが消えることを確かめる。
@@ -781,7 +787,7 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
    - クレートの分割と移動：`asteria-<app>-server` をライブラリにし、`-headless`、`-gui`、`-desktop`、`-mobile`（骨組み）を作る。desktop は CLI を兼ね、`asteria-<app>-desktop serve` でサーバーを立てられる。CI の iOS チェックを mobile に広げる。（Plan 8b、済）
    - corundum-framework 0.6.0 に上げた（コードの変更なし、2026-11-01）。
    - ローカルサーバー（§5.8）：認証を corundum の API キーに置き換え、設定ファイルの既定の場所を決め、desktop の初回起動の流れ（ライブラリを選ぶ、`init`、キーの発行と接続先への自動登録、サービス登録、外部ツールの確かめ）と、設定の「ローカルサーバー」ページを足す。cargo で入れた版でも使える。（Plan 8c、済）
-   - desktop の Velopack 配布と headless のリリース（§5.9）：1つのタグで両アプリの Velopack パッケージと headless のバイナリを出す。単一起動、更新、PATH、ランチャー、Windows のシムと GUI のサブシステム（corundum-framework#89）、`--veloapp-*` を引数の判定より前に処理、Windows（vips と ffmpeg）と macOS（ffmpeg）への外部ツールの同梱、macOS の sips、headless の `update`。（Plan 8d）
+   - desktop の Velopack 配布と headless のリリース（§5.9）：1つのタグで両アプリの Velopack パッケージと headless のバイナリを出す。単一起動、更新、PATH、ランチャー、Windows のシムと GUI のサブシステム（corundum-framework#89）、`--veloapp-*` を引数の判定より前に処理、Windows（vips と ffmpeg）と macOS（ffmpeg）への外部ツールの同梱（#48 で music は ffmpeg を同梱しなくなった）、macOS の sips、headless の `update`。（Plan 8d）
 10. オフラインキャッシュと操作キュー。（Plan 9）
 11. payload ハッシュの第2段階。（Plan 10）
 12. iOS のクライアント（photos のアップロード、music のバックグラウンド再生）。corundum-framework が iOS のウィンドウに対応してから始める。
