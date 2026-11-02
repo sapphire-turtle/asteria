@@ -17,11 +17,11 @@ An installed app looks for a new release once a day, downloads it in the backgro
 - The Windows and macOS packages include the external tools the server uses (ffmpeg, and on Windows libvips's `vipsthumbnail`), with their licences in `tools/LICENSES` (ffmpeg is GPLv3, libvips LGPL). On Linux install them with your package manager (see [A server on this computer](#a-server-on-this-computer)).
 - The packages are not signed yet: Windows SmartScreen warns before the installer runs ("More info" › "Run anyway"), and macOS Gatekeeper refuses to open the unsigned package at first (allow it with "Open Anyway" in System Settings › Privacy & Security). The macOS package is signed and notarized once the release workflow has a Developer ID.
 
-The servers without a window are `asteria-photos-headless-<platform>` and `asteria-music-headless-<platform>`, for `linux-x86_64`, `linux-aarch64`, `macos-aarch64` and `windows-x86_64.exe`. Rename the file to `asteria-photos` (or `asteria-music`; keep `.exe` on Windows), make it executable and put it on `PATH`. `asteria-photos update` replaces it with the newest release (`--check` only tells you whether there is one, `-y` does not ask); restart a running `serve` afterwards. A server installed with `cargo install` is updated with `cargo install` instead, and the desktop app updates itself.
+The servers without a window are `asteria-photos-headless-<platform>` and `asteria-music-headless-<platform>`, for `linux-x86_64`, `linux-aarch64`, `macos-aarch64` and `windows-x86_64.exe`. Rename the file to `asteria-photos` (or `asteria-music`; keep `.exe` on Windows), make it executable and put it on `PATH`. `asteria-photos update` replaces it with the newest release (`--check` only tells you whether there is one, `-y` does not ask); restart a running `serve` afterwards. A pre-release (rc) binary is not offered later pre-releases by `update`: download those by hand. A server installed with `cargo install` is updated with `cargo install` instead, and the desktop app updates itself.
 
 ## Running the photos server
 
-`asteria-photos` is the server without a window, for hosts with no GUI. Install it with `cargo install --path photos/headless`; the desktop app (`asteria-photos-desktop`) runs the same commands.
+`asteria-photos` is the server without a window, for hosts with no GUI. Install it with `cargo install --path photos/headless`; the desktop app (`asteria-photos-desktop`) runs the same commands. On Windows a `cargo install`ed desktop app is a GUI program: for the command line use the packaged app's `asteria-photos` (its console shim) or the server without a window.
 
 ```sh
 # Create the library (or adopt an existing one) and a config; prints the token of the key `owner` once.
@@ -46,7 +46,7 @@ asteria-photos serve
 
 ## Running the music server
 
-`asteria-music` is the server without a window (`cargo install --path music/headless`); the desktop app (`asteria-music-desktop`) runs the same commands.
+`asteria-music` is the server without a window (`cargo install --path music/headless`); the desktop app (`asteria-music-desktop`) runs the same commands. On Windows a `cargo install`ed desktop app is a GUI program: for the command line use the packaged app's `asteria-music` (its console shim) or the server without a window.
 
 ```sh
 # Create the library (or adopt an existing one) and a config; prints the token of the key `owner` once.

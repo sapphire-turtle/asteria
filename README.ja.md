@@ -17,11 +17,11 @@ desktop アプリは、ウィンドウ、サーバーのコマンドライン（
 - Windows と macOS のパッケージには、サーバーが使う外部ツール（ffmpeg と、Windows では libvips の `vipsthumbnail`）が入っている。ライセンスは `tools/LICENSES`（ffmpeg は GPLv3、libvips は LGPL）。Linux ではパッケージマネージャーで入れる（[このコンピューターのサーバー](#このコンピューターのサーバー)を参照）。
 - パッケージはまだ署名していない。Windows ではインストーラーの前に SmartScreen が警告し（「詳細情報」›「実行」）、macOS では Gatekeeper が署名の無いパッケージを最初は開かない（システム設定 › プライバシーとセキュリティの「このまま開く」で許可する）。リリースのワークフローに Developer ID を入れれば、macOS のパッケージは署名と公証つきになる。
 
-ウィンドウの無いサーバーは `asteria-photos-headless-<platform>` と `asteria-music-headless-<platform>`（`linux-x86_64`、`linux-aarch64`、`macos-aarch64`、`windows-x86_64.exe`）。ファイル名を `asteria-photos`（または `asteria-music`。Windows では `.exe` を残す）に変え、実行できるようにして `PATH` に置く。`asteria-photos update` で最新のリリースに置き換わる（`--check` は有無を知らせるだけ、`-y` は確認しない）。置き換えた後は、動いている `serve` を起動し直す。`cargo install` で入れたサーバーは `cargo install` で更新し、desktop アプリは自分で更新する。
+ウィンドウの無いサーバーは `asteria-photos-headless-<platform>` と `asteria-music-headless-<platform>`（`linux-x86_64`、`linux-aarch64`、`macos-aarch64`、`windows-x86_64.exe`）。ファイル名を `asteria-photos`（または `asteria-music`。Windows では `.exe` を残す）に変え、実行できるようにして `PATH` に置く。`asteria-photos update` で最新のリリースに置き換わる（`--check` は有無を知らせるだけ、`-y` は確認しない）。置き換えた後は、動いている `serve` を起動し直す。プレリリース（rc）のバイナリには、`update` は後のプレリリースを勧めないので、それは手でダウンロードする。`cargo install` で入れたサーバーは `cargo install` で更新し、desktop アプリは自分で更新する。
 
 ## photos サーバーの起動
 
-`asteria-photos` は、GUI のないホスト向けのウィンドウを持たないサーバー。`cargo install --path photos/headless` で入れる。デスクトップアプリ（`asteria-photos-desktop`）も同じコマンドを実行できる。
+`asteria-photos` は、GUI のないホスト向けのウィンドウを持たないサーバー。`cargo install --path photos/headless` で入れる。デスクトップアプリ（`asteria-photos-desktop`）も同じコマンドを実行できる。Windows では `cargo install` で入れたデスクトップアプリは GUI のプログラムなので、コマンドラインにはパッケージの `asteria-photos`（コンソール用の shim）か、ウィンドウの無いサーバーを使う。
 
 ```sh
 # ライブラリ（既存でも可）と設定ファイルを作り、キー `owner` のトークンを一度だけ表示する。
@@ -46,7 +46,7 @@ asteria-photos serve
 
 ## music サーバーの起動
 
-`asteria-music` は、ウィンドウを持たないサーバー（`cargo install --path music/headless`）。デスクトップアプリ（`asteria-music-desktop`）も同じコマンドを実行できる。
+`asteria-music` は、ウィンドウを持たないサーバー（`cargo install --path music/headless`）。デスクトップアプリ（`asteria-music-desktop`）も同じコマンドを実行できる。Windows では `cargo install` で入れたデスクトップアプリは GUI のプログラムなので、コマンドラインにはパッケージの `asteria-music`（コンソール用の shim）か、ウィンドウの無いサーバーを使う。
 
 ```sh
 # ライブラリ（既存でも可）と設定ファイルを作り、キー `owner` のトークンを一度だけ表示する。
