@@ -93,14 +93,25 @@ fn bundled_dirs(exe_dir: &Path) -> Vec<PathBuf> {
     vec![exe_dir.to_path_buf(), exe_dir.join("vips").join("bin")]
 }
 
-/// [`bundled_dirs`] of the running executable's directory, as `current_exe` reports it (not
-/// canonicalized: a Windows `\\?\` path or a resolved symlink would move the search). Empty
-/// when the executable's path is unknown.
+/// [`exe_bundled_dirs`] of the running executable. Empty when its path is unknown.
 fn current_bundled_dirs() -> Vec<PathBuf> {
     std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(bundled_dirs))
+        .map(|exe| exe_bundled_dirs(&exe))
         .unwrap_or_default()
+}
+
+/// [`bundled_dirs`] of the directory of `exe` with its links resolved, as corundum's
+/// `package::current_exe` resolves it: on macOS `/usr/local/bin/asteria-photos` is a link
+/// into the `.app`, whose `Contents/MacOS` holds the tools. Not on Windows, where the
+/// canonical form is a `\\?\` path and a package is never started through a link.
+fn exe_bundled_dirs(exe: &Path) -> Vec<PathBuf> {
+    let resolved = if cfg!(windows) {
+        exe.to_path_buf()
+    } else {
+        exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf())
+    };
+    resolved.parent().map(bundled_dirs).unwrap_or_default()
 }
 
 /// Directories tried after `PATH`: a GUI started from the Finder and a LaunchAgent get only
@@ -1087,6 +1098,24 @@ mod tool_tests {
             &[],
         );
         assert_eq!(found, Some(bundled));
+    }
+
+    /// macOS puts `/usr/local/bin/asteria-photos` as a link into the `.app`: the tools are
+    /// looked for beside the link's target, where the package put them.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_executable_finds_the_tools_beside_its_target() {
+        let (_root, exe_dir) = tempdir_with_space();
+        let exe = program(&exe_dir, "asteria-photos");
+        let bundled = program(&exe_dir, "ffmpeg");
+        let bin = tempfile::tempdir().unwrap();
+        let link = bin.path().join("asteria-photos");
+        std::os::unix::fs::symlink(&exe, &link).unwrap();
+        let found = find_program(OsStr::new("ffmpeg"), &exe_bundled_dirs(&link), None, &[]);
+        assert_eq!(
+            found.map(|f| f.canonicalize().unwrap()),
+            Some(bundled.canonicalize().unwrap())
+        );
     }
 
     #[test]
