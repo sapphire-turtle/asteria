@@ -23,5 +23,6 @@ pub fn spec() -> AppSpec {
         about: "Asteria Music server",
         default_listen: "127.0.0.1:7811",
         extension: Arc::new(MusicExtension::new()),
+        release_asset: None,
     }
 }

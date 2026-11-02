@@ -25,5 +25,6 @@ pub fn spec() -> AppSpec {
         about: "Asteria Photos server",
         default_listen: "127.0.0.1:7810",
         extension: Arc::new(PhotosExtension),
+        release_asset: None,
     }
 }

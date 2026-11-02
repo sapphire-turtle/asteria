@@ -27,6 +27,7 @@ pub fn server() -> AppSpec {
         about: "test",
         default_listen: "127.0.0.1:7899",
         extension: Arc::new(Nothing),
+        release_asset: None,
     }
 }
 

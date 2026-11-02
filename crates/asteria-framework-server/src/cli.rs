@@ -1,4 +1,4 @@
-//! The command line shared by the Asteria servers: `init`, `api-key` and `serve`, with the
+//! The command line shared by the Asteria servers: `init`, `api-key`, `serve` and `update`, with the
 //! serve runtime (instance lock, upload purge, shutdown). An app supplies an [`AppSpec`].
 
 use std::error::Error;
@@ -12,8 +12,9 @@ use std::time::{Duration, SystemTime};
 use asteria_framework::Library;
 use asteria_framework::fsutil::cleanup_tmp_files;
 use asteria_framework::paths::META_DIR;
-use clap::{Arg, ArgAction, ArgMatches, Command, FromArgMatches, Subcommand, value_parser};
+use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches, Subcommand, value_parser};
 use corundum_framework::keys::{KeyCommand, KeyId, KeyStore, KeyVerifier, ProfileId, Token};
+use corundum_framework_update::{ReleaseSource, UpdateArgs};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -57,6 +58,18 @@ pub struct AppSpec {
     /// Address `init` writes to the config file unless `--listen` is given.
     pub default_listen: &'static str,
     pub extension: Arc<dyn AppExtension>,
+    /// The release file base this binary updates itself from (`asteria-photos-headless`);
+    /// `None` for a build that is updated by its installer.
+    pub release_asset: Option<&'static str>,
+}
+
+/// Where this program's newer releases are published.
+fn release_source(spec: &AppSpec) -> ReleaseSource {
+    let source = ReleaseSource::github("sapphire-turtle", "asteria");
+    match spec.release_asset {
+        Some(base) => source.asset(base),
+        None => source,
+    }
 }
 
 fn command(spec: &AppSpec) -> Command {
@@ -128,6 +141,9 @@ fn command(spec: &AppSpec) -> Command {
                         .trailing_var_arg(true),
                 ),
         )
+        .subcommand(UpdateArgs::augment_args(
+            Command::new("update").about("Replace this program with its newest release"),
+        ))
         .subcommand(
             Command::new("serve")
                 .about("Run the server")
@@ -193,11 +209,46 @@ fn dispatch(spec: &AppSpec, matches: &ArgMatches) -> AnyResult<i32> {
             m.get_one::<SocketAddr>("listen").copied(),
         )
         .map(|()| 0),
+        Some(("update", m)) => update(spec, &UpdateArgs::from_arg_matches(m)?),
         _ => unreachable!("subcommand_required"),
     }
 }
 
-/// Parses the command line (init / api-key / serve), moves the app's directories from
+/// Replaces this program with the newest release, or says how its build is updated instead.
+/// The process's exit code.
+fn update(spec: &AppSpec, args: &UpdateArgs) -> AnyResult<i32> {
+    let program = program_name(spec);
+    if spec.release_asset.is_none() && !args.check {
+        eprintln!(
+            "{program} is updated by the app it came with (Settings \u{203a} About), or by \
+             reinstalling it"
+        );
+        return Ok(1);
+    }
+    let modified = || {
+        std::env::current_exe()
+            .and_then(|p| p.metadata()?.modified())
+            .ok()
+    };
+    let before = modified();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let code = runtime.block_on(corundum_framework_update::run(
+        args,
+        &release_source(spec),
+        &program,
+        env!("CARGO_PKG_VERSION"),
+    ))?;
+    if code == 0 && modified() != before {
+        println!(
+            "Restart a running `{program} serve` (or its background service) to use the new version."
+        );
+    }
+    Ok(code)
+}
+
+/// Parses the command line (init / api-key / serve / update), moves the app's directories from
 /// Roaming to Local on Windows, and runs it; exits the process with 1 on error.
 pub fn main(spec: AppSpec) -> ! {
     let matches = command(&spec).get_matches();
@@ -578,7 +629,40 @@ mod tests {
             about: "test",
             default_listen: "127.0.0.1:0",
             extension: Arc::new(Nothing),
+            release_asset: None,
         }
+    }
+
+    #[test]
+    fn update_takes_check_and_yes() {
+        let m = command(&spec())
+            .try_get_matches_from(["x", "update", "--check", "-y"])
+            .unwrap();
+        let (name, m) = m.subcommand().unwrap();
+        assert_eq!(name, "update");
+        let args = UpdateArgs::from_arg_matches(m).unwrap();
+        assert!(args.check && args.yes);
+    }
+
+    #[test]
+    fn only_a_binary_with_a_release_asset_replaces_itself() {
+        let mut s = spec();
+        assert_eq!(release_source(&s).asset_base(), None);
+        s.release_asset = Some("asteria-photos-headless");
+        assert_eq!(
+            release_source(&s).asset_base(),
+            Some("asteria-photos-headless")
+        );
+        assert_eq!(release_source(&s).repository(), "sapphire-turtle/asteria");
+    }
+
+    #[test]
+    fn a_build_without_a_release_asset_points_to_its_installer() {
+        let args = UpdateArgs {
+            check: false,
+            yes: true,
+        };
+        assert_eq!(update(&spec(), &args).unwrap(), 1);
     }
 
     #[test]
