@@ -60,3 +60,8 @@ asteria-desktop-page-service = バックグラウンドのサーバー
 asteria-desktop-page-service-note = バックグラウンドのサービスを使わないときは、自分でサーバーを起動します：
 asteria-desktop-page-keys = API キー
 asteria-desktop-page-keys-failed = API キーを開けませんでした：{ $error }
+
+# 設定の「情報」ページ。
+asteria-desktop-about = 情報
+asteria-desktop-about-version = バージョン { $version }
+asteria-desktop-about-licence = Asteria は GPL-3.0-or-later のフリーソフトウェアです。Windows と macOS のパッケージには ffmpeg（GPLv3）、Windows にはさらに libvips（LGPL）が入っています。それぞれのライセンスとソースの場所は、プログラムの横の tools/LICENSES にあります。

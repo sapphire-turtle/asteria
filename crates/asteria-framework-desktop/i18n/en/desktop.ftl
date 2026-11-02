@@ -60,3 +60,8 @@ asteria-desktop-page-service = Background server
 asteria-desktop-page-service-note = Without the background service, start the server yourself:
 asteria-desktop-page-keys = API keys
 asteria-desktop-page-keys-failed = The API keys could not be opened: { $error }
+
+# Settings › About.
+asteria-desktop-about = About
+asteria-desktop-about-version = Version { $version }
+asteria-desktop-about-licence = Asteria is free software under GPL-3.0-or-later. Packages for Windows and macOS include ffmpeg (GPLv3) and, on Windows, libvips (LGPL); their licences and sources are listed in tools/LICENSES beside the program.

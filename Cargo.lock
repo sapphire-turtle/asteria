@@ -386,6 +386,7 @@ dependencies = [
  "asteria-framework-server",
  "corundum-framework",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -1307,6 +1308,7 @@ dependencies = [
  "corundum-framework-package",
  "corundum-framework-platform",
  "corundum-framework-service",
+ "corundum-framework-update",
 ]
 
 [[package]]
@@ -1316,8 +1318,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92f9840be85d8d9bc6d203e8cb044012a2fb1885cbac20dc41a407f6f2ac55ff"
 dependencies = [
  "corundum-framework-keys",
+ "corundum-framework-package",
  "corundum-framework-platform",
  "corundum-framework-service",
+ "corundum-framework-update",
  "eframe",
  "egui",
  "egui_extras",
@@ -1332,7 +1336,9 @@ dependencies = [
  "objc2-ui-kit 0.3.2",
  "raw-window-handle",
  "rfd",
+ "semver",
  "serde",
+ "tokio",
  "toml",
  "tracing",
  "ttf-parser",
@@ -1382,6 +1388,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63482a44c3905280262230d715538b56ac5d1644d391cfa43bc72ee0fb77ac32"
 dependencies = [
  "dirs",
+ "interprocess",
  "jni",
  "ndk-context",
  "objc2-foundation 0.3.2",
@@ -1596,6 +1603,12 @@ checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
  "libloading",
 ]
+
+[[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 
 [[package]]
 name = "document-features"
@@ -2859,6 +2872,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c033f80b2c113cdf91ab7a33faa9cbc014726dcad99880c8609af2a370edf37d"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "interprocess"
+version = "2.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4a4fff6c51dece332bdbf3af5fe376c49cfc8dced782725e95be0bb489e35d7"
+dependencies = [
+ "doctest-file",
+ "libc",
+ "recvmsg",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4493,6 +4519,12 @@ checksum = "538895ccf2006b473aafbe8d72770e21038961ab67aae34f3c577485fc703a7d"
 dependencies = [
  "rustfft",
 ]
+
+[[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
 
 [[package]]
 name = "redb"
@@ -6905,6 +6937,12 @@ dependencies = [
  "static_assertions",
  "web-sys",
 ]
+
+[[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
 name = "winapi-util"
