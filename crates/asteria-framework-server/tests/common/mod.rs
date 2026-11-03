@@ -270,3 +270,18 @@ pub fn have_tool(tool: &str) -> bool {
     }
     ok
 }
+
+/// Bytes of a HEIC, which the in-process image decoder reports as unsupported, so a render
+/// of them reaches the (fake) image tool.
+pub fn heic_bytes() -> Vec<u8> {
+    let mut bytes = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
+    bytes.extend_from_slice(&[0u8; 64]);
+    bytes
+}
+
+/// Writes [`heic_bytes`] to `x.heic` in `dir` and returns its path.
+pub fn write_heic(dir: &Path) -> PathBuf {
+    let path = dir.join("x.heic");
+    fs::write(&path, heic_bytes()).unwrap();
+    path
+}

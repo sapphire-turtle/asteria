@@ -17,20 +17,6 @@ fn red() -> PathBuf {
         .unwrap()
 }
 
-/// A HEIC the in-process decoder cannot read, so a render of it reaches the (fake) image
-/// tool. Kept in a directory that lives for the whole test run.
-fn undecodable() -> PathBuf {
-    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    let dir = DIR.get_or_init(|| tempfile::tempdir().unwrap());
-    let path = dir.path().join("x.heic");
-    if !path.exists() {
-        let mut bytes = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
-        bytes.extend_from_slice(&[0u8; 64]);
-        std::fs::write(&path, bytes).unwrap();
-    }
-    path
-}
-
 #[test]
 fn thumb_path_layout_and_hash_validation() {
     let p = Processor::with_tools("/t".into(), 1, Duration::from_secs(1), "v", "f");
@@ -44,9 +30,6 @@ fn thumb_path_layout_and_hash_validation() {
 
 #[tokio::test]
 async fn renders_image_and_reuses_file() {
-    if !have("vipsthumbnail") {
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let p = Processor::new(dir.path().to_path_buf(), 2, Duration::from_secs(30));
     let out = p
@@ -78,13 +61,9 @@ async fn missing_tool_is_reported() {
         "/nonexistent/ffmpeg",
     );
     let r = p
-        .render(&undecodable(), MediaKind::Image, HASH, Preset::Thumb)
+        .render(&heic(dir.path()), MediaKind::Image, HASH, Preset::Thumb)
         .await;
-    // The crate cannot read a HEIC and the tool is not there: unprocessable, with the reason.
-    let Err(ProcessError::Unprocessable(reason)) = r else {
-        panic!("expected Unprocessable, got {r:?}");
-    };
-    assert!(reason.contains("vipsthumbnail"), "{reason}");
+    assert_eq!(r, Err(ProcessError::ToolMissing("vipsthumbnail")));
     let r = p
         .render(&red(), MediaKind::Video, HASH, Preset::Thumb)
         .await;
@@ -108,7 +87,7 @@ async fn hung_tool_times_out() {
     );
     let start = std::time::Instant::now();
     let r = p
-        .render(&undecodable(), MediaKind::Image, HASH, Preset::Thumb)
+        .render(&heic(dir.path()), MediaKind::Image, HASH, Preset::Thumb)
         .await;
     assert_eq!(r, Err(ProcessError::Unprocessable("timeout".into())));
     assert!(start.elapsed() < Duration::from_secs(5));
@@ -189,7 +168,7 @@ async fn bracketed_file_name_is_not_read_as_loader_options() {
     );
     // A file the crate cannot read, so it goes to the tool, under a name with brackets.
     let tricky = dir.path().join("x.heic[shrink=8]");
-    std::fs::copy(undecodable(), &tricky).unwrap();
+    std::fs::write(&tricky, common::heic_bytes()).unwrap();
     let p = Processor::with_tools(
         dir.path().join("thumbs"),
         2,
@@ -218,12 +197,11 @@ async fn abandoned_queued_render_frees_its_place_without_a_slot() {
         &hang,
         "ffmpeg",
     ));
+    let src = heic(dir.path());
     let spawn = |hash: &'static str| {
         let p = p.clone();
-        tokio::spawn(async move {
-            p.render(&undecodable(), MediaKind::Image, hash, Preset::Thumb)
-                .await
-        })
+        let src = src.clone();
+        tokio::spawn(async move { p.render(&src, MediaKind::Image, hash, Preset::Thumb).await })
     };
     let running = spawn("blake3:aaaa");
     for _ in 0..100 {
@@ -269,7 +247,7 @@ async fn dropped_request_does_not_kill_or_leak_a_render() {
     );
     let thumbs = dir.path().join("thumbs");
     let p = Processor::with_tools(thumbs.clone(), 1, Duration::from_secs(30), &fake, "ffmpeg");
-    let src = undecodable();
+    let src = heic(dir.path());
     let early = tokio::time::timeout(
         Duration::from_millis(200),
         p.render(&src, MediaKind::Image, HASH, Preset::Thumb),
@@ -296,7 +274,7 @@ async fn failure_and_timeout_leave_no_tmp_files() {
     let fail = script(dir.path(), "fail.sh", "echo 'not an image' >&2\nexit 1");
     let p = Processor::with_tools(thumbs.clone(), 1, Duration::from_secs(5), &fail, "ffmpeg");
     let r = p
-        .render(&undecodable(), MediaKind::Image, HASH, Preset::Thumb)
+        .render(&heic(dir.path()), MediaKind::Image, HASH, Preset::Thumb)
         .await;
     assert!(matches!(r, Err(ProcessError::Unprocessable(_))), "{r:?}");
     assert!(leftovers(&thumbs).is_empty());
@@ -310,7 +288,7 @@ async fn failure_and_timeout_leave_no_tmp_files() {
         "ffmpeg",
     );
     let r = p
-        .render(&undecodable(), MediaKind::Image, HASH, Preset::Preview)
+        .render(&heic(dir.path()), MediaKind::Image, HASH, Preset::Preview)
         .await;
     assert_eq!(r, Err(ProcessError::Unprocessable("timeout".into())));
     assert!(leftovers(&thumbs).is_empty());
@@ -333,7 +311,7 @@ async fn write_failures_are_io_not_unprocessable() {
         "ffmpeg",
     );
     let r = p
-        .render(&undecodable(), MediaKind::Image, HASH, Preset::Thumb)
+        .render(&heic(dir.path()), MediaKind::Image, HASH, Preset::Thumb)
         .await;
     assert!(matches!(r, Err(ProcessError::Io(_))), "{r:?}");
 }
@@ -440,7 +418,7 @@ async fn failure_with_no_waiters_is_still_recorded() {
     });
     let early = tokio::time::timeout(
         Duration::from_millis(200),
-        p.render(&undecodable(), MediaKind::Image, HASH, Preset::Thumb),
+        p.render(&heic(dir.path()), MediaKind::Image, HASH, Preset::Thumb),
     )
     .await;
     assert!(early.is_err(), "the request was dropped mid-render");
@@ -477,7 +455,7 @@ async fn abandoned_queued_render_never_starts() {
         &fake,
         "ffmpeg",
     ));
-    let src = undecodable();
+    let src = heic(dir.path());
     // The first render holds the only permit.
     let first = {
         let (p, src) = (p.clone(), src.clone());
@@ -522,17 +500,13 @@ async fn render_queue_is_bounded() {
     ));
     let limit = p.queue_limit();
     assert_eq!(limit, 32);
+    let src = heic(dir.path());
     let mut waiters = Vec::new();
     for n in 0..limit {
-        let p = p.clone();
+        let (p, src) = (p.clone(), src.clone());
         waiters.push(tokio::spawn(async move {
-            p.render(
-                &undecodable(),
-                MediaKind::Image,
-                &nth_hash(n),
-                Preset::Thumb,
-            )
-            .await
+            p.render(&src, MediaKind::Image, &nth_hash(n), Preset::Thumb)
+                .await
         }));
     }
     for _ in 0..100 {
@@ -544,7 +518,7 @@ async fn render_queue_is_bounded() {
     assert_eq!(p.renders_queued(), limit);
     let r = p
         .render(
-            &undecodable(),
+            &heic(dir.path()),
             MediaKind::Image,
             &nth_hash(limit),
             Preset::Thumb,
@@ -555,7 +529,7 @@ async fn render_queue_is_bounded() {
     let joined = tokio::time::timeout(
         Duration::from_millis(100),
         p.render(
-            &undecodable(),
+            &heic(dir.path()),
             MediaKind::Image,
             &nth_hash(3),
             Preset::Thumb,
@@ -701,9 +675,6 @@ async fn a_broken_audio_file_is_unprocessable_and_recorded() {
 
 #[tokio::test]
 async fn image_bytes_are_rendered_once_per_key() {
-    if !have("vipsthumbnail") {
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let bytes = std::fs::read(red()).unwrap();
     let p = Processor::new(dir.path().join("thumbs"), 2, Duration::from_secs(30));
@@ -773,7 +744,7 @@ async fn thumbnails_do_not_wait_for_offline_audio() {
     let thumb = tokio::time::timeout(
         Duration::from_secs(5),
         p.render(
-            &undecodable(),
+            &heic(dir.path()),
             MediaKind::Image,
             "blake3:ee99",
             Preset::Thumb,
@@ -887,13 +858,9 @@ fn jpeg_with_orientation(width: u32, height: u32, orientation: u16) -> Vec<u8> {
     out
 }
 
-/// A file the in-process decoder reports as unsupported (a HEIC).
+/// A file the in-process decoder reports as unsupported (a HEIC), in `dir`.
 fn heic(dir: &Path) -> PathBuf {
-    let path = dir.join("x.heic");
-    let mut bytes = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
-    bytes.extend_from_slice(&[0u8; 64]);
-    std::fs::write(&path, bytes).unwrap();
-    path
+    common::write_heic(dir)
 }
 
 /// A fake image tool that counts its runs in `ran` and copies `webp` to the output.
@@ -1095,7 +1062,7 @@ async fn a_picture_over_the_limits_goes_to_the_tool() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn with_no_tool_an_undecodable_image_is_unprocessable() {
+async fn with_no_tool_an_undecodable_image_waits_for_one() {
     let dir = tempfile::tempdir().unwrap();
     let src = heic(dir.path());
     let p = inprocess_processor(dir.path(), &dir.path().join("nonexistent-tool"));
@@ -1107,14 +1074,14 @@ async fn with_no_tool_an_undecodable_image_is_unprocessable() {
             .push((hash.to_string(), reason.to_string()));
     });
     let r = p.render(&src, MediaKind::Image, HASH, Preset::Thumb).await;
-    let Err(ProcessError::Unprocessable(reason)) = r else {
-        panic!("expected Unprocessable, got {r:?}");
-    };
-    assert!(!reason.is_empty());
-    let recorded = recorded.lock().unwrap();
-    assert_eq!(recorded.len(), 1, "{recorded:?}");
-    assert_eq!(recorded[0].0, HASH);
-    assert_eq!(recorded[0].1, reason);
+    assert!(
+        matches!(r, Err(ProcessError::ToolMissing(_))),
+        "expected ToolMissing, got {r:?}"
+    );
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "a missing tool is not recorded as unprocessable"
+    );
     assert!(leftovers(&dir.path().join("thumbs")).is_empty());
 }
 

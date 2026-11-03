@@ -819,7 +819,10 @@ impl Inner {
     }
 
     /// Makes an image thumbnail in this process; for what the crate cannot read, the external
-    /// image tool does it from a staged copy of the source.
+    /// image tool does it from a staged copy of the source. With no tool found that is
+    /// `ToolMissing` (not recorded as unprocessable, so a tool installed later is tried).
+    /// The in-process attempt and the tool each get the preset's full timeout, so one render
+    /// can take up to twice as long.
     async fn render_image(
         &self,
         src: &Source,
@@ -875,12 +878,10 @@ impl Inner {
             ImageTool::Vips(vips) => self.run_vips(vips, &staged, tmp, preset).await,
             ImageTool::Sips(sips) => self.run_sips(sips, &staged, tmp, preset).await,
         };
-        match result {
-            Err(ProcessError::ToolMissing(tool)) => Err(ProcessError::Unprocessable(format!(
-                "{failure}; and {tool} is not installed"
-            ))),
-            other => other,
+        if result.is_ok() {
+            tracing::debug!("made a {} thumbnail with the image tool", preset.name());
         }
+        result
     }
 
     async fn run_vips(

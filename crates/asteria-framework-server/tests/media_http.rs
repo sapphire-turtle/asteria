@@ -11,14 +11,6 @@ fn webp(b: &[u8]) -> bool {
     b.len() > 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP"
 }
 
-/// Bytes of a HEIC, which the in-process decoder cannot read: a render of them goes to the
-/// image tool.
-fn heic_bytes() -> Vec<u8> {
-    let mut bytes = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
-    bytes.extend_from_slice(&[0u8; 64]);
-    bytes
-}
-
 #[tokio::test]
 async fn media_routes_require_token() {
     let e = env();
@@ -161,9 +153,6 @@ async fn thumb_of_changed_file_is_503() {
 
 #[tokio::test]
 async fn thumb_is_webp_and_cached() {
-    if !have_tool("vipsthumbnail") {
-        return;
-    }
     let e = env();
     hash_all(&e);
     let id = item_id(&e, "a.jpg");
@@ -224,7 +213,7 @@ async fn corrupt_image_is_422_and_not_retried() {
 }
 
 #[tokio::test]
-async fn no_tool_for_what_the_crate_cannot_read_is_unprocessable() {
+async fn with_no_tool_what_the_crate_cannot_read_is_503_and_retried() {
     let e = env_with(|t| {
         Processor::with_tools(t, 2, Duration::from_secs(5), "/nonexistent/vips", "ffmpeg")
     });
@@ -233,19 +222,17 @@ async fn no_tool_for_what_the_crate_cannot_read_is_unprocessable() {
     hash_all(&e);
     let id = item_id(&e, "a.jpg");
     let uri = format!("/media/{id}/thumb");
+    let (s, h, _) = get(&e.app, Some(&e.owner_token), &uri, None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(h["retry-after"], "2");
+    // Not marked unprocessable: installing the tool later makes the next request render.
     let (s, _, _) = get(&e.app, Some(&e.owner_token), &uri, None).await;
-    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
-    // It is marked, so the second request does not render again.
-    let (s, _, _) = get(&e.app, Some(&e.owner_token), &uri, None).await;
-    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(e.processor.renders_started(), 1);
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(e.processor.renders_started(), 2);
 }
 
 #[tokio::test]
 async fn concurrent_requests_render_once() {
-    if !have_tool("vipsthumbnail") {
-        return;
-    }
     let e = Arc::new(env());
     hash_all(&e);
     let id = item_id(&e, "a.jpg");
@@ -569,9 +556,6 @@ async fn offline_audio_is_ogg_with_ranges() {
 
 #[tokio::test]
 async fn thumb_source_image_bytes_are_rendered_once_per_key() {
-    if !have_tool("vipsthumbnail") {
-        return;
-    }
     let red = std::fs::read(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../asteria-framework/tests/fixtures/red.jpg"),
