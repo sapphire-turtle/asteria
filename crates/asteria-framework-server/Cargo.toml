@@ -33,6 +33,7 @@ tower = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
 image = { workspace = true, features = ["jpeg"] }
 webp.workspace = true
+corundum-framework-image.workspace = true
 symphonia.workspace = true
 ogg.workspace = true
 opus-pure.workspace = true
@@ -40,6 +41,7 @@ rubato.workspace = true
 opus.workspace = true
 
 [dev-dependencies]
+image = { workspace = true, features = ["jpeg", "png"] }
 blake3.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

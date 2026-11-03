@@ -11,6 +11,14 @@ fn webp(b: &[u8]) -> bool {
     b.len() > 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP"
 }
 
+/// Bytes of a HEIC, which the in-process decoder cannot read: a render of them goes to the
+/// image tool.
+fn heic_bytes() -> Vec<u8> {
+    let mut bytes = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
+    bytes.extend_from_slice(&[0u8; 64]);
+    bytes
+}
+
 #[tokio::test]
 async fn media_routes_require_token() {
     let e = env();
@@ -216,19 +224,21 @@ async fn corrupt_image_is_422_and_not_retried() {
 }
 
 #[tokio::test]
-async fn missing_tool_is_503_and_not_marked_unprocessable() {
+async fn no_tool_for_what_the_crate_cannot_read_is_unprocessable() {
     let e = env_with(|t| {
         Processor::with_tools(t, 2, Duration::from_secs(5), "/nonexistent/vips", "ffmpeg")
     });
+    std::fs::write(e.root.join("a.jpg"), heic_bytes()).unwrap();
+    asteria_framework_server::scan(&e.lib, &e.cache, &Photos).unwrap();
     hash_all(&e);
     let id = item_id(&e, "a.jpg");
     let uri = format!("/media/{id}/thumb");
-    let (s, h, _) = get(&e.app, Some(&e.owner_token), &uri, None).await;
-    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(h["retry-after"], "2");
     let (s, _, _) = get(&e.app, Some(&e.owner_token), &uri, None).await;
-    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(e.processor.renders_started(), 2);
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    // It is marked, so the second request does not render again.
+    let (s, _, _) = get(&e.app, Some(&e.owner_token), &uri, None).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(e.processor.renders_started(), 1);
 }
 
 #[tokio::test]
@@ -320,6 +330,8 @@ async fn failure_after_the_request_left_is_still_marked_unprocessable() {
         "sleep 1\necho 'bad data' >&2\nexit 1",
     );
     let e = env_with(|t| Processor::with_tools(t, 1, Duration::from_secs(30), &fail, "ffmpeg"));
+    std::fs::write(e.root.join("a.jpg"), heic_bytes()).unwrap();
+    asteria_framework_server::scan(&e.lib, &e.cache, &Photos).unwrap();
     hash_all(&e);
     let id = item_id(&e, "a.jpg");
     let uri = format!("/media/{id}/thumb");
@@ -357,6 +369,9 @@ async fn full_render_queue_is_503_with_retry_after() {
     let tools = tempfile::tempdir().unwrap();
     let hang = script(tools.path(), "hang.sh", "exec sleep 30");
     let e = env_with(|t| Processor::with_tools(t, 1, Duration::from_secs(60), &hang, "ffmpeg"));
+    std::fs::write(e.root.join("a.jpg"), heic_bytes()).unwrap();
+    std::fs::write(e.root.join("sub/b.jpg"), heic_bytes()).unwrap();
+    asteria_framework_server::scan(&e.lib, &e.cache, &Photos).unwrap();
     hash_all(&e);
     let limit = e.processor.queue_limit();
     let src = e.root.join("sub/b.jpg");

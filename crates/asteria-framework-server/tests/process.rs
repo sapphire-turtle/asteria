@@ -17,6 +17,20 @@ fn red() -> PathBuf {
         .unwrap()
 }
 
+/// A HEIC the in-process decoder cannot read, so a render of it reaches the (fake) image
+/// tool. Kept in a directory that lives for the whole test run.
+fn undecodable() -> PathBuf {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let dir = DIR.get_or_init(|| tempfile::tempdir().unwrap());
+    let path = dir.path().join("x.heic");
+    if !path.exists() {
+        let mut bytes = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
+        bytes.extend_from_slice(&[0u8; 64]);
+        std::fs::write(&path, bytes).unwrap();
+    }
+    path
+}
+
 #[test]
 fn thumb_path_layout_and_hash_validation() {
     let p = Processor::with_tools("/t".into(), 1, Duration::from_secs(1), "v", "f");
@@ -64,9 +78,13 @@ async fn missing_tool_is_reported() {
         "/nonexistent/ffmpeg",
     );
     let r = p
-        .render(&red(), MediaKind::Image, HASH, Preset::Thumb)
+        .render(&undecodable(), MediaKind::Image, HASH, Preset::Thumb)
         .await;
-    assert_eq!(r, Err(ProcessError::ToolMissing("vipsthumbnail")));
+    // The crate cannot read a HEIC and the tool is not there: unprocessable, with the reason.
+    let Err(ProcessError::Unprocessable(reason)) = r else {
+        panic!("expected Unprocessable, got {r:?}");
+    };
+    assert!(reason.contains("vipsthumbnail"), "{reason}");
     let r = p
         .render(&red(), MediaKind::Video, HASH, Preset::Thumb)
         .await;
@@ -90,7 +108,7 @@ async fn hung_tool_times_out() {
     );
     let start = std::time::Instant::now();
     let r = p
-        .render(&red(), MediaKind::Image, HASH, Preset::Thumb)
+        .render(&undecodable(), MediaKind::Image, HASH, Preset::Thumb)
         .await;
     assert_eq!(r, Err(ProcessError::Unprocessable("timeout".into())));
     assert!(start.elapsed() < Duration::from_secs(5));
@@ -158,24 +176,33 @@ fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
 #[cfg(unix)]
 #[tokio::test]
 async fn bracketed_file_name_is_not_read_as_loader_options() {
-    if !have("vipsthumbnail") {
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
-    let plain = dir.path().join("x.jpg");
-    let tricky = dir.path().join("x.jpg[shrink=8]");
-    std::fs::copy(fixture("red.jpg"), &plain).unwrap();
-    std::fs::copy(fixture("blue.jpg"), &tricky).unwrap();
-    let p = Processor::new(dir.path().join("thumbs"), 2, Duration::from_secs(30));
-    let a = p
-        .render(&plain, MediaKind::Image, "blake3:aa11", Preset::Thumb)
+    let seen = dir.path().join("seen");
+    // Records the file name the tool is given, then writes a fake WebP to its output.
+    let tool = script(
+        dir.path(),
+        "vips.sh",
+        &format!(
+            "echo \"$1\" >> '{}'\nwhile [ \"$1\" != -o ]; do shift; done\nprintf 'RIFF0000WEBP' > \"${{2%%\\[*}}\"",
+            seen.display()
+        ),
+    );
+    // A file the crate cannot read, so it goes to the tool, under a name with brackets.
+    let tricky = dir.path().join("x.heic[shrink=8]");
+    std::fs::copy(undecodable(), &tricky).unwrap();
+    let p = Processor::with_tools(
+        dir.path().join("thumbs"),
+        2,
+        Duration::from_secs(30),
+        &tool,
+        "ffmpeg",
+    );
+    p.render(&tricky, MediaKind::Image, "blake3:bb22", Preset::Thumb)
         .await
         .unwrap();
-    let b = p
-        .render(&tricky, MediaKind::Image, "blake3:bb22", Preset::Thumb)
-        .await
-        .unwrap();
-    assert_ne!(std::fs::read(a).unwrap(), std::fs::read(b).unwrap());
+    let given = std::fs::read_to_string(&seen).unwrap();
+    assert_eq!(given.lines().count(), 1);
+    assert!(!given.contains('['), "the tool was given {given:?}");
     assert!(leftovers(&dir.path().join("thumbs")).is_empty());
 }
 
@@ -194,7 +221,7 @@ async fn abandoned_queued_render_frees_its_place_without_a_slot() {
     let spawn = |hash: &'static str| {
         let p = p.clone();
         tokio::spawn(async move {
-            p.render(&red(), MediaKind::Image, hash, Preset::Thumb)
+            p.render(&undecodable(), MediaKind::Image, hash, Preset::Thumb)
                 .await
         })
     };
@@ -242,7 +269,7 @@ async fn dropped_request_does_not_kill_or_leak_a_render() {
     );
     let thumbs = dir.path().join("thumbs");
     let p = Processor::with_tools(thumbs.clone(), 1, Duration::from_secs(30), &fake, "ffmpeg");
-    let src = red();
+    let src = undecodable();
     let early = tokio::time::timeout(
         Duration::from_millis(200),
         p.render(&src, MediaKind::Image, HASH, Preset::Thumb),
@@ -269,7 +296,7 @@ async fn failure_and_timeout_leave_no_tmp_files() {
     let fail = script(dir.path(), "fail.sh", "echo 'not an image' >&2\nexit 1");
     let p = Processor::with_tools(thumbs.clone(), 1, Duration::from_secs(5), &fail, "ffmpeg");
     let r = p
-        .render(&red(), MediaKind::Image, HASH, Preset::Thumb)
+        .render(&undecodable(), MediaKind::Image, HASH, Preset::Thumb)
         .await;
     assert!(matches!(r, Err(ProcessError::Unprocessable(_))), "{r:?}");
     assert!(leftovers(&thumbs).is_empty());
@@ -283,7 +310,7 @@ async fn failure_and_timeout_leave_no_tmp_files() {
         "ffmpeg",
     );
     let r = p
-        .render(&red(), MediaKind::Image, HASH, Preset::Preview)
+        .render(&undecodable(), MediaKind::Image, HASH, Preset::Preview)
         .await;
     assert_eq!(r, Err(ProcessError::Unprocessable("timeout".into())));
     assert!(leftovers(&thumbs).is_empty());
@@ -306,7 +333,7 @@ async fn write_failures_are_io_not_unprocessable() {
         "ffmpeg",
     );
     let r = p
-        .render(&red(), MediaKind::Image, HASH, Preset::Thumb)
+        .render(&undecodable(), MediaKind::Image, HASH, Preset::Thumb)
         .await;
     assert!(matches!(r, Err(ProcessError::Io(_))), "{r:?}");
 }
@@ -413,7 +440,7 @@ async fn failure_with_no_waiters_is_still_recorded() {
     });
     let early = tokio::time::timeout(
         Duration::from_millis(200),
-        p.render(&red(), MediaKind::Image, HASH, Preset::Thumb),
+        p.render(&undecodable(), MediaKind::Image, HASH, Preset::Thumb),
     )
     .await;
     assert!(early.is_err(), "the request was dropped mid-render");
@@ -450,7 +477,7 @@ async fn abandoned_queued_render_never_starts() {
         &fake,
         "ffmpeg",
     ));
-    let src = red();
+    let src = undecodable();
     // The first render holds the only permit.
     let first = {
         let (p, src) = (p.clone(), src.clone());
@@ -499,8 +526,13 @@ async fn render_queue_is_bounded() {
     for n in 0..limit {
         let p = p.clone();
         waiters.push(tokio::spawn(async move {
-            p.render(&red(), MediaKind::Image, &nth_hash(n), Preset::Thumb)
-                .await
+            p.render(
+                &undecodable(),
+                MediaKind::Image,
+                &nth_hash(n),
+                Preset::Thumb,
+            )
+            .await
         }));
     }
     for _ in 0..100 {
@@ -511,13 +543,23 @@ async fn render_queue_is_bounded() {
     }
     assert_eq!(p.renders_queued(), limit);
     let r = p
-        .render(&red(), MediaKind::Image, &nth_hash(limit), Preset::Thumb)
+        .render(
+            &undecodable(),
+            MediaKind::Image,
+            &nth_hash(limit),
+            Preset::Thumb,
+        )
         .await;
     assert_eq!(r, Err(ProcessError::Busy));
     // Joining a render that is already queued is still allowed.
     let joined = tokio::time::timeout(
         Duration::from_millis(100),
-        p.render(&red(), MediaKind::Image, &nth_hash(3), Preset::Thumb),
+        p.render(
+            &undecodable(),
+            MediaKind::Image,
+            &nth_hash(3),
+            Preset::Thumb,
+        ),
     )
     .await;
     assert!(joined.is_err(), "it waits for the queued render");
@@ -730,7 +772,12 @@ async fn thumbnails_do_not_wait_for_offline_audio() {
     assert_eq!(p.renders_started(), 1, "the encode holds its permit");
     let thumb = tokio::time::timeout(
         Duration::from_secs(5),
-        p.render(&red(), MediaKind::Image, "blake3:ee99", Preset::Thumb),
+        p.render(
+            &undecodable(),
+            MediaKind::Image,
+            "blake3:ee99",
+            Preset::Thumb,
+        ),
     )
     .await
     .expect("the thumbnail does not wait for the encode");
@@ -798,4 +845,298 @@ async fn a_panicking_encode_is_unprocessable() {
         .render(&red(), MediaKind::Audio, HASH, Preset::OfflineAudio)
         .await;
     assert!(matches!(r, Err(ProcessError::Unprocessable(_))), "{r:?}");
+}
+
+// ---- thumbnails made in the server's own process ----
+
+fn webp_size(bytes: &[u8]) -> (u32, u32) {
+    let img =
+        image::load_from_memory_with_format(bytes, image::ImageFormat::WebP).expect("a valid WebP");
+    (img.width(), img.height())
+}
+
+fn encoded(width: u32, height: u32, format: image::ImageFormat) -> Vec<u8> {
+    let img = image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([(x % 251) as u8, (y % 251) as u8, 90])
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut out, format)
+        .unwrap();
+    out.into_inner()
+}
+
+/// A JPEG with an EXIF APP1 segment that sets the orientation.
+fn jpeg_with_orientation(width: u32, height: u32, orientation: u16) -> Vec<u8> {
+    let jpeg = encoded(width, height, image::ImageFormat::Jpeg);
+    let mut tiff = b"MM\0*\0\0\0\x08".to_vec();
+    tiff.extend_from_slice(&1u16.to_be_bytes()); // one entry
+    tiff.extend_from_slice(&0x0112u16.to_be_bytes()); // Orientation
+    tiff.extend_from_slice(&3u16.to_be_bytes()); // SHORT
+    tiff.extend_from_slice(&1u32.to_be_bytes());
+    tiff.extend_from_slice(&orientation.to_be_bytes());
+    tiff.extend_from_slice(&[0, 0]);
+    tiff.extend_from_slice(&0u32.to_be_bytes()); // no next IFD
+    let mut app1 = b"Exif\0\0".to_vec();
+    app1.extend_from_slice(&tiff);
+    let mut out = jpeg[..2].to_vec(); // SOI
+    out.extend_from_slice(&[0xFF, 0xE1]);
+    out.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&app1);
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+/// A file the in-process decoder reports as unsupported (a HEIC).
+fn heic(dir: &Path) -> PathBuf {
+    let path = dir.join("x.heic");
+    let mut bytes = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
+    bytes.extend_from_slice(&[0u8; 64]);
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// A fake image tool that counts its runs in `ran` and copies `webp` to the output.
+#[cfg(unix)]
+fn webp_tool(dir: &Path, webp: &Path, ran: &Path) -> PathBuf {
+    script(
+        dir,
+        "webp-tool.sh",
+        &format!(
+            "echo x >> '{}'\nwhile [ \"$1\" != -o ]; do shift; done\ncp '{}' \"${{2%%\\[*}}\"",
+            ran.display(),
+            webp.display()
+        ),
+    )
+}
+
+/// A tool that records that it ran and fails.
+#[cfg(unix)]
+fn failing_tool(dir: &Path, ran: &Path) -> PathBuf {
+    script(
+        dir,
+        "never.sh",
+        &format!("echo x >> '{}'\nexit 1", ran.display()),
+    )
+}
+
+fn runs(ran: &Path) -> usize {
+    std::fs::read_to_string(ran).map_or(0, |s| s.lines().count())
+}
+
+#[cfg(unix)]
+fn inprocess_processor(dir: &Path, tool: &Path) -> Processor {
+    Processor::with_tools(
+        dir.join("thumbs"),
+        1,
+        Duration::from_secs(30),
+        tool,
+        "ffmpeg",
+    )
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_jpeg_thumbnail_is_made_in_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran");
+    let tool = failing_tool(dir.path(), &ran);
+    let src = dir.path().join("wide.jpg");
+    std::fs::write(&src, encoded(1000, 500, image::ImageFormat::Jpeg)).unwrap();
+    let p = inprocess_processor(dir.path(), &tool);
+    let out = p
+        .render(&src, MediaKind::Image, HASH, Preset::Thumb)
+        .await
+        .unwrap();
+    assert_eq!(webp_size(&std::fs::read(out).unwrap()), (256, 128));
+    assert_eq!(runs(&ran), 0, "the tool must not run");
+    assert!(leftovers(&dir.path().join("thumbs")).is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_small_picture_is_not_enlarged() {
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran");
+    let tool = failing_tool(dir.path(), &ran);
+    let src = dir.path().join("small.png");
+    std::fs::write(&src, encoded(100, 50, image::ImageFormat::Png)).unwrap();
+    let p = inprocess_processor(dir.path(), &tool);
+    let out = p
+        .render(&src, MediaKind::Image, HASH, Preset::Preview)
+        .await
+        .unwrap();
+    assert_eq!(webp_size(&std::fs::read(out).unwrap()), (100, 50));
+    assert_eq!(runs(&ran), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_exif_orientation_is_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran");
+    let tool = failing_tool(dir.path(), &ran);
+    let src = dir.path().join("turned.jpg");
+    std::fs::write(&src, jpeg_with_orientation(400, 200, 6)).unwrap();
+    let p = inprocess_processor(dir.path(), &tool);
+    let out = p
+        .render(&src, MediaKind::Image, HASH, Preset::Thumb)
+        .await
+        .unwrap();
+    assert_eq!(webp_size(&std::fs::read(out).unwrap()), (128, 256));
+    assert_eq!(runs(&ran), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_embedded_cover_needs_no_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = dir.path().join("nonexistent-tool");
+    let png = encoded(600, 600, image::ImageFormat::Png);
+    let p = inprocess_processor(dir.path(), &tool);
+    // The extension is wrong: the bytes name the format.
+    let out = p
+        .render_image_bytes(&png, "jpg", HASH, Preset::Thumb)
+        .await
+        .unwrap();
+    assert_eq!(webp_size(&std::fs::read(out).unwrap()), (256, 256));
+    assert!(leftovers(&dir.path().join("thumbs")).is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_image_the_crate_cannot_decode_goes_to_the_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran");
+    let webp = dir.path().join("made.webp");
+    std::fs::write(&webp, {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(40, 30));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::WebP).unwrap();
+        out.into_inner()
+    })
+    .unwrap();
+    let tool = webp_tool(dir.path(), &webp, &ran);
+    let src = heic(dir.path());
+    let p = inprocess_processor(dir.path(), &tool);
+    let out = p
+        .render(&src, MediaKind::Image, HASH, Preset::Thumb)
+        .await
+        .unwrap();
+    assert_eq!(webp_size(&std::fs::read(out).unwrap()), (40, 30));
+    assert_eq!(runs(&ran), 1);
+    assert!(leftovers(&dir.path().join("thumbs")).is_empty());
+}
+
+/// The CRC-32 a PNG chunk carries.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in bytes {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// A tiny PNG whose header claims `width`×`height`; its pixels are not there.
+fn png_claiming(width: u32, height: u32) -> Vec<u8> {
+    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend_from_slice(data);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crc32(&body).to_be_bytes());
+    }
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8-bit RGB
+    chunk(&mut out, b"IHDR", &ihdr);
+    chunk(
+        &mut out,
+        b"IDAT",
+        &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+    );
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_picture_over_the_limits_goes_to_the_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran");
+    let webp = dir.path().join("made.webp");
+    std::fs::write(&webp, {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(20, 10));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::WebP).unwrap();
+        out.into_inner()
+    })
+    .unwrap();
+    let tool = webp_tool(dir.path(), &webp, &ran);
+    let src = dir.path().join("huge.png");
+    std::fs::write(&src, png_claiming(20_000, 20_000)).unwrap();
+    let p = inprocess_processor(dir.path(), &tool);
+    let out = p
+        .render(&src, MediaKind::Image, HASH, Preset::Thumb)
+        .await
+        .unwrap();
+    assert_eq!(webp_size(&std::fs::read(out).unwrap()), (20, 10));
+    assert_eq!(runs(&ran), 1, "the tool made it, not the process");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn with_no_tool_an_undecodable_image_is_unprocessable() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = heic(dir.path());
+    let p = inprocess_processor(dir.path(), &dir.path().join("nonexistent-tool"));
+    let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = recorded.clone();
+    p.set_unprocessable_hook(move |hash, _, reason| {
+        sink.lock()
+            .unwrap()
+            .push((hash.to_string(), reason.to_string()));
+    });
+    let r = p.render(&src, MediaKind::Image, HASH, Preset::Thumb).await;
+    let Err(ProcessError::Unprocessable(reason)) = r else {
+        panic!("expected Unprocessable, got {r:?}");
+    };
+    assert!(!reason.is_empty());
+    let recorded = recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0].0, HASH);
+    assert_eq!(recorded[0].1, reason);
+    assert!(leftovers(&dir.path().join("thumbs")).is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_missing_source_is_an_io_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran");
+    let tool = failing_tool(dir.path(), &ran);
+    let p = inprocess_processor(dir.path(), &tool);
+    let r = p
+        .render(
+            &dir.path().join("gone.jpg"),
+            MediaKind::Image,
+            HASH,
+            Preset::Thumb,
+        )
+        .await;
+    assert!(matches!(r, Err(ProcessError::Io(_))), "{r:?}");
+    assert_eq!(
+        runs(&ran),
+        0,
+        "an unreadable source does not go to the tool"
+    );
 }

@@ -10,6 +10,7 @@ pub mod error;
 pub mod ext;
 mod fsutil;
 pub mod hashing;
+mod inprocess_image;
 pub mod local;
 mod mcp;
 mod media_http;
