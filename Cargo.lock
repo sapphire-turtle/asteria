@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-framework"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-framework-api",
  "blake3",
@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-framework-client"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-framework",
  "asteria-framework-api",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-framework-desktop"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-framework",
  "asteria-framework-client",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-framework-server"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-framework",
  "asteria-framework-api",
@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-desktop"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-framework-client",
  "asteria-framework-desktop",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-gui"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-framework-api",
  "asteria-framework-client",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-headless"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-framework-server",
  "asteria-music-api",
@@ -501,14 +501,14 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-mobile"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-music-gui",
 ]
 
 [[package]]
 name = "asteria-music-server"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-framework",
  "asteria-framework-server",
@@ -534,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-desktop"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-framework-client",
  "asteria-framework-desktop",
@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-gui"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-framework",
  "asteria-framework-api",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-headless"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-framework",
  "asteria-framework-server",
@@ -580,14 +580,14 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-mobile"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-photos-gui",
 ]
 
 [[package]]
 name = "asteria-photos-server"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "asteria-framework",
  "asteria-framework-api",
