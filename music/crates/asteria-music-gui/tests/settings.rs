@@ -71,8 +71,9 @@ fn an_extra_page_is_listed_between_servers_and_playback() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let drawn = Rc::new(Cell::new(0));
+    let (player, settings) = player(&ctx);
     let mut app =
-        MusicApp::new(paths, &ctx, player(&ctx)).with_extra_settings(vec![Box::new(Counted {
+        MusicApp::new(paths, &ctx, player, settings).with_extra_settings(vec![Box::new(Counted {
             drawn: drawn.clone(),
         })]);
     assert_eq!(app.current_screen(), Some(Screen::Settings));

@@ -1,30 +1,33 @@
 //! Playback in the app: the player is handed its endpoint, the bar and the queue send their
 //! commands, the settings are kept, and the stream directory goes with the app. The device
-//! and the opener are fakes; the server is a stub.
+//! and the opener are fakes (but where the real opener's fetch is what is tested); the server
+//! is a stub.
 
 mod support;
 
 use asteria_music_gui::app::{MusicApp, Screen};
-use asteria_music_gui::player::fakes::{FakeOpener, entry};
-use asteria_music_gui::player::{Command, Quality, Status};
+use asteria_music_gui::player::{Command, OpenerSettings, Quality, Status};
 use asteria_music_gui::settings::PlaybackSettings;
 use corundum_framework::egui;
+use serde_json::json;
 
 use support::*;
 
-/// An app on a stub server with fakes for the player, and its first frames run.
-fn start_fakes(paths: &asteria_music_gui::app::AppPaths) -> (egui::Context, MusicApp, FakeOpener) {
+/// An app on a stub server with fakes for the player, and the settings its opener reads.
+fn start_fakes(
+    paths: &asteria_music_gui::app::AppPaths,
+) -> (egui::Context, MusicApp, OpenerSettings) {
     let ctx = egui::Context::default();
-    let (player, opener, _outs) = player_with_fakes(&ctx);
-    let app = MusicApp::new(paths.clone(), &ctx, player);
-    (ctx, app, opener)
+    let (player, settings, _opener, _outs) = player_with_fakes(&ctx);
+    let app = MusicApp::new(paths.clone(), &ctx, player, settings.clone());
+    (ctx, app, settings)
 }
 
-fn ready(ctx: &egui::Context, app: &mut MusicApp, opener: &FakeOpener) {
+fn ready(ctx: &egui::Context, app: &mut MusicApp, settings: &OpenerSettings) {
     run_until(ctx, app, "the first page", |a| {
         !a.connection().unwrap().library().albums().is_empty()
     });
-    wait_until("the endpoint", || opener.has_endpoint());
+    wait_until("the endpoint", || settings.endpoint().is_some());
 }
 
 fn queue_titles(app: &MusicApp) -> Vec<String> {
@@ -38,7 +41,7 @@ fn queue_titles(app: &MusicApp) -> Vec<String> {
 
 fn play(app: &MusicApp, ids: &[&str]) {
     app.player().send(Command::Replace {
-        entries: ids.iter().map(|i| entry(i)).collect(),
+        items: ids.iter().map(|i| queue_entry(i)).collect(),
         start: 0,
     });
     wait_until("the queue", || {
@@ -50,9 +53,12 @@ fn play(app: &MusicApp, ids: &[&str]) {
 fn ready_session_hands_the_player_its_endpoint() {
     let (addr, _) = Music::default().serve();
     let (fx, _) = fixture(&[("A", addr)], 0);
-    let (ctx, mut app, opener) = start_fakes(&fx.paths);
-    assert!(!opener.has_endpoint(), "not before the session is ready");
-    ready(&ctx, &mut app, &opener);
+    let (ctx, mut app, settings) = start_fakes(&fx.paths);
+    assert!(
+        settings.endpoint().is_none(),
+        "not before the session is ready"
+    );
+    ready(&ctx, &mut app, &settings);
     // The stream directory is under the cache, in the library's own directory.
     let cache = fx.paths.cache.clone().unwrap();
     let streams: Vec<_> = std::fs::read_dir(cache.join("lib/stream"))
@@ -71,25 +77,26 @@ fn switching_servers_stops_and_clears_the_player() {
         l.local_addr().unwrap()
     };
     let (fx, ids) = fixture(&[("A", addr_a), ("B", dead)], 0);
-    let (ctx, mut app, opener) = start_fakes(&fx.paths);
-    ready(&ctx, &mut app, &opener);
+    let (ctx, mut app, settings) = start_fakes(&fx.paths);
+    ready(&ctx, &mut app, &settings);
     play(&app, &["a", "b"]);
     wait_until("playing", || app.player().state().status == Status::Playing);
     app.switch_to(ids[1]);
     frame(&ctx, &mut app);
     wait_until("the player cleared", || {
-        app.player().state().queue.is_empty() && !opener.has_endpoint()
+        app.player().state().queue.is_empty() && settings.endpoint().is_none()
     });
     assert_eq!(app.player().state().status, Status::Stopped);
     assert_eq!(app.player().state().current, None);
+    assert_eq!(app.player().state().error, None);
 }
 
 #[test]
 fn the_bar_buttons_send_their_commands() {
     let (addr, _) = Music::default().serve();
     let (fx, _) = fixture(&[("A", addr)], 0);
-    let (ctx, mut app, opener) = start_fakes(&fx.paths);
-    ready(&ctx, &mut app, &opener);
+    let (ctx, mut app, settings) = start_fakes(&fx.paths);
+    ready(&ctx, &mut app, &settings);
     play(&app, &["a", "b", "c"]);
     wait_until("playing", || app.player().state().status == Status::Playing);
     app.toggle();
@@ -122,8 +129,8 @@ fn the_bar_buttons_send_their_commands() {
 fn queue_rows_jump_move_and_remove() {
     let (addr, _) = Music::default().serve();
     let (fx, _) = fixture(&[("A", addr)], 0);
-    let (ctx, mut app, opener) = start_fakes(&fx.paths);
-    ready(&ctx, &mut app, &opener);
+    let (ctx, mut app, settings) = start_fakes(&fx.paths);
+    ready(&ctx, &mut app, &settings);
     play(&app, &["a", "b", "c"]);
     app.jump(2);
     wait_until("the jump", || app.player().state().current == Some(2));
@@ -139,12 +146,12 @@ fn low_quality_and_volume_are_saved_and_restored() {
     let (addr, _) = Music::default().serve();
     let (fx, _) = fixture(&[("A", addr)], 0);
     {
-        let (ctx, mut app, opener) = start_fakes(&fx.paths);
-        ready(&ctx, &mut app, &opener);
-        assert_eq!(opener.quality(), Quality::Original);
+        let (ctx, mut app, settings) = start_fakes(&fx.paths);
+        ready(&ctx, &mut app, &settings);
+        assert_eq!(settings.quality(), Quality::Original);
         app.set_low_quality(true);
         app.set_volume(0.4);
-        wait_until("the quality", || opener.quality() == Quality::Low);
+        assert_eq!(settings.quality(), Quality::Low);
         // Dropping the app waits for the last write.
     }
     assert_eq!(
@@ -154,10 +161,9 @@ fn low_quality_and_volume_are_saved_and_restored() {
             volume: 0.4
         }
     );
-    let (_ctx, app, opener) = start_fakes(&fx.paths);
-    wait_until("the settings sent", || {
-        opener.quality() == Quality::Low && app.player().state().volume == 0.4
-    });
+    let (_ctx, app, settings) = start_fakes(&fx.paths);
+    assert_eq!(settings.quality(), Quality::Low);
+    wait_until("the volume sent", || app.player().state().volume == 0.4);
     assert!(app.playback_settings().low_quality);
 }
 
@@ -177,11 +183,10 @@ fn an_unreadable_playback_toml_gives_the_defaults() {
         PlaybackSettings::load(&fx.paths.playback),
         PlaybackSettings::default()
     );
-    let (_ctx, app, opener) = start_fakes(&fx.paths);
+    let (_ctx, app, settings) = start_fakes(&fx.paths);
     assert_eq!(app.playback_settings(), &PlaybackSettings::default());
-    wait_until("the defaults sent", || {
-        app.player().state().volume == 1.0 && opener.quality() == Quality::Original
-    });
+    assert_eq!(settings.quality(), Quality::Original);
+    wait_until("the volume sent", || app.player().state().volume == 1.0);
     // A missing file and an out-of-range volume.
     let missing = fx.paths.playback.with_file_name("none.toml");
     assert_eq!(
@@ -197,8 +202,8 @@ fn an_unreadable_playback_toml_gives_the_defaults() {
 fn closing_the_app_removes_its_stream_directory() {
     let (addr, _) = Music::default().serve();
     let (fx, _) = fixture(&[("A", addr)], 0);
-    let (ctx, mut app, opener) = start_fakes(&fx.paths);
-    ready(&ctx, &mut app, &opener);
+    let (ctx, mut app, settings) = start_fakes(&fx.paths);
+    ready(&ctx, &mut app, &settings);
     let base = fx.paths.cache.clone().unwrap().join("lib/stream");
     let dirs: Vec<_> = std::fs::read_dir(&base).unwrap().flatten().collect();
     assert_eq!(dirs.len(), 1);
@@ -207,4 +212,18 @@ fn closing_the_app_removes_its_stream_directory() {
     std::fs::write(dir.join("t.opus"), b"x").unwrap();
     drop(app);
     assert!(!dir.exists());
+}
+
+#[test]
+fn low_quality_asks_for_offline_audio_at_the_next_fetch() {
+    let (addr, seen) = Music::default().serve();
+    let (fx, _) = fixture(&[("A", addr)], 0);
+    let ctx = egui::Context::default();
+    let (player, settings) = player_with_http(&ctx);
+    let mut app = MusicApp::new(fx.paths.clone(), &ctx, player, settings.clone());
+    ready(&ctx, &mut app, &settings);
+    app.set_low_quality(true);
+    play(&app, &["a"]);
+    wait_until("the fetch", || !calls(&seen, "GET").is_empty());
+    assert_eq!(calls(&seen, "GET")[0], json!("/media/a/offline-audio"));
 }

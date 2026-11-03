@@ -479,6 +479,7 @@ dependencies = [
  "asteria-music-gui",
  "asteria-music-server",
  "corundum-framework",
+ "corundum-framework-audio",
  "corundum-framework-build",
  "tempfile",
  "tracing-subscriber",
@@ -491,21 +492,15 @@ dependencies = [
  "asteria-framework-api",
  "asteria-framework-client",
  "asteria-music-api",
- "asteria-music-gui",
  "asteria-photos-api",
  "axum",
  "corundum-framework",
- "cpal",
+ "corundum-framework-audio",
  "getrandom 0.4.3",
  "grain-id",
- "ogg",
- "opus-pure",
  "reqwest 0.13.5",
- "rtrb",
- "rubato",
  "serde",
  "serde_json",
- "symphonia",
  "tempfile",
  "tokio",
  "toml 1.1.8+spec-1.1.0",
@@ -1422,6 +1417,21 @@ dependencies = [
  "corundum-framework-platform",
  "corundum-framework-service",
  "corundum-framework-update",
+]
+
+[[package]]
+name = "corundum-framework-audio"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5f44ac47cdc09ca79e2ac9f14e576993c0c6a83bf1b005eae2743419c3c9d03"
+dependencies = [
+ "cpal",
+ "ogg",
+ "opus-pure",
+ "rtrb",
+ "rubato",
+ "symphonia",
+ "tracing",
 ]
 
 [[package]]

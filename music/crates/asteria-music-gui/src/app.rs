@@ -27,7 +27,7 @@ use corundum_framework::gui::{COMPACT_WIDTH, Destination, Shell, ShellApp, Side,
 
 pub use crate::connection::Connection;
 use crate::now_playing::{self, BarAction};
-use crate::player::{Command, Endpoint, Player, Quality, feed};
+use crate::player::{Command, Endpoint, OpenerSettings, Player, Quality, feed};
 use crate::queue::{self, QueueAction};
 use crate::settings::{PlaybackPage, PlaybackSettings};
 
@@ -73,6 +73,8 @@ struct State {
     ctx: egui::Context,
     paths: AppPaths,
     player: Player,
+    /// The server and quality the player's opener fetches with.
+    opener_settings: OpenerSettings,
     /// After `player`: the directories are removed once the player has stopped using them.
     stream_dirs: StreamDirs,
     profiles: Profiles,
@@ -82,7 +84,7 @@ struct State {
     extra_pages: Vec<Box<dyn ExtraSettingsPage>>,
     playback_page: PlaybackPage,
     playback_saver: Option<Saver<PlaybackSettings>>,
-    /// Whether the player was handed the connection's endpoint.
+    /// Whether the opener's settings hold the connection's endpoint.
     endpoint_sent: bool,
     /// Where the seek bar is dragged to (seconds), until the drag ends.
     seeking: Option<f64>,
@@ -100,8 +102,14 @@ struct State {
 impl MusicApp {
     /// Reads `servers.toml` (this is the one disk read on the UI thread, before the first
     /// frame) and connects to the server used last. With no server registered, it opens on
-    /// Settings, ready to add one.
-    pub fn new(paths: AppPaths, ctx: &egui::Context, player: Player) -> MusicApp {
+    /// Settings, ready to add one. `opener_settings` are the ones `player`'s opener reads: the
+    /// app sets the server and the quality there.
+    pub fn new(
+        paths: AppPaths,
+        ctx: &egui::Context,
+        player: Player,
+        opener_settings: OpenerSettings,
+    ) -> MusicApp {
         crate::i18n::register(ctx);
         // Ruling R11: read on the UI thread, but before the first frame; the file is tiny.
         let (profiles, load_error) = match Profiles::load(&paths.servers) {
@@ -133,7 +141,7 @@ impl MusicApp {
             servers_page.show_error(why.clone());
         }
         let playback = PlaybackSettings::load(&paths.playback);
-        player.send(Command::SetQuality(quality_of(&playback)));
+        opener_settings.set_quality(quality_of(&playback));
         player.send(Command::SetVolume(playback.volume));
         let playback_saver = match spawn_playback_saver(paths.playback.clone(), ctx.clone()) {
             Ok(s) => Some(s),
@@ -173,6 +181,7 @@ impl MusicApp {
             ctx: ctx.clone(),
             paths,
             player,
+            opener_settings,
             stream_dirs: StreamDirs::default(),
             profiles,
             connection: None,
@@ -380,7 +389,7 @@ impl State {
         self.connection = None;
         if self.endpoint_sent {
             self.endpoint_sent = false;
-            self.player.send(Command::SetEndpoint(None));
+            self.set_endpoint(None);
         }
         self.connection = self.profiles.active().map(|profile| {
             let dirs = SessionDirs {
@@ -617,12 +626,19 @@ impl State {
             return;
         };
         self.endpoint_sent = true;
-        self.player.send(Command::SetEndpoint(Some(Endpoint {
+        self.set_endpoint(Some(Endpoint {
             url,
             token,
             library_id,
             stream_dir,
-        })));
+        }));
+    }
+
+    /// Changes the server the opener fetches from, and has the player stop, empty its queue
+    /// and forget every track of the old one.
+    fn set_endpoint(&self, endpoint: Option<Endpoint>) {
+        self.opener_settings.set_endpoint(endpoint);
+        self.player.send(Command::Reset);
     }
 
     fn apply_bar(&mut self, action: BarAction) {
@@ -648,10 +664,11 @@ impl State {
         });
     }
 
-    /// Sends the quality and volume the page holds to the player, and writes them.
+    /// Hands the quality the page holds to the opener (from its next fetch on), and writes
+    /// the settings.
     fn apply_playback_change(&mut self) {
         let settings = self.playback_page.settings.clone();
-        self.send(Command::SetQuality(quality_of(&settings)));
+        self.opener_settings.set_quality(quality_of(&settings));
         match &self.playback_saver {
             Some(saver) => saver.save(settings),
             None => self.playback_page.show_error(tr!(

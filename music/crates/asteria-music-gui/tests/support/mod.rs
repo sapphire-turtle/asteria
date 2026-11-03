@@ -13,10 +13,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use asteria_framework_client::profiles::{ProfileId, Profiles, Token};
+use asteria_music_api::{ItemId, MediaItem, MediaKind};
 use asteria_music_gui::app::{AppPaths, MusicApp};
-use asteria_music_gui::player::Player;
-use asteria_music_gui::player::fakes::{FakeOpener, FakeOutputs};
+use asteria_music_gui::player::{HttpOpener, OpenerSettings, Player, QueueEntry};
 use corundum_framework::egui;
+use corundum_framework_audio::fakes::{FakeItem, FakeOpener, FakeOutputs};
+use corundum_framework_audio::{Feed, Opener, OutputConfig};
 use serde_json::{Value, json};
 
 use common::{DEADLINE, StubResponse, library_info, serve};
@@ -125,6 +127,10 @@ impl Music {
         let log = seen.clone();
         let addr = serve(move |req| {
             let Some((id, method)) = req.rpc() else {
+                // A track's fetch: recorded by its path, and refused.
+                log.lock()
+                    .unwrap()
+                    .push((req.method.clone(), json!(req.path)));
                 return StubResponse::new(404, Vec::new());
             };
             let params = serde_json::from_slice::<Value>(&req.body).unwrap()["params"].clone();
@@ -235,27 +241,88 @@ pub fn fixture(servers: &[(&str, SocketAddr)], active: usize) -> (Fixture, Vec<P
     (Fixture { _dir: dir, paths }, ids)
 }
 
-/// A player on the fakes of the device and the opener.
-pub fn player(ctx: &egui::Context) -> Player {
-    Player::spawn(
-        Box::new(FakeOpener::new()),
-        Box::new(FakeOutputs::new()),
-        ctx.clone(),
-    )
-    .unwrap()
+/// A queue entry for `id`, titled `id`, with the file `<id>.flac`.
+pub fn queue_entry(id: &str) -> QueueEntry {
+    QueueEntry {
+        media: MediaItem {
+            id: ItemId(id.into()),
+            path: format!("{id}.flac"),
+            kind: MediaKind::Audio,
+            size: 0,
+            modified: "2026-01-01T00:00:00Z".into(),
+            rating: None,
+            subjects: vec![],
+            hierarchical_subjects: vec![],
+            description: None,
+            label: None,
+            content_hash: None,
+            file_hash: Some(format!("blake3:{id}")),
+            read_only_reason: None,
+        },
+        title: id.into(),
+        artist: String::new(),
+        album: String::new(),
+        duration_ms: None,
+    }
+}
+
+/// corundum's fake opener for queue entries: an entry is the fake item of its media id, so
+/// the tests script tracks by id.
+pub struct EntryOpener(pub FakeOpener);
+
+fn fake_item(e: &QueueEntry) -> FakeItem {
+    FakeItem {
+        id: e.media.id.0.clone(),
+        title: e.title.clone(),
+        duration_ms: e.duration_ms,
+    }
+}
+
+impl Opener<QueueEntry> for EntryOpener {
+    fn open(&mut self, entry: &QueueEntry, at_ms: u64, target: OutputConfig) -> Box<dyn Feed> {
+        self.0.open(&fake_item(entry), at_ms, target)
+    }
+
+    fn preload(&mut self, next: Option<&QueueEntry>) {
+        self.0.preload(next.map(fake_item).as_ref());
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+/// A player on the fakes of the device and the opener, and the settings the app is handed.
+pub fn player(ctx: &egui::Context) -> (Player, OpenerSettings) {
+    let (player, settings, _, _) = player_with_fakes(ctx);
+    (player, settings)
 }
 
 /// Like [`player`], with the fakes the test can look at.
-pub fn player_with_fakes(ctx: &egui::Context) -> (Player, FakeOpener, FakeOutputs) {
+pub fn player_with_fakes(ctx: &egui::Context) -> (Player, OpenerSettings, FakeOpener, FakeOutputs) {
     let opener = FakeOpener::new();
     let outputs = FakeOutputs::new();
+    let ctx = ctx.clone();
     let player = Player::spawn(
-        Box::new(opener.clone()),
+        Box::new(EntryOpener(opener.clone())),
         Box::new(outputs.clone()),
-        ctx.clone(),
+        move || ctx.request_repaint(),
     )
     .unwrap();
-    (player, opener, outputs)
+    (player, OpenerSettings::new(), opener, outputs)
+}
+
+/// A player that fetches from the server through the real opener, on the fake device.
+pub fn player_with_http(ctx: &egui::Context) -> (Player, OpenerSettings) {
+    let settings = OpenerSettings::new();
+    let ctx = ctx.clone();
+    let player = Player::spawn(
+        Box::new(HttpOpener::new(settings.clone())),
+        Box::new(FakeOutputs::new()),
+        move || ctx.request_repaint(),
+    )
+    .unwrap();
+    (player, settings)
 }
 
 /// Waits (a few seconds) for `ok` to hold.
@@ -270,7 +337,8 @@ pub fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
 pub fn start(addr: SocketAddr) -> (Fixture, egui::Context, MusicApp) {
     let (fx, _) = fixture(&[("A", addr)], 0);
     let ctx = egui::Context::default();
-    let app = MusicApp::new(fx.paths.clone(), &ctx, player(&ctx));
+    let (player, settings) = player(&ctx);
+    let app = MusicApp::new(fx.paths.clone(), &ctx, player, settings);
     (fx, ctx, app)
 }
 

@@ -440,7 +440,7 @@ impl LibraryState {
         let tracks = self.playable(list);
         let start = tracks.iter().position(|(i, _)| *i == index)?;
         Some(Command::Replace {
-            entries: tracks
+            items: tracks
                 .into_iter()
                 .map(|(_, t)| QueueEntry::from_track(t))
                 .collect(),

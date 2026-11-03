@@ -258,7 +258,7 @@ fn seek_ui(ui: &mut egui::Ui, state: &PlayerState, seeking: &mut Option<f64>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::player::fakes::entry;
+    use crate::player::entry;
 
     fn state(queue: Vec<crate::player::QueueEntry>, current: Option<usize>) -> PlayerState {
         PlayerState {
