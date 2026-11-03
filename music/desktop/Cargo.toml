@@ -1,7 +1,7 @@
 [package]
 # The window, and the server's command line (`serve` among it) when given arguments: what
-# a desktop with a GUI installs. Its binary is `asteria-music-desktop`; the Velopack package
-# names it `asteria-music` (spec §2, #41).
+# a desktop with a GUI installs. Its binary is `asteria-music-desktop`; the package keeps
+# that name and puts the command on `PATH` as `asteria-music` (spec §2, #41).
 name = "asteria-music-desktop"
 version.workspace = true
 edition.workspace = true
@@ -19,7 +19,8 @@ path = "src/main.rs"
 name = "asteria-music-console"
 path = "src/bin/console.rs"
 
-# The icon files `vpk pack --icon` takes, for the release workflow.
+# The icon files the package takes ([package.metadata.packager]'s `icons`), for the release
+# workflow.
 [[example]]
 name = "music-icons"
 path = "examples/music-icons.rs"
@@ -40,3 +41,22 @@ corundum-framework-build.workspace = true
 # The player's fakes, for the window's tests.
 asteria-music-gui = { path = "../crates/asteria-music-gui", features = ["test-support"] }
 tempfile.workspace = true
+
+# The package (.github/workflows/release.yml, sapphire-turtle/.github's release-packager.yml):
+# the window's binary; the release workflow adds the Windows console shim as
+# `asteria-music.exe`. The product name and the bundle id are the launcher's (`LAUNCHER` in
+# src/main.rs). Before packaging, the workflow renders the icons into `icons/` with the
+# `music-icons` example, and on Windows packaging/fetch-tools.sh puts the tools the package
+# carries into `bundled/`: libvips, and its licences. The resources put them beside the
+# executable, where the server looks; on macOS and Linux there is nothing, which adds
+# nothing.
+[package.metadata.packager]
+productName = "Asteria Music"
+identifier = "org.sapphire-turtle.asteria-music"
+category = "Music"
+binaries = [{ path = "asteria-music-desktop", main = true }]
+icons = ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"]
+resources = [
+    { src = "bundled/vips", target = "vips" },
+    { src = "bundled/tools", target = "tools" },
+]

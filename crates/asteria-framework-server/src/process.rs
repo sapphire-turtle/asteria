@@ -90,9 +90,17 @@ pub fn find_tool(tool: Tool) -> Option<PathBuf> {
 }
 
 /// Where a package puts the tools it bundles, relative to the executable's directory: beside
-/// it (`ffmpeg`), and in `vips/bin` (`vipsthumbnail` and its DLLs on Windows).
+/// it (`ffmpeg` on Windows), in `vips/bin` (`vipsthumbnail` and its DLLs on Windows), and in
+/// a macOS `.app`, whose executable is in `Contents/MacOS`, in `Contents/Resources`
+/// (`ffmpeg`), where cargo-packager puts the package's resources.
 fn bundled_dirs(exe_dir: &Path) -> Vec<PathBuf> {
-    vec![exe_dir.to_path_buf(), exe_dir.join("vips").join("bin")]
+    let mut dirs = vec![exe_dir.to_path_buf(), exe_dir.join("vips").join("bin")];
+    if exe_dir.ends_with("Contents/MacOS")
+        && let Some(contents) = exe_dir.parent()
+    {
+        dirs.push(contents.join("Resources"));
+    }
+    dirs
 }
 
 /// [`exe_bundled_dirs`] of the running executable. Empty when its path is unknown.
@@ -105,7 +113,7 @@ fn current_bundled_dirs() -> Vec<PathBuf> {
 
 /// [`bundled_dirs`] of the directory of `exe` with its links resolved, as corundum's
 /// `package::current_exe` resolves it: on macOS `/usr/local/bin/asteria-photos` is a link
-/// into the `.app`, whose `Contents/MacOS` holds the tools. Not on Windows, where the
+/// into the `.app`, whose `Contents/Resources` holds the tools. Not on Windows, where the
 /// canonical form is a `\\?\` path and a package is never started through a link.
 fn exe_bundled_dirs(exe: &Path) -> Vec<PathBuf> {
     let resolved = if cfg!(windows) {
@@ -1113,7 +1121,7 @@ mod tool_tests {
         }
     }
 
-    /// A temp dir and, inside it, a folder with a space in its name, as in a Velopack package.
+    /// A temp dir and, inside it, a folder with a space in its name, as in a macOS package.
     fn tempdir_with_space() -> (tempfile::TempDir, PathBuf) {
         let root = tempfile::tempdir().unwrap();
         let dir = root
@@ -1171,6 +1179,23 @@ mod tool_tests {
             &[],
         );
         assert_eq!(found, Some(expected));
+    }
+
+    #[test]
+    fn a_tool_in_the_apps_resources_is_found() {
+        let (_root, exe_dir) = tempdir_with_space();
+        let resources = exe_dir.parent().unwrap().join("Resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        let expected = program(&resources, &exe_name("ffmpeg"));
+        let found = find_program(OsStr::new("ffmpeg"), &bundled_dirs(&exe_dir), None, &[]);
+        assert_eq!(found, Some(expected));
+    }
+
+    #[test]
+    fn only_an_apps_executable_looks_in_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = bundled_dirs(dir.path());
+        assert!(!dirs.iter().any(|d| d.ends_with("Resources")));
     }
 
     #[test]

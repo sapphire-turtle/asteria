@@ -8,14 +8,14 @@
 
 desktop アプリは、ウィンドウ、サーバーのコマンドライン（`asteria-photos` / `asteria-music`）、必要ならこのコンピューターのサーバーまでを1回のインストールでそろえる。使うシステム向けのファイルを落とす（名前に `photos` か `music` が入る）。
 
-- Windows：`asteria-photos-desktop-photos-win-Setup.exe` は自分のユーザーだけに入れ（`%LocalAppData%\asteria-photos-desktop`、スタートメニューの項目つき）、`asteria-photos` を `Path` に入れる。アンインストールは設定 › アプリから。`...-photos-win-Portable.zip` はインストールせずに動く。
-- macOS：`asteria-photos-desktop-photos-osx-Setup.pkg`。Apple シリコンと Intel の Mac に共通の1つのパッケージ。`...-photos-osx-Portable.zip` はアプリだけ。設定 › 情報で `asteria-photos` を `PATH` に置ける。
-- Linux：`asteria-photos-desktop-photos-linux.AppImage`。実行できるようにして（`chmod +x`）起動する。設定 › 情報で `asteria-photos` を `PATH` に置ける。
+- Windows：`asteria-photos-desktop_<version>_x64-setup.exe` は自分のユーザーだけに入れ（`%LocalAppData%\Asteria Photos`、スタートメニューの項目つき）、`asteria-photos` を `Path` に入れる。アンインストールは設定 › アプリから。
+- macOS：`asteria-photos-desktop_<version>_universal.dmg`。Apple シリコンと Intel の Mac に共通の1つのアプリで、アプリケーションフォルダーにドラッグする。設定 › 情報で `asteria-photos` を `PATH` に置ける。
+- Linux：`asteria-photos-desktop_<version>_x86_64.AppImage`。実行できるようにして（`chmod +x`）起動する。設定 › 情報で `asteria-photos` を `PATH` に置ける。
 
-インストールしたアプリは1日ごとに新しいリリースを探してバックグラウンドで落とし、利用者が選んだとき（設定 › 情報）か次の起動時に適用する。
+インストールしたアプリは1日ごとに新しいリリースを探してバックグラウンドで落とし、署名を確かめて、利用者が選んだとき（設定 › 情報）か次の起動時に適用する（リリースの `.sig` と `asteria-<app>-latest.json` はアプリが読むもの。`.app.tar.gz` は macOS のアプリの更新用）。
 
 - Windows と macOS のパッケージには、サーバーが使う外部ツール（photos には ffmpeg、Windows では両アプリに libvips の `vipsthumbnail`。macOS の music には何も要らない）が入っている。ライセンスは `tools/LICENSES`（ffmpeg は GPLv3、libvips は LGPL）。Linux ではパッケージマネージャーで入れる（[このコンピューターのサーバー](#このコンピューターのサーバー)を参照）。
-- パッケージはまだ署名していない。Windows ではインストーラーの前に SmartScreen が警告し（「詳細情報」›「実行」）、macOS では Gatekeeper が署名の無いパッケージを最初は開かない（システム設定 › プライバシーとセキュリティの「このまま開く」で許可する）。リリースのワークフローに Developer ID を入れれば、macOS のパッケージは署名と公証つきになる。
+- Windows のインストーラーはまだ署名していないので、実行の前に SmartScreen が警告する（「詳細情報」›「実行」）。macOS のアプリは、リリースのワークフローに Developer ID があれば署名と公証つきになる。それまでは Gatekeeper が最初は開かない（システム設定 › プライバシーとセキュリティの「このまま開く」で許可する）。
 
 ウィンドウの無いサーバーは `asteria-photos-headless-<platform>` と `asteria-music-headless-<platform>`（`linux-x86_64`、`linux-aarch64`、`macos-aarch64`、`windows-x86_64.exe`）。ファイル名を `asteria-photos`（または `asteria-music`。Windows では `.exe` を残す）に変え、実行できるようにして `PATH` に置く。`asteria-photos update` で最新のリリースに置き換わる（`--check` は有無を知らせるだけ、`-y` は確認しない）。置き換えた後は、動いている `serve` を起動し直す。プレリリース（rc）のバイナリには、`update` は後のプレリリースを勧めないので、それは手でダウンロードする。`cargo install` で入れたサーバーは `cargo install` で更新し、desktop アプリは自分で更新する。
 

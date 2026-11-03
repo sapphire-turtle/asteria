@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 use asteria_framework_client::profiles::Profiles;
 use asteria_framework_desktop::{
-    AboutPage, LocalServerPage, LocalServerSpec, first_run_pages, service_spec, take_setup_request,
+    AboutPage, LocalServerPage, LocalServerSpec, UPDATE_PUBKEY, first_run_pages, service_spec,
+    take_setup_request,
 };
 use asteria_framework_server::Tool;
 use corundum_framework::egui;
@@ -35,10 +36,13 @@ static LOCAL: LocalServerSpec = LocalServerSpec {
     tools: &[Tool::Vipsthumbnail, Tool::Ffmpeg],
 };
 
-/// What the Velopack package is: the data directory's name, the command it puts on `PATH`
-/// and the server's service, which an update stops and starts again.
+/// What the package is: the data directory's name (and the update feed's,
+/// `asteria-photos-latest.json`), the command it puts on `PATH` and the server's service,
+/// which an update stops and starts again.
 static PACKAGE: PackageSpec = PackageSpec {
     app_name: APP_NAME,
+    version: env!("CARGO_PKG_VERSION"),
+    update_pubkey: UPDATE_PUBKEY,
     on_installed: None,
     on_uninstalling: None,
     before_apply: None,
@@ -55,7 +59,7 @@ const LAUNCHER: LauncherSpec = LauncherSpec {
     description: "Your photo library, served from your own computer",
     category: "Graphics",
     icon_svg: include_bytes!("../../../docs/icons/asteria-photos.svg"),
-    bundle_prefix: "net.sapphire-turtle",
+    bundle_prefix: "org.sapphire-turtle",
 };
 
 /// The background service that runs `asteria-photos serve`.
@@ -133,8 +137,8 @@ fn init_logging() {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Before `start`, so that what goes wrong in Velopack's hooks is logged; not for `serve`,
-    // whose server sets up its own logging.
+    // Before `start`, so that what goes wrong in the package's install hooks is logged; not
+    // for `serve`, whose server sets up its own logging.
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     if asteria_framework_desktop::entry(&args) != asteria_framework_desktop::Entry::Serve {
         init_logging();

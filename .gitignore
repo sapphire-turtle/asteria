@@ -1,2 +1,7 @@
 target/
 .superpowers/
+# What the release workflow puts beside a desktop crate before packaging it.
+/photos/desktop/icons/
+/photos/desktop/bundled/
+/music/desktop/icons/
+/music/desktop/bundled/

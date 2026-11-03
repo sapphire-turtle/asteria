@@ -1,7 +1,7 @@
 [package]
 # The window, and the server's command line (`serve` among it) when given arguments: what
-# a desktop with a GUI installs. Its binary is `asteria-photos-desktop`; the Velopack package
-# names it `asteria-photos` (spec §2, #41).
+# a desktop with a GUI installs. Its binary is `asteria-photos-desktop`; the package keeps
+# that name and puts the command on `PATH` as `asteria-photos` (spec §2, #41).
 name = "asteria-photos-desktop"
 version.workspace = true
 edition.workspace = true
@@ -19,7 +19,8 @@ path = "src/main.rs"
 name = "asteria-photos-console"
 path = "src/bin/console.rs"
 
-# The icon files `vpk pack --icon` takes, for the release workflow.
+# The icon files the package takes ([package.metadata.packager]'s `icons`), for the release
+# workflow.
 [[example]]
 name = "photos-icons"
 path = "examples/photos-icons.rs"
@@ -38,3 +39,23 @@ corundum-framework-build.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# The package (.github/workflows/release.yml, sapphire-turtle/.github's release-packager.yml):
+# the window's binary; the release workflow adds the Windows console shim as
+# `asteria-photos.exe`. The product name and the bundle id are the launcher's (`LAUNCHER` in
+# src/main.rs). Before packaging, the workflow renders the icons into `icons/` with the
+# `photos-icons` example, and packaging/fetch-tools.sh puts the tools the package carries
+# into `bundled/`: ffmpeg on Windows and macOS, libvips on Windows, and their licences. The
+# resources put them beside the executable on Windows and in `Contents/Resources` on macOS,
+# where the server looks; a source that is not there (Linux carries nothing) adds nothing.
+[package.metadata.packager]
+productName = "Asteria Photos"
+identifier = "org.sapphire-turtle.asteria-photos"
+category = "Photography"
+binaries = [{ path = "asteria-photos-desktop", main = true }]
+icons = ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"]
+resources = [
+    { src = "bundled/ffmpeg*", target = "." },
+    { src = "bundled/vips", target = "vips" },
+    { src = "bundled/tools", target = "tools" },
+]
