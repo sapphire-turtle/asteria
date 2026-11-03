@@ -52,7 +52,7 @@ tempfile.workspace = true
 # nothing.
 [package.metadata.packager]
 productName = "Asteria Music"
-identifier = "net.sapphire-turtle.asteria-music"
+identifier = "org.sapphire-turtle.asteria-music"
 category = "Music"
 binaries = [{ path = "asteria-music-desktop", main = true }]
 icons = ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"]

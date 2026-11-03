@@ -694,7 +694,7 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
   - desktop の cargo-packager パッケージ：photos と music それぞれを `release-packager.yml` で作る。Linux は AppImage、macOS は DMG（と更新に使う `.app.tar.gz`。arm64 と x86_64 を1つにしたユニバーサル）、Windows は自分のユーザーだけに入れる NSIS のインストーラー。ファイル名は `asteria-<app>-desktop_<version>_<arch>.<ext>`（`x86_64.AppImage`、`universal.dmg`、`x64-setup.exe`）。
     - どのパッケージも組織の minisign の鍵（`PACKAGER_SIGN_PRIVATE_KEY`）で署名し、`.sig` を並べる。アプリは公開鍵（`asteria-framework-desktop` の `UPDATE_PUBKEY`、鍵 ID F4A73F39AA17C8EB。sapphire-framework と同じ）を持ち、署名の合わない更新は入れない。
     - 更新のフィードは `asteria-<app>-latest.json`（`PackageSpec::app_name`）。同じリリースに2つのアプリのフィードが並ぶ。
-    - パッケージの設定は desktop のクレートの `[package.metadata.packager]`：製品名は `Asteria Photos` / `Asteria Music`、識別子は `net.sapphire-turtle.asteria-<app>`（どちらもランチャーと同じ）。Windows では `%LocalAppData%\<製品名>` に入る。
+    - パッケージの設定は desktop のクレートの `[package.metadata.packager]`：製品名は `Asteria Photos` / `Asteria Music`、識別子は `org.sapphire-turtle.asteria-<app>`（どちらもランチャーと同じ）。Windows では `%LocalAppData%\<製品名>` に入る。
     - 実行ファイル名（#41）：パッケージの中も cargo の名前（`asteria-<app>-desktop`）のまま。Windows はワークフローがその横にコンソールのシム（cargo のバイナリ `asteria-<app>-console`）を `asteria-<app>.exe` として置く。
   - headless のバイナリ：sapphire-turtle/.github の共有ワークフロー `release-binary.yml` で、`asteria-<app>-headless-<os>-<arch>[.exe]`（linux-x86_64、linux-aarch64、macos-aarch64、windows-x86_64）。名前は corundum-framework-update が探す形。
 - **署名**：macOS の署名と公証は、corundum のデモと同じくシークレット（`MACOS_CERTIFICATE` など）があるときだけ行い、無ければ署名なしで作る。Windows の署名は後で（証明書の手配は 8d の外）。

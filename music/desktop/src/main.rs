@@ -60,7 +60,7 @@ const LAUNCHER: LauncherSpec = LauncherSpec {
     description: "Your music library, served from your own computer",
     category: "AudioVideo",
     icon_svg: include_bytes!("../../../docs/icons/asteria-music.svg"),
-    bundle_prefix: "net.sapphire-turtle",
+    bundle_prefix: "org.sapphire-turtle",
 };
 
 /// The background service that runs `asteria-music serve`.

@@ -50,7 +50,7 @@ tempfile.workspace = true
 # where the server looks; a source that is not there (Linux carries nothing) adds nothing.
 [package.metadata.packager]
 productName = "Asteria Photos"
-identifier = "net.sapphire-turtle.asteria-photos"
+identifier = "org.sapphire-turtle.asteria-photos"
 category = "Photography"
 binaries = [{ path = "asteria-photos-desktop", main = true }]
 icons = ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"]

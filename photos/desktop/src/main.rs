@@ -59,7 +59,7 @@ const LAUNCHER: LauncherSpec = LauncherSpec {
     description: "Your photo library, served from your own computer",
     category: "Graphics",
     icon_svg: include_bytes!("../../../docs/icons/asteria-photos.svg"),
-    bundle_prefix: "net.sapphire-turtle",
+    bundle_prefix: "org.sapphire-turtle",
 };
 
 /// The background service that runs `asteria-photos serve`.
