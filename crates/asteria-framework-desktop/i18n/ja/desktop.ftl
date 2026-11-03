@@ -65,6 +65,6 @@ asteria-desktop-page-keys-failed = API キーを開けませんでした：{ $er
 # 設定の「情報」ページ。
 asteria-desktop-about = 情報
 asteria-desktop-about-version = バージョン { $version }
-asteria-desktop-about-licence-ffmpeg-vips = Asteria は GPL-3.0-or-later のフリーソフトウェアです。Windows と macOS のパッケージには ffmpeg（GPLv3）、Windows にはさらに libvips（LGPL）が入っています。それぞれのライセンスとソースの場所は、プログラムの横の tools/LICENSES にあります。
+asteria-desktop-about-licence-ffmpeg-vips = Asteria は GPL-3.0-or-later のフリーソフトウェアです。Windows と macOS のパッケージには ffmpeg（GPLv3）、Windows にはさらに libvips（LGPL）が入っています。それぞれのライセンスとソースの場所は、プログラムの横（macOS ではアプリの Contents/Resources）の tools/LICENSES にあります。
 asteria-desktop-about-licence-vips = Asteria は GPL-3.0-or-later のフリーソフトウェアです。Windows のパッケージには libvips（LGPL）が入っています。そのライセンスとソースの場所は、プログラムの横の tools/LICENSES にあります。
 asteria-desktop-about-licence-none = Asteria は GPL-3.0-or-later のフリーソフトウェアです。

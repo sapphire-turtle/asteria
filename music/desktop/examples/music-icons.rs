@@ -1,5 +1,6 @@
 //! Writes the app's icon as `icon.ico`, `icon.icns` and `icon.png` (512 px) into the
-//! directory given, for `vpk pack --icon` in the release workflow.
+//! directory given, for the package's icons (`[package.metadata.packager]`) in the release
+//! workflow.
 
 fn main() -> std::io::Result<()> {
     use corundum_framework::platform::icon;

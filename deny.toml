@@ -28,13 +28,6 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant is unmaintained as a standalone crate (merged into zbus 6). Reached via eframe > egui-winit > accesskit_winit > accesskit_unix (Linux screen reader support), whose latest release still pins zbus ^5.19 and atspi ^0.29. Drop when accesskit_unix moves to zbus 6." },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names is unmaintained as a standalone crate (merged into zbus 6). Same path and reason as RUSTSEC-2026-0370." },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is unmaintained as a standalone crate (merged into zbus 6). Same path and reason as RUSTSEC-2026-0370." },
-    # velopack 1.2.161 (corundum-framework-package, the desktops' packages) pins zip 8 and
-    # derivative; its develop branch is on zip 9. Drop these when velopack's next stable
-    # release is in (corundum-framework#64).
-    { id = "RUSTSEC-2026-0367", reason = "zip 8 keeps SUID/SGID bits on extraction; fixed in zip 9, which velopack 1.2.161 cannot take. The velopack crate in the app only reads package manifests, never extracts; the updater extracts only packages fetched over HTTPS from our own releases. Drop with corundum-framework#64." },
-    { id = "RUSTSEC-2026-0368", reason = "zip 8 extraction follows symlink targets outside the destination; same path, use and reason as RUSTSEC-2026-0367. Drop with corundum-framework#64." },
-    { id = "RUSTSEC-2026-0369", reason = "zip 8 extraction applies permissions through symlinks; same path, use and reason as RUSTSEC-2026-0367. Drop with corundum-framework#64." },
-    { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained, with no vulnerability; velopack 1.2.161 depends on it. Re-check with corundum-framework#64." },
 ]
 
 [licenses]

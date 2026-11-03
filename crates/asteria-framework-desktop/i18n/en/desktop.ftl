@@ -65,6 +65,6 @@ asteria-desktop-page-keys-failed = The API keys could not be opened: { $error }
 # Settings › About.
 asteria-desktop-about = About
 asteria-desktop-about-version = Version { $version }
-asteria-desktop-about-licence-ffmpeg-vips = Asteria is free software under GPL-3.0-or-later. Packages for Windows and macOS include ffmpeg (GPLv3) and, on Windows, libvips (LGPL); their licences and sources are listed in tools/LICENSES beside the program.
+asteria-desktop-about-licence-ffmpeg-vips = Asteria is free software under GPL-3.0-or-later. Packages for Windows and macOS include ffmpeg (GPLv3) and, on Windows, libvips (LGPL); their licences and sources are listed in tools/LICENSES beside the program (on macOS, in the app's Contents/Resources).
 asteria-desktop-about-licence-vips = Asteria is free software under GPL-3.0-or-later. The Windows package includes libvips (LGPL); its licence and sources are listed in tools/LICENSES beside the program.
 asteria-desktop-about-licence-none = Asteria is free software under GPL-3.0-or-later.

@@ -1,4 +1,4 @@
-//! The desktop as a Velopack package (spec §5.9): [`start`] is the start-up order every
+//! The desktop as a cargo-packager package (spec §5.9): [`start`] is the start-up order every
 //! desktop `main` runs, and the updater it makes for the window feeds the
 //! [About page](crate::AboutPage).
 //!
@@ -19,6 +19,11 @@ use crate::LocalServerSpec;
 /// The repository the desktops' packages are released in, as `v<version>` releases.
 const REPO: &str = "https://github.com/sapphire-turtle/asteria";
 
+/// sapphire-turtle's minisign public key (key ID F4A73F39AA17C8EB, `cargo packager signer
+/// generate`), which the release workflow signs the packages for: an update signed otherwise
+/// is not installed. The same key as sapphire-framework's `gui::package::UPDATE_PUBKEY`.
+pub const UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY0QTczRjM5QUExN0M4RUIKUldUcnlCZXFPVCtuOUJ6Zld0MkIzaW5wUXlsdlBBSll2U3k1dEJtT0VBYXV6ZHFtYlVNcWF5aHEK";
+
 /// How often a running window looks for an update.
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -30,7 +35,7 @@ static UPDATER: OnceLock<Updater> = OnceLock::new();
 pub enum Entry {
     /// `serve`: the server, as the background service starts it.
     Serve,
-    /// Any other arguments: the command line (or one of Velopack's hooks).
+    /// Any other arguments: the command line (or one of the installer's hooks).
     Cli,
     /// No arguments: the window.
     Window,
@@ -54,8 +59,9 @@ pub fn entry(args: &[OsString]) -> Entry {
 ///   package's start, which starts again the services an update stopped: started from the
 ///   service itself, it would restart itself.
 /// - Anything else goes through [`corundum_framework::package::start`] first, which handles
-///   Velopack's Windows hooks (`--veloapp-*`) and exits for them, before the arguments are
-///   read as a command line.
+///   the Windows installer's hooks (`--corundum-package installed|uninstalling`) and exits
+///   for them, before the arguments are read as a command line, and starts again the
+///   services an update stopped.
 /// - Other arguments are the command line, given the parent's console on Windows when the
 ///   package's console shim did not.
 /// - No arguments open the window: a second start brings the first to the front and exits,
@@ -69,12 +75,10 @@ pub fn start(local: &'static LocalServerSpec, package: &'static PackageSpec) -> 
         console::attach_parent();
         asteria_framework_server::cli::main((local.server)());
     }
-    // Only inside a package: elsewhere (`cargo run`, a `cargo install`ed desktop) there is
-    // no Velopack to start, and its "not installed" error would read like a real failure.
-    if corundum_framework::platform::package::current().is_some() {
-        let start = corundum_framework::package::start(package);
-        tracing::debug!("package start: {start:?}");
-    }
+    // Outside a package (`cargo run`, a `cargo install`ed desktop) it finds nothing to do
+    // and says `NotPackaged`.
+    let start = corundum_framework::package::start(package);
+    tracing::debug!("package start: {start:?}");
     if entry == Entry::Cli {
         console::attach_parent();
         asteria_framework_server::cli::main((local.server)());
@@ -148,10 +152,10 @@ mod tests {
     }
 
     #[test]
-    fn a_velopack_hook_is_not_the_server() {
+    fn an_install_hook_is_not_the_server() {
         // package::start handles it before the CLI ever sees it
         assert!(matches!(
-            entry(&args(&["--veloapp-install", "0.1.0"])),
+            entry(&args(&["--corundum-package", "installed"])),
             Entry::Cli
         ));
         assert!(matches!(entry(&args(&["api-key", "list"])), Entry::Cli));

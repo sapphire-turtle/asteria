@@ -1,7 +1,7 @@
 //! What the photos and music desktop apps share about the server on this computer (spec
 //! §5.8): the [first-run pages](first_run_pages) that set it up, the "Local server"
 //! [settings page](LocalServerPage), its [background service](service_spec), and
-//! [what external tools it has](tools_ui); and as a Velopack package (spec §5.9), the
+//! [what external tools it has](tools_ui); and as a cargo-packager package (spec §5.9), the
 //! [start-up order](start) and the [About page](AboutPage).
 //!
 //! Each desktop keeps one [`LocalServerSpec`] in a `static` and hands it to these. The
@@ -20,7 +20,7 @@ pub use about::AboutPage;
 pub use first_run::{first_run_pages, first_run_pages_with};
 pub use i18n::{RESOURCES, register};
 pub use local_page::{LocalServerPage, PageState, request_setup, take_setup_request};
-pub use package::{Entry, entry, start, updater};
+pub use package::{Entry, UPDATE_PUBKEY, entry, start, updater};
 pub use paths::LocalPaths;
 pub use service::service_spec;
 pub use tools::tools_ui;

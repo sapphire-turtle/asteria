@@ -8,14 +8,14 @@ Every release on [the releases page](https://github.com/sapphire-turtle/asteria/
 
 The desktop app is the window, the server's command line (`asteria-photos` / `asteria-music`) and, if you want one, a server on this computer, in one install. Download the file for your system (`photos` or `music` in the name):
 
-- Windows: `asteria-photos-desktop-photos-win-Setup.exe` installs it for you alone (in `%LocalAppData%\asteria-photos-desktop`, with a Start menu entry) and puts `asteria-photos` on `Path`; uninstall it from Settings › Apps. `...-photos-win-Portable.zip` runs without installing.
-- macOS: `asteria-photos-desktop-photos-osx-Setup.pkg`, one package for Apple silicon and Intel Macs. `...-photos-osx-Portable.zip` holds the app on its own. Settings › About offers to put `asteria-photos` on `PATH`.
-- Linux: `asteria-photos-desktop-photos-linux.AppImage`; make it executable (`chmod +x`) and run it. Settings › About offers to put `asteria-photos` on `PATH`.
+- Windows: `asteria-photos-desktop_<version>_x64-setup.exe` installs it for you alone (in `%LocalAppData%\Asteria Photos`, with a Start menu entry) and puts `asteria-photos` on `Path`; uninstall it from Settings › Apps.
+- macOS: `asteria-photos-desktop_<version>_universal.dmg`, one app for Apple silicon and Intel Macs; drag it to Applications. Settings › About offers to put `asteria-photos` on `PATH`.
+- Linux: `asteria-photos-desktop_<version>_x86_64.AppImage`; make it executable (`chmod +x`) and run it. Settings › About offers to put `asteria-photos` on `PATH`.
 
-An installed app looks for a new release once a day, downloads it in the background, and applies it when you choose to (Settings › About), or at its next start.
+An installed app looks for a new release once a day, downloads it in the background, checks its signature, and applies it when you choose to (Settings › About), or at its next start. (The `.sig` files and `asteria-<app>-latest.json` on a release are what it reads; the `.app.tar.gz` is the macOS app for its updates.)
 
 - The Windows and macOS packages include the external tools the server uses (for photos ffmpeg, and on Windows libvips's `vipsthumbnail` for both apps; music on macOS needs none), with their licences in `tools/LICENSES` (ffmpeg is GPLv3, libvips LGPL). On Linux install them with your package manager (see [A server on this computer](#a-server-on-this-computer)).
-- The packages are not signed yet: Windows SmartScreen warns before the installer runs ("More info" › "Run anyway"), and macOS Gatekeeper refuses to open the unsigned package at first (allow it with "Open Anyway" in System Settings › Privacy & Security). The macOS package is signed and notarized once the release workflow has a Developer ID.
+- The Windows installer is not signed yet: SmartScreen warns before it runs ("More info" › "Run anyway"). The macOS app is signed and notarized when the release workflow has a Developer ID; until then Gatekeeper refuses to open it at first (allow it with "Open Anyway" in System Settings › Privacy & Security).
 
 The servers without a window are `asteria-photos-headless-<platform>` and `asteria-music-headless-<platform>`, for `linux-x86_64`, `linux-aarch64`, `macos-aarch64` and `windows-x86_64.exe`. Rename the file to `asteria-photos` (or `asteria-music`; keep `.exe` on Windows), make it executable and put it on `PATH`. `asteria-photos update` replaces it with the newest release (`--check` only tells you whether there is one, `-y` does not ask); restart a running `serve` afterwards. A pre-release (rc) binary is not offered later pre-releases by `update`: download those by hand. A server installed with `cargo install` is updated with `cargo install` instead, and the desktop app updates itself.
 

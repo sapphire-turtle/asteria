@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Puts the external tools a desktop package carries (spec §5.9) into <dest>, the directory
-# that becomes the package (`vpk pack --packDir`), beside the main executable, where the
+# Puts the external tools a desktop package carries (spec §5.9) into <dest>, the desktop
+# crate's `bundled/`, whose files [package.metadata.packager]'s resources put beside the
+# main executable on Windows and in the app's `Contents/Resources` on macOS, where the
 # server looks first:
 #
 #   photos on windows: <dest>/ffmpeg.exe and <dest>/vips/bin/vipsthumbnail.exe with

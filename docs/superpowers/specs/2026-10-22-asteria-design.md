@@ -49,12 +49,12 @@ asteria/
 │  │  ├─ asteria-photos-server/  GPL-3.0-or-later   lib：サーバーと CLI（`serve`、`init`、トークンなど）
 │  │  └─ asteria-photos-gui/     GPL-3.0-or-later   lib：画面とクライアントの処理（サーバーに依存しない）
 │  ├─ headless/   asteria-photos-headless  bin `asteria-photos`
-│  ├─ desktop/    asteria-photos-desktop   bin `asteria-photos-desktop`（Velopack のパッケージでは `asteria-photos` に改名）
+│  ├─ desktop/    asteria-photos-desktop   bin `asteria-photos-desktop`（パッケージは `asteria-photos` を PATH に置く）
 │  └─ mobile/     asteria-photos-mobile    lib（staticlib / cdylib。iOS と Android のアプリの入口）
 └─ music/                                    music（将来 asteria-music リポジトリの root）
    ├─ crates/  asteria-music-api/  asteria-music-server/  asteria-music-gui/（再生エンジンは gui に入る）
    ├─ headless/   asteria-music-headless   bin `asteria-music`
-   ├─ desktop/    asteria-music-desktop    bin `asteria-music-desktop`（Velopack のパッケージでは `asteria-music` に改名）
+   ├─ desktop/    asteria-music-desktop    bin `asteria-music-desktop`（パッケージは `asteria-music` を PATH に置く）
    └─ mobile/     asteria-music-mobile     lib
 ```
 
@@ -63,10 +63,10 @@ asteria/
 
 ### 配布形態（2026-10-31 決定）
 
-- **desktop**：GUI のある環境向け。headless の上位互換で、サブコマンドなしで起動するとウィンドウを開き、サブコマンドを付けると headless と同じ CLI を実行する（サーバーの起動 `serve` を含む）。Velopack で配布する（Plan 8d）。
+- **desktop**：GUI のある環境向け。headless の上位互換で、サブコマンドなしで起動するとウィンドウを開き、サブコマンドを付けると headless と同じ CLI を実行する（サーバーの起動 `serve` を含む）。cargo-packager のパッケージで配布する（Plan 8d、#58）。
 - **headless**：GUI のない環境（LAN の Linux ホストなど）向けのサーバーと CLI。
-- **mobile**：純粋なクライアント。サーバーにも Velopack にも依存しない。
-- 利用者から見えるコマンド名は、headless も desktop も `asteria-photos` / `asteria-music` に揃える。ドキュメントや MCP クライアントの設定を1つにするため。cargo のバイナリ名は分ける（同じワークスペースで同じ名前にすると出力ファイルが衝突し、`CARGO_BIN_EXE_` を使う結合テストが別のバイナリを起動して失敗する。cargo#6313）。desktop は Velopack のパッケージを作るときに改名し、PATH にも `asteria-<app>` を置く（#41、corundum-framework#75、sapphire-framework#383）。corundum 0.5.0 では、macOS と Linux はパッケージの中の実行ファイルを `asteria-<app>` にでき、Windows は GUI の実行ファイルが cargo の名前のまま、その横に `asteria-<app>.exe` のシムを置く。
+- **mobile**：純粋なクライアント。サーバーにもパッケージにも依存しない。
+- 利用者から見えるコマンド名は、headless も desktop も `asteria-photos` / `asteria-music` に揃える。ドキュメントや MCP クライアントの設定を1つにするため。cargo のバイナリ名は分ける（同じワークスペースで同じ名前にすると出力ファイルが衝突し、`CARGO_BIN_EXE_` を使う結合テストが別のバイナリを起動して失敗する。cargo#6313）。desktop のパッケージは PATH に `asteria-<app>` を置く（#41、corundum-framework#75、sapphire-framework#383）。パッケージの中の実行ファイルは cargo の名前のまま（`asteria-<app>-desktop`）で、macOS と Linux は `asteria-<app>` という名前のリンクを PATH に置き、Windows は GUI の実行ファイルの横に `asteria-<app>.exe` のシムを置く。
 - アプリはあくまでクライアントとサーバーの形で、ウィンドウはサーバーにつなぐだけ。desktop の中でサーバーを動かすことはしない。ローカルにサーバーを置くときは `asteria-<app> serve` を常駐させる。サービスとしての登録（ログイン時の起動）は corundum 0.5.0 の `service` を使い、Plan 8c で設定画面と初回起動の画面から行えるようにする。それまでは手で `serve` を起動する。
 - Web の画面を持たず専用のクライアントが要るメディアサーバーは導入のハードルが高い。desktop にサーバーを同梱し、単体でも使えるようにして間口を広げる。
 
@@ -683,41 +683,42 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
   4. 外部ツール：アプリのサーバーが使うツール（`LocalServerSpec::tools`。photos は `vipsthumbnail` と `ffmpeg`、music はジャケットのサムネイルの `vipsthumbnail` だけ）があるかを出し、無ければ入れ方を案内する。無くても続けられる（サムネイルが作れないだけ）。ツールを使わないアプリでは、使わないことだけを出す。
 - **サービス**：corundum-framework-service。名前はアプリ名（`asteria-photos` / `asteria-music`）、実行するのは自分の実行ファイルと `serve`。Linux は systemd のユーザーユニット、macOS は LaunchAgent、Windows はタスクスケジューラー（ログオン時）。
 - **設定の「ローカルサーバー」ページ**（desktop だけ）：ライブラリの場所と待ち受けアドレス、`settings::ServiceRow`（登録、起動、停止、削除）、API キーの管理（`KeysPage`、ローカルの `KeyStore` を直接扱う）、外部ツールの有無。
-- 外部ツールの有無は、サーバーがツールを探すのと同じ関数で desktop が確かめる（同じマシンなので結果は同じ）。ツールは `ASTERIA_*` の変数、`PATH`、よく使われるディレクトリ（macOS は `/opt/homebrew/bin` と `/usr/local/bin`、Linux は `/usr/local/bin`）の順に探し、サーバーは見つけた絶対パスを実行する（Finder から起動した GUI や LaunchAgent の `PATH` には Homebrew が入っていないため）。Velopack 版の同梱は §5.9。
+- 外部ツールの有無は、サーバーがツールを探すのと同じ関数で desktop が確かめる（同じマシンなので結果は同じ）。ツールは `ASTERIA_*` の変数、`PATH`、よく使われるディレクトリ（macOS は `/opt/homebrew/bin` と `/usr/local/bin`、Linux は `/usr/local/bin`）の順に探し、サーバーは見つけた絶対パスを実行する（Finder から起動した GUI や LaunchAgent の `PATH` には Homebrew が入っていないため）。パッケージへの同梱は §5.9。
 - mobile にはない。LAN から受けるための待ち受けアドレスの変更は、今は設定ファイルで行う。
 
-### 5.9 desktop の Velopack 配布と headless のリリース（2026-11-02 決定、Plan 8d）
+### 5.9 desktop のパッケージ配布と headless のリリース（2026-11-02 決定、Plan 8d。2026-11-03 に Velopack から cargo-packager へ、#58）
 
-ライト層が desktop をインストールするだけで、手元のサーバー（§5.8）まで使えるようにする。土台は corundum-framework 0.7 の `package`（`start`、`Updater`、`cli_path`、`console`、`Services`）と、corundum のデモの `demo-release.yml`。
+ライト層が desktop をインストールするだけで、手元のサーバー（§5.8）まで使えるようにする。土台は corundum-framework 0.8 の `package`（`start`、`Updater`、`cli_path`、`console`、`Services`）と、sapphire-turtle/.github の共有ワークフロー `release-packager.yml`（corundum-framework#103）。まだリリースしていないので、Velopack 版からの移行は要らない。
 
 - **リリースの単位**：タグ `v<version>`（ワークスペース共通のバージョン）を push すると `release.yml` が動き、1つの GitHub リリースに次を載せる。
-  - desktop の Velopack パッケージ：photos と music それぞれの linux（AppImage）、osx（`.pkg` とポータブル zip）、win（`Setup.exe` とポータブル zip）。
-    - packId は `asteria-photos-desktop` / `asteria-music-desktop`。データのディレクトリ名（`asteria-<app>`）と変える。Windows では `%LocalAppData%\<packId>` に入り、アンインストールでそこが消えるため。
-    - チャネルは `<app>-<os>`（`photos-linux`、`music-win` など）。同じリリースに2つのアプリの `releases.<channel>.json` が並ぶので、アプリ名で分ける。Velopack はインストールしたときのチャネルで更新を探す。
-    - 実行ファイル名（#41）：macOS と Linux はパッケージの中で `asteria-<app>` に改名し、`--mainExe asteria-<app>`。Windows は GUI の `asteria-<app>-desktop.exe` のまま `--mainExe` にし、横にコンソールのシム（cargo のバイナリ `asteria-<app>-console`）を `asteria-<app>.exe` として置く。
-    - `--packTitle` は `Asteria Photos` / `Asteria Music`（ランチャーの名前と同じ）。
+  - desktop の cargo-packager パッケージ：photos と music それぞれを `release-packager.yml` で作る。Linux は AppImage、macOS は DMG（と更新に使う `.app.tar.gz`。arm64 と x86_64 を1つにしたユニバーサル）、Windows は自分のユーザーだけに入れる NSIS のインストーラー。ファイル名は `asteria-<app>-desktop_<version>_<arch>.<ext>`（`x86_64.AppImage`、`universal.dmg`、`x64-setup.exe`）。
+    - どのパッケージも組織の minisign の鍵（`PACKAGER_SIGN_PRIVATE_KEY`）で署名し、`.sig` を並べる。アプリは公開鍵（`asteria-framework-desktop` の `UPDATE_PUBKEY`、鍵 ID F4A73F39AA17C8EB。sapphire-framework と同じ）を持ち、署名の合わない更新は入れない。
+    - 更新のフィードは `asteria-<app>-latest.json`（`PackageSpec::app_name`）。同じリリースに2つのアプリのフィードが並ぶ。
+    - パッケージの設定は desktop のクレートの `[package.metadata.packager]`：製品名は `Asteria Photos` / `Asteria Music`、識別子は `net.sapphire-turtle.asteria-<app>`（どちらもランチャーと同じ）。Windows では `%LocalAppData%\<製品名>` に入る。
+    - 実行ファイル名（#41）：パッケージの中も cargo の名前（`asteria-<app>-desktop`）のまま。Windows はワークフローがその横にコンソールのシム（cargo のバイナリ `asteria-<app>-console`）を `asteria-<app>.exe` として置く。
   - headless のバイナリ：sapphire-turtle/.github の共有ワークフロー `release-binary.yml` で、`asteria-<app>-headless-<os>-<arch>[.exe]`（linux-x86_64、linux-aarch64、macos-aarch64、windows-x86_64）。名前は corundum-framework-update が探す形。
 - **署名**：macOS の署名と公証は、corundum のデモと同じくシークレット（`MACOS_CERTIFICATE` など）があるときだけ行い、無ければ署名なしで作る。Windows の署名は後で（証明書の手配は 8d の外）。
-- **アイコン**：`docs/icons/asteria-<app>.svg`（ブランドカラー）を元に、corundum の `icon` で png・icns・ico を作り、`vpk --icon` とランチャーと Windows の実行ファイル（corundum-framework-build）に使う。
+- **アイコン**：`docs/icons/asteria-<app>.svg`（ブランドカラー）を元に、corundum の `icon` で png・icns・ico を作り、パッケージ（`[package.metadata.packager]` の `icons`。ワークフローの `pre-package` で作る）とランチャーと Windows の実行ファイル（corundum-framework-build）に使う。
 - **desktop の起動の順番**
   1. `#![cfg_attr(windows, windows_subsystem = "windows")]`。サービスがコンソールの窓を出さなくなる（corundum-framework#89）。
   2. 最初の引数が `serve` なら、すぐサーバーを動かす。サービスのプロセスは `package::start` を通さない（更新で止めたサービスを起動し直す処理が、自分自身を起動し直してしまうため）。
-  3. それ以外は `package::start(&PACKAGE)`。Windows のインストール・アンインストールのフック（`--veloapp-*`）はここで処理して終わる。「引数があれば CLI」の判定より前に置く。
+  3. それ以外は `package::start(&PACKAGE)`。Windows のインストール・アンインストールのフック（corundum の NSIS のテンプレートが渡す `--corundum-package installed|uninstalling`）はここで処理して終わる。更新で止めたサービスもここで起動し直す。パッケージの外では何もしない（`Start::NotPackaged`）。「引数があれば CLI」の判定より前に置く。
   4. 引数があれば CLI。パッケージの外（cargo で入れた版）では `console::attach_parent` で端末に出す。
   5. 引数が無ければウィンドウ。`instance::acquire_or_activate` で単一起動にし（2つ目は既存のウィンドウを前に出して終わる）、ロックを取った後で `Updater` を始める（前回ダウンロードした更新があれば起動時に適用し、あとは1日ごとに確認とダウンロード。適用は利用者が選ぶ）。
   - `PackageSpec`：CLI は `asteria-<app>`、サービスは §5.8 のローカルサーバー。更新を適用するときに動いている `serve` を止め、更新後に最初に起動したプログラムが起動し直す（corundum）。
   - パッケージの対応は機能フラグで分けず、desktop には常に入れる。パッケージの外では何もしない。
-- **設定**：「情報」に更新の行（Velopack ならダウンロード済みの更新を適用、それ以外はインストール方法に応じた案内）と、macOS・Linux では `CliRow`（`asteria-<app>` を PATH に置く）。Windows はインストールのフックで PATH に入れる。
+- **設定**：「情報」に更新の行（パッケージならダウンロード済みの更新を適用、それ以外はインストール方法に応じた案内）と、macOS・Linux では `CliRow`（`asteria-<app>` を PATH に置く）。Windows はインストールのフックで PATH に入れる。
 - **ランチャー**：`WindowOptions::launcher` でアプリのメニューに載せる（AppImage と cargo で入れた版。macOS・Windows のパッケージでは corundum が飛ばす）。
 - **外部ツール**
-  - 探す順番：`ASTERIA_*` の変数 → **実行ファイルの横（同梱）** → `PATH` → よく使われるディレクトリ。
+  - 探す順番：`ASTERIA_*` の変数 → **実行ファイルの横（同梱。macOS の .app では `Contents/Resources` も）** → `PATH` → よく使われるディレクトリ。
+  - 同梱するツールは、ワークフローの `pre-package` で `packaging/fetch-tools.sh` が desktop のクレートの `bundled/` に置き、`[package.metadata.packager]` の `resources` がパッケージに入れる。Windows ではインストール先の実行ファイルの横、macOS では `Contents/Resources`（cargo-packager は resources をそこに置く）。無いソースは何も足さないので、OS やアプリで同梱するものが違っても設定は1つで済む。
   - Windows は libvips（build-win64-mxe の `vips-dev-x64-all-<version>.zip`、DLL ごと）を `vips\bin\vipsthumbnail.exe` として両アプリに同梱する。photos にはさらに ffmpeg（libwebp を含む GPL ビルド）を `ffmpeg.exe` として同梱する。
   - macOS は photos にだけ ffmpeg（martin-riedl.de の静的ビルド、arm64 と x86_64）を同梱する。画像は §4.5 の sips を使う。music は何も同梱しない。
   - music は `offline-audio` をプロセス内で作る（§4.9）ので ffmpeg を同梱しない（2026-11-02 決定、#48）。ジャケットのサムネイルには vips（macOS では sips）を使う。どのアプリが何を同梱するかは `packaging/fetch-tools.sh <windows|macos> <photos|music> <dest>` が決める。
   - Linux は同梱しない（パッケージマネージャーで入れる。今の案内のまま）。
   - ワークフローはツールをバージョン付きの URL と SHA-256 で固定し（`packaging/tools.env`。2026-11-02 の時点で ffmpeg 9.0.2：Windows は BtbN の `autobuild-2026-11-01-12-49` の `win64-gpl-9.0`、macOS は martin-riedl.de の arm64 と x86_64 を `lipo` で1つに。libvips 8.18.7）、取ってきたら `-encoders` に libwebp があることを確かめる（無ければリリースを止める）。パッケージには `tools/LICENSES`（そのパッケージが同梱するツールのもの：ffmpeg は GPLv3、libvips は LGPL、それぞれのソースの場所）を入れる。asteria は GPL-3.0-or-later なので同梱できる。
   - 2026-11-01 のスパイク（GitHub の macOS ランナー）で確かめたこと：sips は JPEG・PNG・HEIC・RAW（NEF）を読める、LaunchAgent からも動く、壊れたファイルは終了コード 13。静的な ffmpeg は .app の中でも、ad hoc とハードンドランタイムの署名でも動く。公証は未確認（シークレットが無い）。
-- **headless（と desktop）の `update` サブコマンド**：`update [--check] [-y]`（corundum-framework-update の `UpdateArgs` と `run`）。手で置いたリリースのバイナリだけを新しい版に置き換え、cargo で入れた版には `cargo install` を、Velopack 版にはアプリから更新するよう案内する。置き換えた後は、動いている `serve` を起動し直すよう案内する。
+- **headless（と desktop）の `update` サブコマンド**：`update [--check] [-y]`（corundum-framework-update の `UpdateArgs` と `run`）。手で置いたリリースのバイナリだけを新しい版に置き換え、cargo で入れた版には `cargo install` を、パッケージ版にはアプリから更新するよう案内する。置き換えた後は、動いている `serve` を起動し直すよう案内する。
 - **確かめ方**：単体テスト（起動の分岐、同梱ツールの発見、sips の経路、`update` の案内）に加え、プレリリースのタグ（`v0.1.0-rc.1` など）でワークフローを通し、3 OS の実機でインストール → 更新 → アンインストールを確かめる。
 
 ## 6. エラー処理
@@ -787,7 +788,7 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
    - クレートの分割と移動：`asteria-<app>-server` をライブラリにし、`-headless`、`-gui`、`-desktop`、`-mobile`（骨組み）を作る。desktop は CLI を兼ね、`asteria-<app>-desktop serve` でサーバーを立てられる。CI の iOS チェックを mobile に広げる。（Plan 8b、済）
    - corundum-framework 0.6.0 に上げた（コードの変更なし、2026-11-01）。
    - ローカルサーバー（§5.8）：認証を corundum の API キーに置き換え、設定ファイルの既定の場所を決め、desktop の初回起動の流れ（ライブラリを選ぶ、`init`、キーの発行と接続先への自動登録、サービス登録、外部ツールの確かめ）と、設定の「ローカルサーバー」ページを足す。cargo で入れた版でも使える。（Plan 8c、済）
-   - desktop の Velopack 配布と headless のリリース（§5.9）：1つのタグで両アプリの Velopack パッケージと headless のバイナリを出す。単一起動、更新、PATH、ランチャー、Windows のシムと GUI のサブシステム（corundum-framework#89）、`--veloapp-*` を引数の判定より前に処理、Windows（vips と ffmpeg）と macOS（ffmpeg）への外部ツールの同梱（#48 で music は ffmpeg を同梱しなくなった）、macOS の sips、headless の `update`。（Plan 8d）
+   - desktop の Velopack 配布と headless のリリース（§5.9）：1つのタグで両アプリの Velopack パッケージと headless のバイナリを出す。単一起動、更新、PATH、ランチャー、Windows のシムと GUI のサブシステム（corundum-framework#89）、`--veloapp-*` を引数の判定より前に処理、Windows（vips と ffmpeg）と macOS（ffmpeg）への外部ツールの同梱（#48 で music は ffmpeg を同梱しなくなった）、macOS の sips、headless の `update`。（Plan 8d。#58 で Velopack から cargo-packager に移した）
 10. オフラインキャッシュと操作キュー。（Plan 9）
 11. payload ハッシュの第2段階。（Plan 10）
 12. iOS のクライアント（photos のアップロード、music のバックグラウンド再生）。corundum-framework が iOS のウィンドウに対応してから始める。
