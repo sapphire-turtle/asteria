@@ -820,7 +820,10 @@ impl Inner {
 
     /// Makes an image thumbnail in this process; for what the crate cannot read, the external
     /// image tool does it from a staged copy of the source. With no tool found that is
-    /// `ToolMissing` (not recorded as unprocessable, so a tool installed later is tried).
+    /// `ToolMissing` (not recorded as unprocessable, so a tool installed later is tried),
+    /// except when the in-process decode found the data corrupt (`Error::Decode`): that is
+    /// `Unprocessable` and recorded, since no tool would help and a client would otherwise
+    /// retry it on every view (a corrupt cover in music, which has no tool, for one).
     /// The in-process attempt and the tool each get the preset's full timeout, so one render
     /// can take up to twice as long.
     async fn render_image(
@@ -844,6 +847,7 @@ impl Inner {
         let task = tokio::task::spawn_blocking(move || inprocess_image::render(source, longest));
         // The decode cannot be stopped once begun, but it is bounded by the crate's limits,
         // and it only returns bytes: nothing is written for a render that timed out.
+        let mut corrupt = false;
         let failure = match tokio::time::timeout(preset.timeout(self.timeout), task).await {
             Err(_) => return Err(ProcessError::Unprocessable("timeout".into())),
             Ok(Ok(Ok(webp))) => {
@@ -855,7 +859,10 @@ impl Inner {
             Ok(Ok(Err(ImageError::Io(e)))) => {
                 return Err(ProcessError::Io(format!("cannot read the image: {e}")));
             }
-            Ok(Ok(Err(e))) => e.to_string(),
+            Ok(Ok(Err(e))) => {
+                corrupt = matches!(e, ImageError::Decode(_));
+                e.to_string()
+            }
             Ok(Err(e)) => format!("the image decoder failed: {e}"),
         };
         tracing::debug!("cannot make a thumbnail in-process ({failure}); trying the image tool");
@@ -877,6 +884,12 @@ impl Inner {
         let result = match &self.image {
             ImageTool::Vips(vips) => self.run_vips(vips, &staged, tmp, preset).await,
             ImageTool::Sips(sips) => self.run_sips(sips, &staged, tmp, preset).await,
+        };
+        let result = match result {
+            Err(ProcessError::ToolMissing(_)) if corrupt => {
+                Err(ProcessError::Unprocessable(failure))
+            }
+            other => other,
         };
         if result.is_ok() {
             tracing::debug!("made a {} thumbnail with the image tool", preset.name());

@@ -1062,6 +1062,70 @@ async fn a_picture_over_the_limits_goes_to_the_tool() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn a_picture_over_the_servers_limits_goes_to_the_tool() {
+    // 100 megapixels: under the crate's default 200 MP, over the server's 64 MP.
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran");
+    let webp = dir.path().join("made.webp");
+    std::fs::write(&webp, {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(20, 10));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::WebP).unwrap();
+        out.into_inner()
+    })
+    .unwrap();
+    let tool = webp_tool(dir.path(), &webp, &ran);
+    let src = dir.path().join("big.png");
+    // A real, decodable picture (flat grey compresses to a few hundred KB), so only the
+    // limit sends it to the tool.
+    {
+        use image::ImageEncoder;
+        let pixels = vec![128u8; 10_000 * 10_000];
+        let file = std::fs::File::create(&src).unwrap();
+        image::codecs::png::PngEncoder::new_with_quality(
+            std::io::BufWriter::new(file),
+            image::codecs::png::CompressionType::Fast,
+            image::codecs::png::FilterType::NoFilter,
+        )
+        .write_image(&pixels, 10_000, 10_000, image::ExtendedColorType::L8)
+        .unwrap();
+    }
+    let p = inprocess_processor(dir.path(), &tool);
+    let out = p
+        .render(&src, MediaKind::Image, HASH, Preset::Thumb)
+        .await
+        .unwrap();
+    assert_eq!(webp_size(&std::fs::read(out).unwrap()), (20, 10));
+    assert_eq!(runs(&ran), 1, "the tool made it, not the process");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn with_no_tool_a_corrupt_image_is_unprocessable_and_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut bytes = encoded(64, 64, image::ImageFormat::Jpeg);
+    bytes.truncate(bytes.len() / 4);
+    let src = dir.path().join("broken.jpg");
+    std::fs::write(&src, bytes).unwrap();
+    let p = inprocess_processor(dir.path(), &dir.path().join("nonexistent-tool"));
+    let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = recorded.clone();
+    p.set_unprocessable_hook(move |hash, _, reason| {
+        sink.lock()
+            .unwrap()
+            .push((hash.to_string(), reason.to_string()));
+    });
+    let r = p.render(&src, MediaKind::Image, HASH, Preset::Thumb).await;
+    assert!(
+        matches!(r, Err(ProcessError::Unprocessable(_))),
+        "expected Unprocessable, got {r:?}"
+    );
+    assert_eq!(recorded.lock().unwrap().len(), 1);
+    assert!(leftovers(&dir.path().join("thumbs")).is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn with_no_tool_an_undecodable_image_waits_for_one() {
     let dir = tempfile::tempdir().unwrap();
     let src = heic(dir.path());

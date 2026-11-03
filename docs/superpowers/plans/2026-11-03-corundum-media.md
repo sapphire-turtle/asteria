@@ -23,7 +23,7 @@
 
 - asteria depends on the published corundum crates (no `path`/`git` dependencies in the final branch).
 - Thumbnails keep their current output: lossy WebP, quality 80, no metadata, sRGB, the longest side shrunk to `Preset::size()` (Thumb 256, Preview 1920) and never enlarged, EXIF orientation applied.
-- In-process decoding is bounded by `corundum_framework_image::Limits::default()` (512 MiB, 200 MP) and runs on `tokio::task::spawn_blocking`, inside the existing per-render permit and `timeout`; the blocking task returns the WebP bytes and only the async side writes the temporary file, so a timed-out decode never writes after cleanup.
+- In-process decoding is bounded by `corundum_framework_image::Limits` tightened to 256 MiB of file and 64 MP for small home servers (the default 512 MiB / 200 MP can take 2-3 GB per decode) and runs on `tokio::task::spawn_blocking`, inside the existing per-render permit and `timeout`; the blocking task returns the WebP bytes and only the async side writes the temporary file, so a timed-out decode never writes after cleanup.
 - The external tool stays for what the in-process path cannot do: any `corundum_framework_image::Error` except `Io` falls back to the tool when one is found, and with no tool the render is `ProcessError::Unprocessable` with the in-process error as the reason. `Io` (the source cannot be read) is `ProcessError::Io`, as today.
 - Video thumbnails (ffmpeg) and offline audio are unchanged.
 - The music GUI keeps every behaviour its tests pin today: streaming in `Range` chunks into the per-process stream directory, preload after the current track is fetched, Low quality asking for `offline-audio`, the 3 s "previous" rule, three unplayable tracks stopping playback.
@@ -34,7 +34,7 @@
 
 1. **A HEIC, AVIF or ORF photo on a machine with vipsthumbnail (or macOS `sips`)** still gets a thumbnail through the tool. → Task 1 `an_image_the_crate_cannot_decode_goes_to_the_tool` (a fake tool script, as the existing vips tests use).
 2. **The same photo with no tool at all** is `Unprocessable` with a reason naming what failed, not a panic or an `Io` error that is retried forever. → Task 1 `with_no_tool_an_undecodable_image_is_unprocessable`.
-3. **A huge image (over 200 MP) or a decompression bomb** does not take the server's memory: it is refused in-process and handed to the tool, which streams it. → Task 1 `a_picture_over_the_limits_goes_to_the_tool`.
+3. **A huge image (over 64 MP) or a decompression bomb** does not take the server's memory: it is refused in-process and handed to the tool, which streams it. → Task 1 `a_picture_over_the_limits_goes_to_the_tool`.
 4. **The server is changed while a track plays or is being fetched**: playback stops, the queue is empty, no error stays, and the old server's temporary files are deleted. → Task 3 `changing_the_server_stops_and_forgets` (the app-level test, through the shared settings and `Command::Reset`).
 5. **An embedded cover in a music file** (bytes, no extension or a wrong one) still becomes a thumbnail with no external tool. → Task 1 `an_embedded_cover_needs_no_tool`.
 
@@ -49,7 +49,7 @@
 - Test: `crates/asteria-framework-server/src/process.rs`'s tests (or `tests/` where the existing render tests live)
 
 **Interfaces:**
-- Produces: `inprocess_image::render(src: InSource, longest: u32) -> Result<Vec<u8>, corundum_framework_image::Error>` where `InSource` is `Path(PathBuf)` or `Bytes { bytes: Vec<u8>, ext: Option<String> }` (owned, for `spawn_blocking`); quality `80.0`; `Limits::default()`.
+- Produces: `inprocess_image::render(src: InSource, longest: u32) -> Result<Vec<u8>, corundum_framework_image::Error>` where `InSource` is `Path(PathBuf)` or `Bytes { bytes: Vec<u8>, ext: Option<String> }` (owned, for `spawn_blocking`); quality `80.0`; the server limits (64 MP, 256 MiB).
 - `Processor`'s public API does not change. `with_tools`/`with_image_tool` keep working, and tests use them to make the fallback tool a fake script.
 
 - [ ] **Step 1: Write the tests** (images generated in the test with the `image` crate, as the existing tests and `sips.rs` do; read the WebP back with `image`/`webp` to check):
@@ -67,7 +67,7 @@
     // script that writes a valid WebP to its output: the render succeeds and the script ran once.
 }
 #[tokio::test] async fn a_picture_over_the_limits_goes_to_the_tool() {
-    // A PNG whose header claims 20000×20000 (over 200 MP; written by hand, a few hundred bytes):
+    // A PNG whose header claims 20000×20000 (over the limit; written by hand, a few hundred bytes):
     // the fake tool runs and its WebP is the result.
 }
 #[tokio::test] async fn with_no_tool_an_undecodable_image_is_unprocessable() {

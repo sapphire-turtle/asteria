@@ -117,7 +117,7 @@ desktop アプリは、このコンピューターのフォルダをライブラ
 
 - 初回、サーバーが未登録なら「このコンピューター」を選び、ライブラリのフォルダを選ぶ（既にライブラリのフォルダはそのまま使う）。アプリはサーバーの設定ファイルを既定の場所に書き、名前 `desktop` の API キーを作り、サーバーを「このコンピューター」（`http://127.0.0.1:7810`、music は `:7811`）として登録して選ぶ。続けて、サーバーをバックグラウンドで動かし続けるかを尋ねる（Linux は systemd のユーザーユニット、macOS は LaunchAgent、Windows はタスクスケジューラーのログオン時のタスク）。断ったときは `asteria-photos serve` で自分で起動する。最後に、見つかった外部ツールを出す。
 - 設定 › ローカルサーバーでは、ライブラリと待ち受けアドレスの表示、バックグラウンドのサービスの登録・起動・停止・削除、ライブラリの API キーの管理（スマートフォンやほかのコンピューターごとに足し、使わなくなったものは外す）、外部ツールの有無の表示ができる。ローカルサーバーがまだ無いときは、「ローカルサーバーを用意する」ボタンで初回の手順をもう一度たどれる。
-- サーバーはサムネイルを外部ツールで作る。無くてもサーバーは動き、サムネイルが作れないだけ。サーバーが動くマシンに入れる：
+- サムネイルの多くはサーバー自身が作り、外部ツールは、サーバーが読めないもの（HEIC・AVIF・一部のカメラの RAW・非常に大きな画像）と動画の分を補う。無くてもサーバーは動く。サーバーが動くマシンに入れる：
   - `vipsthumbnail`（libvips に含まれる）：サーバー自身ではデコードできない HEIC・AVIF・一部のカメラの RAW の写真のサムネイル（多くは macOS のシステムの `sips` でも代わりに作れる）。Debian/Ubuntu は `sudo apt install libvips-tools`（ほかのディストリビューションも似た名前のパッケージ）、macOS は `brew install vips`、Windows は github.com/libvips/build-win64-mxe/releases の libvips を入れ、その `bin` フォルダを `PATH` に足す。
   - `ffmpeg`：photos の動画のサムネイル（music は使わない。オフライン用のコピーは自分で作る）。`sudo apt install ffmpeg`、`brew install ffmpeg`、Windows は ffmpeg.org/download.html から入れ、その `bin` フォルダを `PATH` に足す。
   - desktop アプリの Windows と macOS のパッケージには、そのアプリが使うものがはじめから入っている（photos：macOS は ffmpeg で、`vipsthumbnail` の代わりにシステムの `sips` を使う。Windows は両方。music：何もない）。
