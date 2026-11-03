@@ -35,7 +35,7 @@ asteria-desktop-not-running = サーバーは動いていません。起動す�
 # 外部ツール。
 asteria-desktop-tools-title = 外部ツール
 asteria-desktop-tools-intro = サーバーはこれらのプログラムでサムネイルを作ります。無くてもサーバーは動きますが、サムネイルは作られません。
-asteria-desktop-tools-vips-purpose = 画像のサムネイル。
+asteria-desktop-tools-vips-purpose = HEIC・AVIF と一部のカメラの RAW のサムネイル。
 asteria-desktop-tools-ffmpeg-purpose = 動画のサムネイル。
 asteria-desktop-tools-found = 見つかりました：{ $path }
 asteria-desktop-tools-missing = 見つかりません。

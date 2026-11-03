@@ -14,7 +14,7 @@ desktop アプリは、ウィンドウ、サーバーのコマンドライン（
 
 インストールしたアプリは1日ごとに新しいリリースを探してバックグラウンドで落とし、署名を確かめて、利用者が選んだとき（設定 › 情報）か次の起動時に適用する（リリースの `.sig` と `asteria-<app>-latest.json` はアプリが読むもの。`.app.tar.gz` は macOS のアプリの更新用）。
 
-- Windows と macOS のパッケージには、サーバーが使う外部ツール（photos には ffmpeg、Windows では両アプリに libvips の `vipsthumbnail`。macOS の music には何も要らない）が入っている。ライセンスは `tools/LICENSES`（ffmpeg は GPLv3、libvips は LGPL）。Linux ではパッケージマネージャーで入れる（[このコンピューターのサーバー](#このコンピューターのサーバー)を参照）。
+- Windows と macOS のパッケージには、サーバーが使う外部ツール（photos にだけ ffmpeg、Windows では libvips の `vipsthumbnail`。music には何も要らない）が入っている。ライセンスは `tools/LICENSES`（ffmpeg は GPLv3、libvips は LGPL）。Linux ではパッケージマネージャーで入れる（[このコンピューターのサーバー](#このコンピューターのサーバー)を参照）。
 - Windows のインストーラーはまだ署名していないので、実行の前に SmartScreen が警告する（「詳細情報」›「実行」）。macOS のアプリは、リリースのワークフローに Developer ID があれば署名と公証つきになる。それまでは Gatekeeper が最初は開かない（システム設定 › プライバシーとセキュリティの「このまま開く」で許可する）。
 
 ウィンドウの無いサーバーは `asteria-photos-headless-<platform>` と `asteria-music-headless-<platform>`（`linux-x86_64`、`linux-aarch64`、`macos-aarch64`、`windows-x86_64.exe`）。ファイル名を `asteria-photos`（または `asteria-music`。Windows では `.exe` を残す）に変え、実行できるようにして `PATH` に置く。`asteria-photos update` で最新のリリースに置き換わる（`--check` は有無を知らせるだけ、`-y` は確認しない）。置き換えた後は、動いている `serve` を起動し直す。プレリリース（rc）のバイナリには、`update` は後のプレリリースを勧めないので、それは手でダウンロードする。`cargo install` で入れたサーバーは `cargo install` で更新し、desktop アプリは自分で更新する。
@@ -42,7 +42,7 @@ asteria-photos serve
 - 1つのホストで1つのライブラリを扱うサーバーは1つだけ。`serve` はデータディレクトリの `server.lock` をロックし、同じホストの2つ目はエラーで終了する。
 - 設定ファイルに `[[token]]` がある以前の版からの更新：それを開いた最初のコマンドが、`[[token]]` を API キー `token-1`、`token-2`… として取り込み、設定ファイルをそれ抜きで書き直す（ファイル中のコメントは消える。ファイルが読み取り専用なら、サーバーは警告を出すので `[[token]]` を手で消す）。トークンはそのまま使えるが、ほかのユーザーに発行したトークンも所有者として動くようになる。
 - 別々のホストのサーバーが、1つのライブラリを（NFS などで）共有してよい（本番と試験用のサーバーなど）。ジャーナル、キャッシュ、未完了のアップロードはサーバーごとに持つ。ファイルの監視はほかの NFS ホストからの変更に気づかないので、そうした変更は定期的な再スキャン（15分ごと）か `library.rescan` で反映される。アップロードの重複の確認は、そのサーバーがスキャンしたものしか知らない。同じホストで同じライブラリのサーバーを2つ動かすことはできない（キャッシュとデータディレクトリを共有してしまう）。
-- サムネイルには `vipsthumbnail`（libvips-tools）、動画には `ffmpeg` が必要（`PATH` から探す。`ASTERIA_VIPSTHUMBNAIL` と `ASTERIA_FFMPEG` で場所を指すこともできる）。ログは `RUST_LOG` で調整（既定 `info`）。
+- よくある形式（JPEG・PNG・WebP・GIF・TIFF、RAW のプレビュー）のサムネイルはサーバー自身が作る。`vipsthumbnail`（libvips-tools）が要るのは HEIC・AVIF・一部のカメラの RAW・とても大きい画像だけで、動画には `ffmpeg` が必要（`PATH` から探す。`ASTERIA_VIPSTHUMBNAIL` と `ASTERIA_FFMPEG` で場所を指すこともできる）。ログは `RUST_LOG` で調整（既定 `info`）。
 
 ## music サーバーの起動
 
@@ -62,7 +62,7 @@ asteria-music serve
 - プレイリストは、ライブラリ内の `.m3u8` と `.m3u` のファイル。ファイルが移動したエントリは、プレイリストにコンテンツハッシュがあればそれで見つけ直す。見つからないエントリは「見つからない」として返す。
 - タグとプレイリストは読むだけ。サーバーが音楽ファイルやプレイリストに書き込むことはない。
 - アルバムのジャケットは、トラックに埋め込まれた画像、なければトラックのフォルダ、そこになければその上のアルバムのフォルダ（`CD1` のようなディスクのフォルダの場合）にある `cover`、`folder`、`front`、`album` という名前の画像（`.jpg`、`.jpeg`、`.png`、`.webp`）。
-- ジャケットには `vipsthumbnail`（libvips-tools。macOS ではシステムの `sips` で代わりに作る）が必要。なければその要求は 503 を返し、ほかは普通に動く。トラックのオフライン用の音声（Ogg Opus。原本が大きすぎる場所で聴くためのもの）は、サーバーが外部ツールなしで作る。
+- ジャケットは、サーバーが外部ツールなしで作る。トラックのオフライン用の音声（Ogg Opus。原本が大きすぎる場所で聴くためのもの）も、サーバーが外部ツールなしで作る。
 
 ## MCP クライアントの接続
 
@@ -118,9 +118,9 @@ desktop アプリは、このコンピューターのフォルダをライブラ
 - 初回、サーバーが未登録なら「このコンピューター」を選び、ライブラリのフォルダを選ぶ（既にライブラリのフォルダはそのまま使う）。アプリはサーバーの設定ファイルを既定の場所に書き、名前 `desktop` の API キーを作り、サーバーを「このコンピューター」（`http://127.0.0.1:7810`、music は `:7811`）として登録して選ぶ。続けて、サーバーをバックグラウンドで動かし続けるかを尋ねる（Linux は systemd のユーザーユニット、macOS は LaunchAgent、Windows はタスクスケジューラーのログオン時のタスク）。断ったときは `asteria-photos serve` で自分で起動する。最後に、見つかった外部ツールを出す。
 - 設定 › ローカルサーバーでは、ライブラリと待ち受けアドレスの表示、バックグラウンドのサービスの登録・起動・停止・削除、ライブラリの API キーの管理（スマートフォンやほかのコンピューターごとに足し、使わなくなったものは外す）、外部ツールの有無の表示ができる。ローカルサーバーがまだ無いときは、「ローカルサーバーを用意する」ボタンで初回の手順をもう一度たどれる。
 - サーバーはサムネイルを外部ツールで作る。無くてもサーバーは動き、サムネイルが作れないだけ。サーバーが動くマシンに入れる：
-  - `vipsthumbnail`（libvips に含まれる）：画像のサムネイルとカバー。Debian/Ubuntu は `sudo apt install libvips-tools`（ほかのディストリビューションも似た名前のパッケージ）、macOS は `brew install vips`、Windows は github.com/libvips/build-win64-mxe/releases の libvips を入れ、その `bin` フォルダを `PATH` に足す。
+  - `vipsthumbnail`（libvips に含まれる）：サーバー自身ではデコードできない HEIC・AVIF・一部のカメラの RAW の写真のサムネイル（多くは macOS のシステムの `sips` でも代わりに作れる）。Debian/Ubuntu は `sudo apt install libvips-tools`（ほかのディストリビューションも似た名前のパッケージ）、macOS は `brew install vips`、Windows は github.com/libvips/build-win64-mxe/releases の libvips を入れ、その `bin` フォルダを `PATH` に足す。
   - `ffmpeg`：photos の動画のサムネイル（music は使わない。オフライン用のコピーは自分で作る）。`sudo apt install ffmpeg`、`brew install ffmpeg`、Windows は ffmpeg.org/download.html から入れ、その `bin` フォルダを `PATH` に足す。
-  - desktop アプリの Windows と macOS のパッケージには、そのアプリが使うものがはじめから入っている（photos：macOS は ffmpeg で、`vipsthumbnail` が無ければ画像のサムネイルはシステムの `sips` で作る。Windows は両方。music：Windows は `vipsthumbnail`、macOS は何もない）。
+  - desktop アプリの Windows と macOS のパッケージには、そのアプリが使うものがはじめから入っている（photos：macOS は ffmpeg で、`vipsthumbnail` の代わりにシステムの `sips` を使う。Windows は両方。music：何もない）。
   - または `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` にプログラムの場所を入れる。入れなければ実行ファイルの横（パッケージが置く場所）、`PATH`、続けて `/opt/homebrew/bin` と `/usr/local/bin`（macOS）または `/usr/local/bin`（Linux）を探す。ページの「もう一度確かめる」で探し直す。
 
 ## photos クライアントからのアップロード

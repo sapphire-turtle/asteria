@@ -35,7 +35,7 @@ asteria-desktop-not-running = The server is not running. To start it, run:
 # The external tools.
 asteria-desktop-tools-title = External tools
 asteria-desktop-tools-intro = The server makes thumbnails with these programs. Without them it still runs, just without thumbnails.
-asteria-desktop-tools-vips-purpose = Image thumbnails.
+asteria-desktop-tools-vips-purpose = Thumbnails of HEIC, AVIF and some camera RAW files.
 asteria-desktop-tools-ffmpeg-purpose = Video thumbnails.
 asteria-desktop-tools-found = Found: { $path }
 asteria-desktop-tools-missing = Not found.

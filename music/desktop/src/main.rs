@@ -11,7 +11,6 @@ use asteria_framework_desktop::{
     AboutPage, LocalServerPage, LocalServerSpec, UPDATE_PUBKEY, first_run_pages, service_spec,
     take_setup_request,
 };
-use asteria_framework_server::Tool;
 use corundum_framework::egui;
 use corundum_framework::gui::first_run::FirstRun;
 use corundum_framework::gui::store::Store;
@@ -33,8 +32,8 @@ static LOCAL: LocalServerSpec = LocalServerSpec {
     server: asteria_music_server::spec,
     service,
     url: "http://127.0.0.1:7811",
-    // Cover thumbnails; offline audio is made in the server.
-    tools: &[Tool::Vipsthumbnail],
+    // Covers (embedded pictures) and offline audio are made in the server.
+    tools: &[],
 };
 
 /// What the package is: the data directory's name (and the update feed's,
@@ -240,6 +239,13 @@ mod tests {
     use asteria_framework_client::profiles::Token;
     use asteria_music_gui::app::Screen;
     use asteria_music_gui::player::fakes::{FakeOpener, FakeOutputs};
+
+    /// Covers come out of the music files and are made in the server; nothing external is
+    /// needed, so the Tools page and the About page's licence line name no tool.
+    #[test]
+    fn the_local_server_needs_no_external_tool() {
+        assert!(LOCAL.tools.is_empty());
+    }
 
     /// The app's files in `dir`: no cache.
     fn temp_paths(dir: &tempfile::TempDir) -> AppPaths {

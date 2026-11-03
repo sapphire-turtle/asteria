@@ -8,9 +8,10 @@ name: Release
 #   release-packager.yml): an AppImage for Linux, a DMG (and the `.app.tar.gz` its updates
 #   use) for macOS, one universal package, and an NSIS installer for Windows, each signed
 #   with the organization's minisign key, and the app's update feed
-#   `asteria-<app>-latest.json`, from which an installed app updates itself. On Windows both
-#   carry libvips, and photos also carries ffmpeg on Windows and macOS, pinned in
-#   packaging/tools.env (music makes its offline audio itself and needs no ffmpeg);
+#   `asteria-<app>-latest.json`, from which an installed app updates itself. Photos carries
+#   libvips on Windows (for HEIC, AVIF and some RAW) and ffmpeg on Windows and macOS, pinned
+#   in packaging/tools.env (music makes its covers and offline audio itself and carries no
+#   tool);
 # - each headless server as `asteria-<app>-headless-<os>-<arch>[.exe]`, which its `update`
 #   command looks for.
 #
@@ -123,9 +124,6 @@ jobs:
         fi
         cargo run --release --locked -p asteria-music-desktop --example music-icons \
           ${target[@]+"${target[@]}"} -- music/desktop/icons
-        if [ "$PACKAGE_OS" = windows ]; then
-          bash packaging/fetch-tools.sh windows music music/desktop/bundled
-        fi
 
   # The headless servers, named after their packages (the commands are `asteria-<app>`, as
   # in the desktop packages).
