@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <mask id="glyph">
+    <path d="M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" fill="#fff" stroke="#fff"/>
+    <g stroke="#000">
+      <path d="M16 4.5C16 7.47 16.45 7.74 19.03 6.25C16.45 7.74 16.45 8.26 19.03 9.75C16.45 8.26 16 8.53 16 11.5C16 8.53 15.55 8.26 12.97 9.75C15.55 8.26 15.55 7.74 12.97 6.25C15.55 7.74 16 7.47 16 4.5Z" fill="#000" stroke-width="1"/><path d="m6 18 3.5-3.5 4.5 4.5"/><path d="m13 17 2.5-2.5 3.5 3.5"/>
+    </g>
+  </mask>
+  <rect width="24" height="24" fill="#4F7FD9" mask="url(#glyph)"/>
+</svg>

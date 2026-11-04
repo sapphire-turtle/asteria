@@ -5,5 +5,19 @@
       <path d="M16 4.5C16 7.47 16.45 7.74 19.03 6.25C16.45 7.74 16.45 8.26 19.03 9.75C16.45 8.26 16 8.53 16 11.5C16 8.53 15.55 8.26 12.97 9.75C15.55 8.26 15.55 7.74 12.97 6.25C15.55 7.74 16 7.47 16 4.5Z" fill="#000" stroke-width="1"/><path d="m6 18 3.5-3.5 4.5 4.5"/><path d="m13 17 2.5-2.5 3.5 3.5"/>
     </g>
   </mask>
-  <rect width="24" height="24" fill="#4F7FD9" mask="url(#glyph)"/>
+  <defs>
+    <linearGradient id="shade" x1="0" y1="0" x2="0" y2="24" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity=".22"/>
+      <stop offset="1" stop-color="#000" stop-opacity=".22"/>
+    </linearGradient>
+  </defs>
+  <g mask="url(#glyph)">
+    <path d="M12 12 12.00 -8.00 29.32 2.00Z" fill="#7197E0" stroke="#7197E0" stroke-width=".12"/>
+    <path d="M12 12 29.32 2.00 29.32 22.00Z" fill="#92B0E7" stroke="#92B0E7" stroke-width=".12"/>
+    <path d="M12 12 29.32 22.00 12.00 32.00Z" fill="#4F7FD9" stroke="#4F7FD9" stroke-width=".12"/>
+    <path d="M12 12 12.00 32.00 -5.32 22.00Z" fill="#2D67D2" stroke="#2D67D2" stroke-width=".12"/>
+    <path d="M12 12 -5.32 22.00 -5.32 2.00Z" fill="#2656B0" stroke="#2656B0" stroke-width=".12"/>
+    <path d="M12 12 -5.32 2.00 12.00 -8.00Z" fill="#2D67D2" stroke="#2D67D2" stroke-width=".12"/>
+    <rect width="24" height="24" fill="url(#shade)"/>
+  </g>
 </svg>
