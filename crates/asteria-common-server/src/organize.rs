@@ -26,7 +26,7 @@ use grain_id::GrainId;
 
 use crate::cache::{Cache, ExtraRecord, ItemRecord, SidecarSnapshot, StoredHash, item_id_for};
 use crate::ext::{AppExtension, ExtContext, Rewrite};
-use crate::fsutil::move_no_clobber;
+use crate::fsutil::{DirError, check_dirs_inside, create_dirs_inside, move_no_clobber};
 use crate::rpc::rpc_error;
 use crate::scan::{extract_guarded, mtime_ns};
 
@@ -137,6 +137,7 @@ pub(crate) fn check(ctx: &OpCtx, op: &PlannedOp, sim: &Sim) -> Result<(), SkipRe
     // A trash destination is new for every operation, so it is always free.
     if let Target::Path(to) = &op.to {
         let root = ctx.library.root();
+        check_dirs_inside(root, folder_of(to)).map_err(|e| dir_skip(to, e))?;
         let blocked = sim.taken.contains(to)
             || (!sim.freed.contains(to)
                 && (exists(&root.join(to)).map_err(|e| io_skip("cannot stat target", to, &e))?
@@ -147,6 +148,23 @@ pub(crate) fn check(ctx: &OpCtx, op: &PlannedOp, sim: &Sim) -> Result<(), SkipRe
         }
     }
     Ok(())
+}
+
+/// The folder part of the library-relative `rel` (`""` at the top).
+fn folder_of(rel: &str) -> &str {
+    rel.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+/// A destination folder that is a link is [`SkipReason::Symlink`]: going through it could
+/// put the file outside the library (#32).
+fn dir_skip(to: &str, e: DirError) -> SkipReason {
+    match e {
+        DirError::Linked(dir) => {
+            tracing::warn!(path = %to, folder = %dir, "the target folder is a link");
+            SkipReason::Symlink
+        }
+        DirError::Io(e) => io_skip("cannot check target folder", to, &e),
+    }
 }
 
 fn exists(p: &Path) -> std::io::Result<bool> {
@@ -217,9 +235,10 @@ pub(crate) fn apply(ctx: &OpCtx, op: &PlannedOp) -> Result<Done, SkipReason> {
     let has_sidecar =
         exists(&from_sidecar).map_err(|e| io_skip("cannot stat sidecar", &op.from, &e))?;
 
-    if let Some(parent) = to_abs.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| io_skip("cannot create folder", &to, &e))?;
-    }
+    create_dirs_inside(root, folder_of(&to)).map_err(|e| match e {
+        DirError::Io(e) => io_skip("cannot create folder", &to, &e),
+        linked => dir_skip(&to, linked),
+    })?;
     move_no_clobber(&from_abs, &to_abs).map_err(|e| match e.kind() {
         ErrorKind::AlreadyExists => SkipReason::TargetExists,
         ErrorKind::NotFound => SkipReason::Missing,
@@ -1069,6 +1088,36 @@ mod tests {
         };
         assert_eq!(apply(&e.ctx(), &link).unwrap_err(), SkipReason::Symlink);
         assert!(e.path("b.jpg").exists());
+    }
+
+    /// A target folder that is a link, at any depth, is skipped and nothing leaves the
+    /// library (#32); dry run agrees.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_target_folder_is_skipped() {
+        let e = Env::new();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), e.path("Archive")).unwrap();
+        std::fs::create_dir(e.path("Photos")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), e.path("Photos/2026")).unwrap();
+        for to_path in ["Archive/c.jpg", "Archive/new/c.jpg", "Photos/2026/05/c.jpg"] {
+            let op = e.op("a.jpg", to(to_path));
+            assert_eq!(
+                check(&e.ctx(), &op, &Sim::default()),
+                Err(SkipReason::Symlink),
+                "{to_path}"
+            );
+            assert_eq!(
+                apply(&e.ctx(), &op).unwrap_err(),
+                SkipReason::Symlink,
+                "{to_path}"
+            );
+        }
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+        assert!(e.path("a.jpg").exists() && e.path("a.jpg.xmp").exists());
+        // Below a real folder it still goes ahead, making the folders it needs.
+        apply(&e.ctx(), &e.op("a.jpg", to("Photos/2025/05/c.jpg"))).unwrap();
+        assert!(e.path("Photos/2025/05/c.jpg").exists());
     }
 
     #[cfg(unix)]

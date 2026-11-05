@@ -122,6 +122,7 @@ pub enum SkipReason {
     Changed,
     HashMismatch,
     TargetExists,
+    /// The source, or a folder on the way to the target, is a symbolic link (or a junction).
     Symlink,
     Io,
 }

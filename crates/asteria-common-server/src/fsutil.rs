@@ -2,7 +2,7 @@
 
 use std::fs::{self, File};
 use std::io::{self, ErrorKind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Whether a failed `hard_link` should be retried as check-then-rename: every error except
 /// `AlreadyExists`. Some filesystems (vfat, exFAT) report EPERM for hard links; if the
@@ -33,6 +33,107 @@ pub(crate) fn move_no_clobber(from: &Path, to: &Path) -> std::io::Result<()> {
         return Err(ErrorKind::AlreadyExists.into());
     }
     std::fs::rename(from, to)
+}
+
+/// Why [`create_dirs_inside`] did not make a folder.
+#[derive(Debug)]
+pub(crate) enum DirError {
+    /// The folder (library-relative, `/`-separated) is a symbolic link or a junction; going
+    /// through it could leave the library (#32).
+    Linked(String),
+    Io(io::Error),
+}
+
+/// Checks the folders of `rel` (library-relative, `/`-separated) that already exist below
+/// `root`, from the top down to the first missing one: each must be a real folder, not a
+/// symbolic link or a junction. `root` itself may be a link.
+pub(crate) fn check_dirs_inside(root: &Path, rel: &str) -> Result<(), DirError> {
+    let mut dir = root.to_path_buf();
+    for (i, part) in components(rel) {
+        dir.push(part);
+        match real_dir(&dir, &rel[..i]) {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Makes the folder `rel` (library-relative, `/`-separated) below `root` one level at a
+/// time, never through a symbolic link or a junction ([`check_dirs_inside`]), unlike
+/// `create_dir_all`. Returns the topmost folder it made, if any. On failure the folders it
+/// made are removed again.
+pub(crate) fn create_dirs_inside(root: &Path, rel: &str) -> Result<Option<PathBuf>, DirError> {
+    let mut dir = root.to_path_buf();
+    let mut top: Option<PathBuf> = None;
+    let undo = |top: &Option<PathBuf>, dir: &Path| {
+        if let Some(top) = top {
+            for d in dir.ancestors() {
+                let _ = fs::remove_dir(d);
+                if d == top {
+                    break;
+                }
+            }
+        }
+    };
+    for (i, part) in components(rel) {
+        dir.push(part);
+        let made = match real_dir(&dir, &rel[..i]) {
+            Ok(true) => continue,
+            Ok(false) => fs::create_dir(&dir),
+            Err(e) => {
+                dir.pop();
+                undo(&top, &dir);
+                return Err(e);
+            }
+        };
+        match made {
+            Ok(()) => {
+                top.get_or_insert_with(|| dir.clone());
+            }
+            // Made meanwhile by someone else: it must be a real folder, too.
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                if let Err(e) = real_dir(&dir, &rel[..i])
+                    .and_then(|real| if real { Ok(()) } else { Err(DirError::Io(e)) })
+                {
+                    dir.pop();
+                    undo(&top, &dir);
+                    return Err(e);
+                }
+            }
+            Err(e) => {
+                dir.pop();
+                undo(&top, &dir);
+                return Err(DirError::Io(e));
+            }
+        }
+    }
+    Ok(top)
+}
+
+/// The non-empty components of `rel`, each with the length of `rel` up to its end.
+fn components(rel: &str) -> impl Iterator<Item = (usize, &str)> {
+    rel.split('/')
+        .scan(0, |end, part| {
+            let start = *end;
+            *end = start + part.len() + 1;
+            Some((start + part.len(), part))
+        })
+        .filter(|(_, part)| !part.is_empty())
+}
+
+/// Whether `dir` is a real folder (`false`: it does not exist); a link is
+/// [`DirError::Linked`], named by `rel`.
+fn real_dir(dir: &Path, rel: &str) -> Result<bool, DirError> {
+    match dir.symlink_metadata() {
+        // Junctions are links too (std counts every name-surrogate reparse point).
+        Ok(m) if m.file_type().is_symlink() => Err(DirError::Linked(rel.to_string())),
+        Ok(m) if m.is_dir() => Ok(true),
+        Ok(_) => Err(DirError::Io(ErrorKind::NotADirectory.into())),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(DirError::Io(e)),
+    }
 }
 
 /// How [`stage`] put a file's content on the target filesystem.
@@ -279,6 +380,62 @@ mod tests {
         let r = std::panic::catch_unwind(|| test_hook::cross_device(|| panic!("in the hook")));
         assert!(r.is_err());
         assert!(!test_hook::is_cross_device());
+    }
+
+    #[test]
+    fn folders_are_made_one_level_at_a_time() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("lib");
+        std::fs::create_dir_all(root.join("Archive")).unwrap();
+        let top = create_dirs_inside(&root, "Archive/2026/05").unwrap();
+        assert_eq!(top, Some(root.join("Archive/2026")));
+        assert!(root.join("Archive/2026/05").is_dir());
+        assert_eq!(create_dirs_inside(&root, "Archive/2026/05").unwrap(), None);
+        assert_eq!(create_dirs_inside(&root, "").unwrap(), None);
+        assert!(check_dirs_inside(&root, "Archive/2026/05/x/y").is_ok());
+    }
+
+    /// A link anywhere below the root stops, before anything is made; the root may be one.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_folder_below_the_root_stops() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let (real, outside) = (d.path().join("real"), d.path().join("outside"));
+        std::fs::create_dir_all(real.join("Archive")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let root = d.path().join("lib");
+        symlink(&real, &root).unwrap();
+        symlink(&outside, real.join("Archive/2026")).unwrap();
+        symlink(&outside, real.join("Out")).unwrap();
+
+        for (rel, linked) in [("Out/x", "Out"), ("Archive/2026/05", "Archive/2026")] {
+            match check_dirs_inside(&root, rel) {
+                Err(DirError::Linked(l)) => assert_eq!(l, linked),
+                r => panic!("{rel}: {r:?}"),
+            }
+            match create_dirs_inside(&root, rel) {
+                Err(DirError::Linked(l)) => assert_eq!(l, linked),
+                r => panic!("{rel}: {r:?}"),
+            }
+        }
+        assert!(names(&outside).is_empty());
+        // Through the linked root itself is fine.
+        assert_eq!(
+            create_dirs_inside(&root, "Archive/2025").unwrap(),
+            Some(root.join("Archive/2025"))
+        );
+        assert!(real.join("Archive/2025").is_dir());
+    }
+
+    #[test]
+    fn a_file_in_the_way_is_an_error() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("f"), b"").unwrap();
+        assert!(matches!(
+            create_dirs_inside(d.path(), "f/x"),
+            Err(DirError::Io(_))
+        ));
     }
 
     #[test]
