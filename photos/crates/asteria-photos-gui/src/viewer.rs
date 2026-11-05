@@ -6,10 +6,10 @@
 //! the neighbours' too so a step shows at once: three previews, well within the loader's
 //! budget of eight.
 
-use asteria_framework_api::MediaKind;
-use asteria_framework_client::errors::error_text;
-use asteria_framework_client::images::{ImageState, Preset};
-use asteria_framework_client::session::Session;
+use asteria_common_api::MediaKind;
+use asteria_common_client::errors::error_text;
+use asteria_common_client::images::{ImageState, Preset};
+use asteria_common_client::session::Session;
 use corundum_framework::egui;
 use corundum_framework::gui::{icons, tr};
 

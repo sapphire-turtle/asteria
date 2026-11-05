@@ -25,11 +25,11 @@
 
 use std::time::{Duration, Instant};
 
-use asteria_framework_api::{ItemId, MediaItem, MediaKind, MediaUpdateParams, codes};
-use asteria_framework_client::errors::{error_detail, error_text};
-use asteria_framework_client::images::{ImageState, Preset};
-use asteria_framework_client::rpc::ClientError;
-use asteria_framework_client::session::{Reply, Request, RequestId, Response, Session};
+use asteria_common_api::{ItemId, MediaItem, MediaKind, MediaUpdateParams, codes};
+use asteria_common_client::errors::{error_detail, error_text};
+use asteria_common_client::images::{ImageState, Preset};
+use asteria_common_client::rpc::ClientError;
+use asteria_common_client::session::{Reply, Request, RequestId, Response, Session};
 use corundum_framework::egui;
 use corundum_framework::gui::theme::{self, Swatch, Tone};
 use corundum_framework::gui::{icons, tr};

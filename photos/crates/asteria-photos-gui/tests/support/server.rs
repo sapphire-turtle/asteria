@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use asteria_framework::{Library, MediaKind};
-use asteria_framework_server::keys::{KeyStore, KeyVerifier};
-use asteria_framework_server::upload::UploadStore;
-use asteria_framework_server::{
+use asteria_common_core::{Library, MediaKind};
+use asteria_common_server::keys::{KeyStore, KeyVerifier};
+use asteria_common_server::upload::UploadStore;
+use asteria_common_server::{
     AppExtension, AppState, Cache, Processor, hash_pending, router, scan, spawn_writer,
 };
 
@@ -46,7 +46,7 @@ impl TestServer {
         );
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
         let red = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../crates/asteria-framework/tests/fixtures/red.jpg");
+            .join("../../../crates/asteria-common-core/tests/fixtures/red.jpg");
         for f in files {
             std::fs::copy(&red, root.join(f)).unwrap();
         }
@@ -61,7 +61,7 @@ impl TestServer {
             .add(
                 "owner",
                 None,
-                asteria_framework_server::keys::ProfileId::new("owner").unwrap(),
+                asteria_common_server::keys::ProfileId::new("owner").unwrap(),
             )
             .unwrap()
             .1

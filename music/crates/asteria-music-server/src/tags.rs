@@ -138,7 +138,7 @@ mod tests {
 
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../crates/asteria-framework/tests/fixtures")
+            .join("../../../crates/asteria-common-core/tests/fixtures")
             .join(name)
     }
 

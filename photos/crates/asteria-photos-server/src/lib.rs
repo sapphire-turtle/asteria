@@ -3,9 +3,9 @@
 
 use std::sync::Arc;
 
-use asteria_framework::MediaKind;
-use asteria_framework_server::AppExtension;
-use asteria_framework_server::cli::AppSpec;
+use asteria_common_core::MediaKind;
+use asteria_common_server::AppExtension;
+use asteria_common_server::cli::AppSpec;
 use asteria_photos_api::{APP, APP_API};
 
 /// Photos shows images and videos.
@@ -17,7 +17,7 @@ impl AppExtension for PhotosExtension {
     }
 }
 
-/// The photos server, for `asteria_framework_server::cli::main`.
+/// The photos server, for `asteria_common_server::cli::main`.
 pub fn spec() -> AppSpec {
     AppSpec {
         app: APP,

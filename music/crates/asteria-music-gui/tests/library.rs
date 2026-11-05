@@ -5,7 +5,7 @@ mod support;
 
 use std::time::Duration;
 
-use asteria_framework_client::rpc::ClientError;
+use asteria_common_client::rpc::ClientError;
 use asteria_music_api::{AlbumId, ArtistId, PlaylistId};
 use asteria_music_gui::app::{MusicApp, Screen};
 use asteria_music_gui::library::TrackList;

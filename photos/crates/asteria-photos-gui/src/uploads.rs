@@ -4,9 +4,9 @@
 //! The list is the engine's snapshot, taken every frame (it is only an `Arc` clone); only the
 //! rows in view are drawn, so thousands of groups cost no more than a screenful.
 
-use asteria_framework_client::errors::error_text;
-use asteria_framework_client::upload::queue::{GroupId, GroupState, QueueSummary, QueuedGroup};
-use asteria_framework_client::upload::{PlanWarning, UploadSnapshot, Uploads, UploadsState};
+use asteria_common_client::errors::error_text;
+use asteria_common_client::upload::queue::{GroupId, GroupState, QueueSummary, QueuedGroup};
+use asteria_common_client::upload::{PlanWarning, UploadSnapshot, Uploads, UploadsState};
 use corundum_framework::egui;
 use corundum_framework::gui::{icons, tr};
 

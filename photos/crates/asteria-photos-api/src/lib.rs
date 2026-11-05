@@ -1,6 +1,6 @@
 //! Wire types shared between the asteria-photos server and its clients.
 
-pub use asteria_framework_api::*;
+pub use asteria_common_api::*;
 
 /// Application identifier sent in the handshake.
 pub const APP: &str = "asteria-photos";

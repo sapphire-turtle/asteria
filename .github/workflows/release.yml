@@ -16,7 +16,7 @@ name: Release
 #   command looks for.
 #
 # Secrets (`secrets: inherit`): PACKAGER_SIGN_PRIVATE_KEY and its password sign the packages,
-# for the public key in crates/asteria-framework-desktop/src/package.rs; the macOS package is
+# for the public key in crates/asteria-common-desktop/src/package.rs; the macOS package is
 # signed with a Developer ID and notarized when the repository has the MACOS_CERTIFICATE and
 # APPLE_API_KEY secrets. The Windows installer is not signed yet, so SmartScreen warns before
 # it runs.

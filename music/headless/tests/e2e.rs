@@ -208,7 +208,7 @@ mod linux {
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../crates/asteria-framework/tests/fixtures")
+            .join("../../crates/asteria-common-core/tests/fixtures")
             .join(name)
     }
 

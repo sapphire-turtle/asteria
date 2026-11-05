@@ -5,8 +5,8 @@ mod support;
 
 use std::path::{Path, PathBuf};
 
-use asteria_framework_client::upload::UploadSnapshot;
-use asteria_framework_client::upload::queue::{GroupId, GroupState, QueueSummary, QueuedGroup};
+use asteria_common_client::upload::UploadSnapshot;
+use asteria_common_client::upload::queue::{GroupId, GroupState, QueueSummary, QueuedGroup};
 use asteria_photos_gui::app::{PhotosApp, Screen};
 use asteria_photos_gui::uploads::{Actions, actions, done_warnings, status_counts};
 use corundum_framework::egui;
@@ -16,7 +16,7 @@ use support::*;
 
 fn red() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../crates/asteria-framework/tests/fixtures/red.jpg")
+        .join("../../../crates/asteria-common-core/tests/fixtures/red.jpg")
 }
 
 /// A JPEG that differs from red.jpg (and from every other `n`) by trailing bytes.
@@ -278,7 +278,7 @@ fn a_dropped_sidecar_is_reported_on_its_row() {
     let src = tempfile::tempdir().unwrap();
     jpeg(&src.path().join("a.jpg"), 3);
     let broken = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../crates/asteria-framework/tests/fixtures/xmp/malformed.xmp");
+        .join("../../../crates/asteria-common-core/tests/fixtures/xmp/malformed.xmp");
     std::fs::copy(broken, src.path().join("a.jpg.xmp")).unwrap();
 
     app.drop_files(vec![src.path().join("a.jpg"), src.path().join("a.jpg.xmp")]);

@@ -7,7 +7,7 @@
 //!
 //! The side pane beside every screen shows the same track, larger ([`side`]).
 
-use asteria_framework_client::images::{ImageLoader, Preset};
+use asteria_common_client::images::{ImageLoader, Preset};
 use corundum_framework::egui::{self, Align, Layout, Sense, vec2};
 use corundum_framework::gui::{icons, tr};
 

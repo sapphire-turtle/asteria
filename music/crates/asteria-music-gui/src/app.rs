@@ -13,13 +13,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use asteria_framework_client::errors::{error_detail, error_text};
-use asteria_framework_client::profiles::{ProfileId, Profiles, ServerProfile, Token};
-use asteria_framework_client::saver::Saver;
-use asteria_framework_client::session::{SessionDirs, SessionState};
-use asteria_framework_client::settings::ExtraSettingsPage;
-use asteria_framework_client::settings::servers::{ServersChange, ServersPage};
-use asteria_framework_client::widgets::server_switcher::{ServerSwitcher, SwitcherAction};
+use asteria_common_client::errors::{error_detail, error_text};
+use asteria_common_client::profiles::{ProfileId, Profiles, ServerProfile, Token};
+use asteria_common_client::saver::Saver;
+use asteria_common_client::session::{SessionDirs, SessionState};
+use asteria_common_client::settings::ExtraSettingsPage;
+use asteria_common_client::settings::servers::{ServersChange, ServersPage};
+use asteria_common_client::widgets::server_switcher::{ServerSwitcher, SwitcherAction};
 use asteria_music_api::{AlbumId, ArtistId, PlaylistId};
 use corundum_framework::egui;
 use corundum_framework::gui::settings::{ListItem, SettingsLayout, SettingsSection};
@@ -263,7 +263,7 @@ impl MusicApp {
 
     /// Use the server `id` from now on: saved as the one in use, connected afresh. Choosing the
     /// server in use again only reconnects if it had failed or stopped answering
-    /// ([`Session::degraded`](asteria_framework_client::session::Session::degraded)).
+    /// ([`Session::degraded`](asteria_common_client::session::Session::degraded)).
     pub fn switch_to(&mut self, id: ProfileId) {
         self.state.switch_to(id);
     }

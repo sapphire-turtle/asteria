@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use asteria_framework::MediaKind;
-use asteria_framework_server::{
+use asteria_common_core::MediaKind;
+use asteria_common_server::{
     AppExtension, ExtContext, ItemRecord, McpTool, Rewrite, ServerError, ThumbSource,
 };
 use serde_json::json;
@@ -288,7 +288,7 @@ impl AppExtension for MusicExtension {
 
 #[cfg(test)]
 mod tests {
-    use asteria_framework_server::AppExtension;
+    use asteria_common_server::AppExtension;
     use asteria_music_api::*;
     use serde::de::DeserializeOwned;
     use serde_json::{Value, json};

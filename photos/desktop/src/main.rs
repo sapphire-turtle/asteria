@@ -8,12 +8,12 @@
 use std::error::Error;
 use std::path::PathBuf;
 
-use asteria_framework_client::profiles::Profiles;
-use asteria_framework_desktop::{
+use asteria_common_client::profiles::Profiles;
+use asteria_common_desktop::{
     AboutPage, LocalServerPage, LocalServerSpec, UPDATE_PUBKEY, first_run_pages, service_spec,
     take_setup_request,
 };
-use asteria_framework_server::Tool;
+use asteria_common_server::Tool;
 use corundum_framework::egui;
 use corundum_framework::gui::first_run::FirstRun;
 use corundum_framework::gui::store::Store;
@@ -140,10 +140,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Before `start`, so that what goes wrong in the package's install hooks is logged; not
     // for `serve`, whose server sets up its own logging.
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    if asteria_framework_desktop::entry(&args) != asteria_framework_desktop::Entry::Serve {
+    if asteria_common_desktop::entry(&args) != asteria_common_desktop::Entry::Serve {
         init_logging();
     }
-    let instance = asteria_framework_desktop::start(&LOCAL, &PACKAGE);
+    let instance = asteria_common_desktop::start(&LOCAL, &PACKAGE);
     run(instance)
 }
 
@@ -165,7 +165,7 @@ impl DesktopApp {
     /// app. A `servers.toml` that cannot be read goes to the app, which says so.
     fn new(paths: AppPaths, ctx: &egui::Context) -> DesktopApp {
         asteria_photos_gui::i18n::register(ctx);
-        asteria_framework_desktop::register(ctx);
+        asteria_common_desktop::register(ctx);
         let needed = Profiles::load(&paths.servers)
             .is_ok_and(|servers| first_run_needed(&servers, FirstRun::done(ctx)));
         let stage = if needed {
@@ -238,7 +238,7 @@ impl corundum_framework::eframe::App for DesktopApp {
 /// `start` took, kept by the window.
 fn run(instance: Instance) -> Result<(), Box<dyn Error>> {
     // Before anything opens the settings: on Windows they move from Roaming to Local.
-    asteria_framework_client::migrate_dirs(APP_NAME)?;
+    asteria_common_client::migrate_dirs(APP_NAME)?;
     let dirs = AppDirs::new(APP_NAME).ok_or("this system has no config or cache directory")?;
     let paths = paths(&dirs);
     let options = WindowOptions::new(APP_NAME)
@@ -254,7 +254,7 @@ fn run(instance: Instance) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asteria_framework_client::profiles::Token;
+    use asteria_common_client::profiles::Token;
     use asteria_photos_gui::app::Screen;
 
     /// A file dropped on the window, as the OS hands it over.
@@ -404,7 +404,7 @@ mod tests {
         assert!(FirstRun::done(&ctx));
 
         // "Set up a local server" in Settings brings a new first run back, from its start.
-        asteria_framework_desktop::request_setup(&ctx);
+        asteria_common_desktop::request_setup(&ctx);
         frame(&ctx, &mut window, Vec::new());
         assert!(matches!(window.stage, Stage::FirstRun(_)));
         let output = frame(&ctx, &mut window, Vec::new());

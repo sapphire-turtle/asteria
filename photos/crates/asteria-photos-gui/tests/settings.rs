@@ -6,7 +6,7 @@ mod support;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use asteria_framework_client::settings::ExtraSettingsPage;
+use asteria_common_client::settings::ExtraSettingsPage;
 use asteria_photos_gui::app::{AppPaths, PhotosApp, Screen};
 use corundum_framework::egui;
 

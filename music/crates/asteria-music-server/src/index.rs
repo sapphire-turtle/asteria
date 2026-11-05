@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
-use asteria_framework::ids::LibraryId;
+use asteria_common_core::ids::LibraryId;
 use asteria_music_api::{AlbumId, ArtistId, TrackTags};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;

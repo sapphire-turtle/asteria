@@ -13,10 +13,10 @@
 
 use std::fmt::Debug;
 
-use asteria_framework_client::errors::{error_detail, error_text};
-use asteria_framework_client::images::ImageLoader;
-use asteria_framework_client::rpc::ClientError;
-use asteria_framework_client::session::{Reply, Request, RequestId, Response, Session};
+use asteria_common_client::errors::{error_detail, error_text};
+use asteria_common_client::images::ImageLoader;
+use asteria_common_client::rpc::ClientError;
+use asteria_common_client::session::{Reply, Request, RequestId, Response, Session};
 use asteria_music_api::{
     ALBUM_GET, ALBUM_LIST, ARTIST_GET, ARTIST_LIST, Album, AlbumId, AlbumListing, AlbumSummary,
     Artist, ArtistId, ArtistListing, ArtistSummary, EntryStatus, ListParams, MusicTrack,

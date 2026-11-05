@@ -13,11 +13,11 @@ name = "asteria-photos"
 path = "src/main.rs"
 
 [dependencies]
-asteria-framework-server = { path = "../../crates/asteria-framework-server" }
+asteria-common-server = { path = "../../crates/asteria-common-server" }
 asteria-photos-server = { path = "../crates/asteria-photos-server" }
 
 [dev-dependencies]
-asteria-framework = { path = "../../crates/asteria-framework" }
+asteria-common-core = { path = "../../crates/asteria-common-core" }
 reqwest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

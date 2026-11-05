@@ -14,15 +14,15 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use asteria_framework_api::ItemId;
-use asteria_framework_client::errors::{error_detail, error_text};
-use asteria_framework_client::profiles::{ProfileId, Profiles};
-use asteria_framework_client::profiles::{ServerProfile, Token};
-use asteria_framework_client::saver::Saver;
-use asteria_framework_client::session::{SessionDirs, SessionState};
-use asteria_framework_client::settings::ExtraSettingsPage;
-use asteria_framework_client::settings::servers::{ServersChange, ServersPage};
-use asteria_framework_client::widgets::server_switcher::{ServerSwitcher, SwitcherAction};
+use asteria_common_api::ItemId;
+use asteria_common_client::errors::{error_detail, error_text};
+use asteria_common_client::profiles::{ProfileId, Profiles};
+use asteria_common_client::profiles::{ServerProfile, Token};
+use asteria_common_client::saver::Saver;
+use asteria_common_client::session::{SessionDirs, SessionState};
+use asteria_common_client::settings::ExtraSettingsPage;
+use asteria_common_client::settings::servers::{ServersChange, ServersPage};
+use asteria_common_client::widgets::server_switcher::{ServerSwitcher, SwitcherAction};
 use corundum_framework::egui;
 use corundum_framework::gui::settings::{ListItem, SettingsLayout, SettingsSection};
 use corundum_framework::gui::{COMPACT_WIDTH, Destination, Shell, ShellApp, Side, icons, tr};
@@ -216,7 +216,7 @@ impl PhotosApp {
 
     /// Use the server `id` from now on: saved as the one in use, connected afresh, at the
     /// library's root. Choosing the server in use again only reconnects if it had failed or
-    /// stopped answering ([`Session::degraded`](asteria_framework_client::session::Session::degraded)).
+    /// stopped answering ([`Session::degraded`](asteria_common_client::session::Session::degraded)).
     pub fn switch_to(&mut self, id: ProfileId) {
         self.state.switch_to(id);
     }

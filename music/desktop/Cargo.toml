@@ -26,8 +26,8 @@ name = "music-icons"
 path = "examples/music-icons.rs"
 
 [dependencies]
-asteria-framework-client = { path = "../../crates/asteria-framework-client" }
-asteria-framework-desktop = { path = "../../crates/asteria-framework-desktop" }
+asteria-common-client = { path = "../../crates/asteria-common-client" }
+asteria-common-desktop = { path = "../../crates/asteria-common-desktop" }
 asteria-music-gui = { path = "../crates/asteria-music-gui" }
 asteria-music-server = { path = "../crates/asteria-music-server" }
 # The sound device the player plays on.

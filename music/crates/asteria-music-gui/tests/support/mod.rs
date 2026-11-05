@@ -5,14 +5,14 @@
 // Each test binary uses its own subset of these helpers.
 #![allow(dead_code)]
 
-#[path = "../../../../../crates/asteria-framework-client/tests/common/mod.rs"]
+#[path = "../../../../../crates/asteria-common-client/tests/common/mod.rs"]
 pub mod common;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use asteria_framework_client::profiles::{ProfileId, Profiles, Token};
+use asteria_common_client::profiles::{ProfileId, Profiles, Token};
 use asteria_music_api::{ItemId, MediaItem, MediaKind};
 use asteria_music_gui::app::{AppPaths, MusicApp};
 use asteria_music_gui::player::{HttpOpener, OpenerSettings, Player, QueueEntry};

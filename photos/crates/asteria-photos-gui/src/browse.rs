@@ -11,13 +11,11 @@
 
 use std::time::{Duration, Instant};
 
-use asteria_framework_api::{FolderListParams, ItemId, MediaItem};
-use asteria_framework_client::errors::{error_detail, error_text};
-use asteria_framework_client::rpc::ClientError;
-use asteria_framework_client::session::{
-    Reply, Request, RequestId, Response, Session, SessionState,
-};
-use asteria_framework_client::widgets::thumb_grid::ThumbGrid;
+use asteria_common_api::{FolderListParams, ItemId, MediaItem};
+use asteria_common_client::errors::{error_detail, error_text};
+use asteria_common_client::rpc::ClientError;
+use asteria_common_client::session::{Reply, Request, RequestId, Response, Session, SessionState};
+use asteria_common_client::widgets::thumb_grid::ThumbGrid;
 use corundum_framework::egui;
 use corundum_framework::gui::{icons, tr};
 

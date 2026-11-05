@@ -7,8 +7,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-asteria-framework = { path = "../../../crates/asteria-framework" }
-asteria-framework-server = { path = "../../../crates/asteria-framework-server" }
+asteria-common-core = { path = "../../../crates/asteria-common-core" }
+asteria-common-server = { path = "../../../crates/asteria-common-server" }
 asteria-music-api = { path = "../asteria-music-api" }
 blake3.workspace = true
 lofty.workspace = true

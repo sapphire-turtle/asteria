@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
-use asteria_framework_server::ThumbSource;
+use asteria_common_server::ThumbSource;
 use lofty::config::ParseOptions;
 use lofty::picture::{Picture, PictureType};
 use lofty::prelude::*;
@@ -192,7 +192,7 @@ mod tests {
 
     fn fixture(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../crates/asteria-framework/tests/fixtures")
+            .join("../../../crates/asteria-common-core/tests/fixtures")
             .join(name)
     }
 

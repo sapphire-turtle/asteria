@@ -13,7 +13,7 @@ name = "asteria-music"
 path = "src/main.rs"
 
 [dependencies]
-asteria-framework-server = { path = "../../crates/asteria-framework-server" }
+asteria-common-server = { path = "../../crates/asteria-common-server" }
 asteria-music-server = { path = "../crates/asteria-music-server" }
 
 [dev-dependencies]

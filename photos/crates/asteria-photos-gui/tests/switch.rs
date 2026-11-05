@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use asteria_framework_client::session::SessionState;
+use asteria_common_client::session::SessionState;
 use asteria_photos_gui::app::{AppPaths, PhotosApp, Screen};
 use corundum_framework::egui;
 
@@ -319,7 +319,7 @@ fn renaming_the_server_in_use_keeps_the_connection() {
     let generation = app.connection().unwrap().session().generation();
     let edit =
         |app: &mut PhotosApp,
-         change: &dyn Fn(&mut asteria_framework_client::settings::servers::ServerForm)| {
+         change: &dyn Fn(&mut asteria_common_client::settings::servers::ServerForm)| {
             let page = app.servers_page_mut();
             page.begin_edit(ids[0]);
             change(page.form_mut().unwrap());
@@ -332,7 +332,7 @@ fn renaming_the_server_in_use_keeps_the_connection() {
     assert_eq!(app.connection().unwrap().session().generation(), generation);
     assert_eq!(app.profiles().active().unwrap().name, "Renamed");
     let start = Instant::now();
-    while asteria_framework_client::profiles::Profiles::load(&fx.paths.servers)
+    while asteria_common_client::profiles::Profiles::load(&fx.paths.servers)
         .unwrap()
         .active()
         .unwrap()

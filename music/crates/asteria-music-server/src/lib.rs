@@ -10,12 +10,12 @@ mod tags;
 
 use std::sync::Arc;
 
-use asteria_framework_server::cli::AppSpec;
+use asteria_common_server::cli::AppSpec;
 use asteria_music_api::{APP, APP_API};
 
 use ext::MusicExtension;
 
-/// The music server, for `asteria_framework_server::cli::main`.
+/// The music server, for `asteria_common_server::cli::main`.
 pub fn spec() -> AppSpec {
     AppSpec {
         app: APP,
