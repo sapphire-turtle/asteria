@@ -46,8 +46,10 @@ tempfile.workspace = true
 # src/main.rs). Before packaging, the workflow renders the icons into `icons/` with the
 # `photos-icons` example, and packaging/fetch-tools.sh puts the tools the package carries
 # into `bundled/`: ffmpeg on Windows and macOS, libvips on Windows, and their licences. The
-# resources put them beside the executable on Windows and in `Contents/Resources` on macOS,
-# where the server looks; a source that is not there (Linux carries nothing) adds nothing.
+# resources put them where the server looks: on Windows in the install folder's `tools`
+# (ffmpeg and the licences) and `vips`, never in the folder itself, which is on the user's
+# `Path`; on macOS ffmpeg in `Contents/Resources`. A source that is not there (Linux carries
+# nothing, and `bundled/ffmpeg` exists only for macOS) adds nothing.
 [package.metadata.packager]
 productName = "Asteria Photos"
 identifier = "org.sapphire-turtle.asteria-photos"

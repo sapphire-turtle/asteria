@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Puts the external tools a desktop package carries (spec §5.9) into <dest>, the desktop
-# crate's `bundled/`, whose files [package.metadata.packager]'s resources put beside the
-# main executable on Windows and in the app's `Contents/Resources` on macOS, where the
-# server looks first:
+# crate's `bundled/`, whose files [package.metadata.packager]'s resources put in the install
+# folder on Windows (ffmpeg in its `tools` subfolder, as the folder itself is on the user's
+# `Path`) and in the app's `Contents/Resources` on macOS, where the server looks first:
 #
-#   photos on windows: <dest>/ffmpeg.exe and <dest>/vips/bin/vipsthumbnail.exe with
+#   photos on windows: <dest>/tools/ffmpeg.exe and <dest>/vips/bin/vipsthumbnail.exe with
 #                      libvips's DLLs (for HEIC, AVIF and some RAW; the server decodes the
 #                      common formats itself)
 #   photos on macos:   <dest>/ffmpeg, one universal binary of the arm64 and x86_64 builds
@@ -91,7 +91,7 @@ case $os in
       unzip -q "$work/ffmpeg.zip" -d "$work/ffmpeg"
       # The archive holds one directory named after its version.
       ffmpeg_dir=$(echo "$work"/ffmpeg/*/)
-      cp "$ffmpeg_dir/bin/ffmpeg.exe" "$dest/ffmpeg.exe"
+      cp "$ffmpeg_dir/bin/ffmpeg.exe" "$dest/tools/ffmpeg.exe"
       cp "$ffmpeg_dir/LICENSE.txt" "$licenses/ffmpeg-LICENSE.txt"
     fi
 
@@ -109,7 +109,7 @@ case $os in
     case $(uname -s) in
       MINGW* | MSYS* | CYGWIN*)
         if [ $ffmpeg = yes ]; then
-          check_encoders "$dest/ffmpeg.exe"
+          check_encoders "$dest/tools/ffmpeg.exe"
         fi
         "$dest/vips/bin/vipsthumbnail.exe" --vips-version
         ;;
@@ -150,4 +150,4 @@ case $os in
 esac
 
 echo "Tools in $dest:"
-find "$dest" -maxdepth 1
+find "$dest" -maxdepth 2

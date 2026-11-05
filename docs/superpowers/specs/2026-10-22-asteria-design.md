@@ -712,9 +712,9 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
 - **設定**：「情報」に更新の行（パッケージならダウンロード済みの更新を適用、それ以外はインストール方法に応じた案内）と、macOS・Linux では `CliRow`（`asteria-<app>` を PATH に置く）。Windows はインストールのフックで PATH に入れる。
 - **ランチャー**：`WindowOptions::launcher` でアプリのメニューに載せる（AppImage と cargo で入れた版。macOS・Windows のパッケージでは corundum が飛ばす）。
 - **外部ツール**
-  - 探す順番：`ASTERIA_*` の変数 → **実行ファイルの横（同梱。macOS の .app では `Contents/Resources` も）** → `PATH` → よく使われるディレクトリ。
-  - 同梱するツールは、ワークフローの `pre-package` で `packaging/fetch-tools.sh` が desktop のクレートの `bundled/` に置き、`[package.metadata.packager]` の `resources` がパッケージに入れる。Windows ではインストール先の実行ファイルの横、macOS では `Contents/Resources`（cargo-packager は resources をそこに置く）。無いソースは何も足さないので、OS やアプリで同梱するものが違っても設定は1つで済む。
-  - Windows は libvips（build-win64-mxe の `vips-dev-x64-all-<version>.zip`、DLL ごと）を `vips\bin\vipsthumbnail.exe` として photos に同梱する（HEIC・AVIF と一部の RAW のため。music には要らない）。photos にはさらに ffmpeg（libwebp を含む GPL ビルド）を `ffmpeg.exe` として同梱する。
+  - 探す順番：`ASTERIA_*` の変数 → **同梱の場所（実行ファイルの横の `tools` と `vips\bin`。macOS の .app では `Contents/Resources`）** → `PATH` → よく使われるディレクトリ。
+  - 同梱するツールは、ワークフローの `pre-package` で `packaging/fetch-tools.sh` が desktop のクレートの `bundled/` に置き、`[package.metadata.packager]` の `resources` がパッケージに入れる。Windows ではインストール先のフォルダの `tools` と `vips`（フォルダそのものには置かない。インストーラーが利用者の `Path` に足すので、そこに置いた `ffmpeg.exe` は利用者の `ffmpeg` にもなってしまう。2026-11-05、#51）、macOS では `Contents/Resources`（cargo-packager は resources をそこに置く）。無いソースは何も足さないので、OS やアプリで同梱するものが違っても設定は1つで済む。
+  - Windows は libvips（build-win64-mxe の `vips-dev-x64-all-<version>.zip`、DLL ごと）を `vips\bin\vipsthumbnail.exe` として photos に同梱する（HEIC・AVIF と一部の RAW のため。music には要らない）。photos にはさらに ffmpeg（libwebp を含む GPL ビルド）を `tools\ffmpeg.exe` として同梱する。
   - macOS は photos にだけ ffmpeg（martin-riedl.de の静的ビルド、arm64 と x86_64）を同梱する。画像は §4.5 の sips を使う。music は何も同梱しない。
   - music は `offline-audio` をプロセス内で作る（§4.9）ので ffmpeg を同梱しない（2026-11-02 決定、#48）。ジャケット（埋め込み画像）のサムネイルもプロセス内で作るので、music は vips も同梱しない（2026-11-03 決定）。どのアプリが何を同梱するかは `packaging/fetch-tools.sh <windows|macos> <photos|music> <dest>` が決める。
   - Linux は同梱しない（パッケージマネージャーで入れる。今の案内のまま）。
