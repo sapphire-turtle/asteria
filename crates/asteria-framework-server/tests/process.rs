@@ -820,12 +820,14 @@ async fn a_panicking_encode_is_unprocessable() {
 
 // ---- thumbnails made in the server's own process ----
 
+#[cfg(unix)]
 fn webp_size(bytes: &[u8]) -> (u32, u32) {
     let img =
         image::load_from_memory_with_format(bytes, image::ImageFormat::WebP).expect("a valid WebP");
     (img.width(), img.height())
 }
 
+#[cfg(unix)]
 fn encoded(width: u32, height: u32, format: image::ImageFormat) -> Vec<u8> {
     let img = image::RgbImage::from_fn(width, height, |x, y| {
         image::Rgb([(x % 251) as u8, (y % 251) as u8, 90])
@@ -838,6 +840,7 @@ fn encoded(width: u32, height: u32, format: image::ImageFormat) -> Vec<u8> {
 }
 
 /// A JPEG with an EXIF APP1 segment that sets the orientation.
+#[cfg(unix)]
 fn jpeg_with_orientation(width: u32, height: u32, orientation: u16) -> Vec<u8> {
     let jpeg = encoded(width, height, image::ImageFormat::Jpeg);
     let mut tiff = b"MM\0*\0\0\0\x08".to_vec();
@@ -887,6 +890,7 @@ fn failing_tool(dir: &Path, ran: &Path) -> PathBuf {
     )
 }
 
+#[cfg(unix)]
 fn runs(ran: &Path) -> usize {
     std::fs::read_to_string(ran).map_or(0, |s| s.lines().count())
 }
@@ -996,6 +1000,7 @@ async fn an_image_the_crate_cannot_decode_goes_to_the_tool() {
 }
 
 /// The CRC-32 a PNG chunk carries.
+#[cfg(unix)]
 fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &b in bytes {
@@ -1012,6 +1017,7 @@ fn crc32(bytes: &[u8]) -> u32 {
 }
 
 /// A tiny PNG whose header claims `width`×`height`; its pixels are not there.
+#[cfg(unix)]
 fn png_claiming(width: u32, height: u32) -> Vec<u8> {
     fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
         out.extend_from_slice(&(data.len() as u32).to_be_bytes());
