@@ -2,9 +2,9 @@
 
 use std::time::{Duration, Instant};
 
-use asteria_framework_client::profiles::ServerProfile;
-use asteria_framework_client::rpc::ClientError;
-use asteria_framework_client::session::{Request, RequestId, Session, SessionDirs, SessionState};
+use asteria_common_client::profiles::ServerProfile;
+use asteria_common_client::rpc::ClientError;
+use asteria_common_client::session::{Request, RequestId, Session, SessionDirs, SessionState};
 use corundum_framework::egui;
 
 use crate::library::LibraryState;

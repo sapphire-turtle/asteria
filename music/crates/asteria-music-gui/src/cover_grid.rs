@@ -5,8 +5,8 @@
 //! covers, and it reports the last item drawn (to know when to fetch the next page) and the
 //! number of columns, which [`ThumbGrid::columns_for`] works out.
 
-use asteria_framework_client::images::{ImageLoader, ImageState, Preset};
-use asteria_framework_client::widgets::thumb_grid::{DEFAULT_CELL_SIZE, SPACING, ThumbGrid};
+use asteria_common_client::images::{ImageLoader, ImageState, Preset};
+use asteria_common_client::widgets::thumb_grid::{DEFAULT_CELL_SIZE, SPACING, ThumbGrid};
 use asteria_music_api::{AlbumId, AlbumSummary};
 use corundum_framework::egui::{self, Align2, Color32, Rect, Sense, vec2};
 use corundum_framework::gui::icons;

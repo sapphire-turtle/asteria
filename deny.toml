@@ -55,10 +55,10 @@ exceptions = [
     # asteria's own application crate is GPL-3.0-or-later with an app store
     # exception (LICENSE.App-Store-Exception). Scoped to that crate, so a GPL
     # dependency cannot slip in unnoticed:
-    { name = "asteria-framework", allow = ["GPL-3.0-or-later"] },
-    { name = "asteria-framework-server", allow = ["GPL-3.0-or-later"] },
-    { name = "asteria-framework-client", allow = ["GPL-3.0-or-later"] },
-    { name = "asteria-framework-desktop", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-common-core", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-common-server", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-common-client", allow = ["GPL-3.0-or-later"] },
+    { name = "asteria-common-desktop", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-photos-gui", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-photos-desktop", allow = ["GPL-3.0-or-later"] },
     { name = "asteria-photos-mobile", allow = ["GPL-3.0-or-later"] },

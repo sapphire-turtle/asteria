@@ -395,9 +395,9 @@ mod linux {
 
         // 9. the rating is on disk in the sidecar, and survives a restart with the cache deleted
         // (a real scan rebuilds the index from the library).
-        let sidecar = asteria_framework::paths::sidecar_path_for(&lib.join("photos/a.png"));
+        let sidecar = asteria_common_core::paths::sidecar_path_for(&lib.join("photos/a.png"));
         let rating = |path: &Path| {
-            asteria_framework::Sidecar::read(path)
+            asteria_common_core::Sidecar::read(path)
                 .unwrap()
                 .and_then(|s| s.rating)
                 .map(|r| r.value)

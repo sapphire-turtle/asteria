@@ -4,5 +4,5 @@
 fn main() {
     let mut spec = asteria_photos_server::spec();
     spec.release_asset = Some("asteria-photos-headless");
-    asteria_framework_server::cli::main(spec)
+    asteria_common_server::cli::main(spec)
 }

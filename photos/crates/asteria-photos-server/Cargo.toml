@@ -7,7 +7,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-asteria-framework = { path = "../../../crates/asteria-framework" }
-asteria-framework-api = { path = "../../../crates/asteria-framework-api" }
-asteria-framework-server = { path = "../../../crates/asteria-framework-server" }
+asteria-common-core = { path = "../../../crates/asteria-common-core" }
+asteria-common-api = { path = "../../../crates/asteria-common-api" }
+asteria-common-server = { path = "../../../crates/asteria-common-server" }
 asteria-photos-api = { path = "../asteria-photos-api" }

@@ -1,0 +1,20 @@
+[package]
+# What the photos and music desktop apps share about the server on this computer: the
+# first-run flow that sets it up, the "Local server" settings page, its background service
+# and the external tools it needs. Only the desktop crates depend on it.
+name = "asteria-common-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+asteria-common-core = { path = "../asteria-common-core" }
+asteria-common-server = { path = "../asteria-common-server" }
+asteria-common-client = { path = "../asteria-common-client" }
+corundum-framework = { workspace = true, features = ["gui", "serde", "eframe", "gui-service", "gui-keys", "gui-package", "single-instance", "console"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

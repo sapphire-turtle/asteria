@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use asteria_framework_api::*;
+pub use asteria_common_api::*;
 
 /// Application identifier sent in the handshake.
 pub const APP: &str = "asteria-music";

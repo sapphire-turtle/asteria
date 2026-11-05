@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use asteria_framework_client::media_cache::safe_component;
+use asteria_common_client::media_cache::safe_component;
 use asteria_music_api::ItemId;
 use corundum_framework_audio::feed::{FailedFeed, Watch, spawn_feed};
 use corundum_framework_audio::{Feed, Opener, OutputConfig, TrackError};
@@ -219,7 +219,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    use asteria_framework_client::profiles::Token;
+    use asteria_common_client::profiles::Token;
     use tempfile::TempDir;
 
     use corundum_framework_audio::{Feed, FeedEvent, Opener, OutputConfig, TrackError, Wait};

@@ -1,0 +1,1604 @@
+//! Rendering with `vipsthumbnail` (image thumbnails) and `ffmpeg` (video thumbnails), and
+//! offline audio made in the server (see [`crate::offline_audio`]).
+//!
+//! Renders are limited to `max_jobs` at a time, bounded by a timeout (a child is killed, an
+//! encode is told to stop),
+//! and shared: concurrent requests for the same `(hash, preset)` wait for one render.
+//! At most `max_jobs * 32` renders are queued or running; beyond that a request gets
+//! [`ProcessError::Busy`]. A queued render whose requests have all gone away is dropped
+//! right away, freeing its queue place without waiting for a slot.
+//!
+//! Offline-audio encodes run in a pool of their own (one at a time, 32 queued), so a long
+//! encode never holds up a thumbnail.
+
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use asteria_common_core::MediaKind;
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
+use tokio::sync::{Semaphore, watch};
+
+use crate::inprocess_image::{self, InSource};
+use crate::offline_audio::{self, EncodeError};
+use crate::sips;
+
+/// Environment variable naming the `vipsthumbnail` executable.
+pub const VIPSTHUMBNAIL_ENV: &str = "ASTERIA_VIPSTHUMBNAIL";
+/// Environment variable naming the `ffmpeg` executable.
+pub const FFMPEG_ENV: &str = "ASTERIA_FFMPEG";
+
+/// The program that makes image thumbnails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageTool {
+    /// `vipsthumbnail`, at this path or name.
+    Vips(OsString),
+    /// macOS's built-in `sips`, at this path; the server finishes its output in Rust.
+    Sips(OsString),
+}
+
+/// Where macOS keeps `sips`.
+const SIPS_PATH: &str = "/usr/bin/sips";
+/// The sRGB profile macOS ships, which `sips` converts images to (as vips does with
+/// `--export-profile srgb`), so a Display P3 photo does not come out washed out.
+const SRGB_PROFILE: &str = "/System/Library/ColorSync/Profiles/sRGB Profile.icc";
+
+/// The image tool to use: `vipsthumbnail` where [`find_tool`] finds it, else on macOS the
+/// built-in `sips`. `None` when neither is there.
+pub fn find_image_tool() -> Option<ImageTool> {
+    if let Some(vips) = find_tool(Tool::Vipsthumbnail) {
+        return Some(ImageTool::Vips(vips.into_os_string()));
+    }
+    (cfg!(target_os = "macos") && is_file(Path::new(SIPS_PATH)))
+        .then(|| ImageTool::Sips(SIPS_PATH.into()))
+}
+
+/// An external program the server runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Tool {
+    /// Image thumbnails (libvips-tools).
+    Vipsthumbnail,
+    /// Video thumbnails.
+    Ffmpeg,
+}
+
+/// What to run for `tool`: the path in `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` if that is
+/// set, else the tool's name, which is looked up on `PATH`.
+pub fn tool_program(tool: Tool) -> OsString {
+    let (var, default) = match tool {
+        Tool::Vipsthumbnail => (VIPSTHUMBNAIL_ENV, "vipsthumbnail"),
+        Tool::Ffmpeg => (FFMPEG_ENV, "ffmpeg"),
+    };
+    std::env::var_os(var).unwrap_or_else(|| OsString::from(default))
+}
+
+/// Where `tool` is, without running it: [`tool_program`] as a path if it has a directory part,
+/// else the first of [`bundled_dirs`] beside the running executable that holds it, else the
+/// first `PATH` directory that does (on Windows also with a `PATHEXT` extension, at least
+/// `.exe`), else the first of [`well_known_dirs`] that does. `None` when it is not there.
+pub fn find_tool(tool: Tool) -> Option<PathBuf> {
+    find_program(
+        &tool_program(tool),
+        &current_bundled_dirs(),
+        std::env::var_os("PATH").as_deref(),
+        &well_known_dirs(),
+    )
+}
+
+/// Where a package puts the tools it bundles, relative to the executable's directory: beside
+/// it (`ffmpeg` on Windows), in `vips/bin` (`vipsthumbnail` and its DLLs on Windows), and in
+/// a macOS `.app`, whose executable is in `Contents/MacOS`, in `Contents/Resources`
+/// (`ffmpeg`), where cargo-packager puts the package's resources.
+fn bundled_dirs(exe_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![exe_dir.to_path_buf(), exe_dir.join("vips").join("bin")];
+    if exe_dir.ends_with("Contents/MacOS")
+        && let Some(contents) = exe_dir.parent()
+    {
+        dirs.push(contents.join("Resources"));
+    }
+    dirs
+}
+
+/// [`exe_bundled_dirs`] of the running executable. Empty when its path is unknown.
+fn current_bundled_dirs() -> Vec<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .map(|exe| exe_bundled_dirs(&exe))
+        .unwrap_or_default()
+}
+
+/// [`bundled_dirs`] of the directory of `exe` with its links resolved, as corundum's
+/// `package::current_exe` resolves it: on macOS `/usr/local/bin/asteria-photos` is a link
+/// into the `.app`, whose `Contents/Resources` holds the tools. Not on Windows, where the
+/// canonical form is a `\\?\` path and a package is never started through a link.
+fn exe_bundled_dirs(exe: &Path) -> Vec<PathBuf> {
+    let resolved = if cfg!(windows) {
+        exe.to_path_buf()
+    } else {
+        exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf())
+    };
+    resolved.parent().map(bundled_dirs).unwrap_or_default()
+}
+
+/// Directories tried after `PATH`: a GUI started from the Finder and a LaunchAgent get only
+/// `/usr/bin:/bin:/usr/sbin:/sbin`, which misses Homebrew's tools.
+fn well_known_dirs() -> Vec<PathBuf> {
+    if cfg!(target_os = "macos") {
+        vec!["/opt/homebrew/bin".into(), "/usr/local/bin".into()]
+    } else if cfg!(windows) {
+        Vec::new()
+    } else {
+        vec!["/usr/local/bin".into()]
+    }
+}
+
+/// [`find_tool`] for a given program, directories tried before `PATH`, `PATH` value and
+/// directories tried after `PATH`.
+fn find_program(
+    program: &OsStr,
+    before: &[PathBuf],
+    path_var: Option<&OsStr>,
+    extra: &[PathBuf],
+) -> Option<PathBuf> {
+    let has_dir = Path::new(program).components().count() > 1
+        || program
+            .to_string_lossy()
+            .contains(['/', std::path::MAIN_SEPARATOR]);
+    if has_dir {
+        return is_file(Path::new(program)).then(|| PathBuf::from(program));
+    }
+    let path_dirs = path_var
+        .map(|p| std::env::split_paths(p).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for dir in before.iter().chain(&path_dirs).chain(extra) {
+        for candidate in candidates(dir, program) {
+            if is_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// What the [`Processor`] runs for `tool`: where [`find_tool`] finds it, else its bare name
+/// (so a missing tool fails as "not found" when a render needs it).
+fn tool_to_run(tool: Tool) -> OsString {
+    resolve_program(
+        tool_program(tool),
+        &current_bundled_dirs(),
+        std::env::var_os("PATH").as_deref(),
+        &well_known_dirs(),
+    )
+}
+
+/// [`tool_to_run`] for a given program, directories tried before `PATH`, `PATH` value and
+/// directories tried after `PATH`.
+fn resolve_program(
+    program: OsString,
+    before: &[PathBuf],
+    path_var: Option<&OsStr>,
+    extra: &[PathBuf],
+) -> OsString {
+    find_program(&program, before, path_var, extra)
+        .map(PathBuf::into_os_string)
+        .unwrap_or(program)
+}
+
+fn is_file(path: &Path) -> bool {
+    path.metadata().is_ok_and(|m| m.is_file())
+}
+
+#[cfg(windows)]
+fn candidates(dir: &Path, program: &OsStr) -> Vec<PathBuf> {
+    let exts = std::env::var("PATHEXT").unwrap_or_default();
+    let mut exts: Vec<String> = exts
+        .split(';')
+        .filter(|e| !e.is_empty())
+        .map(|e| e.to_ascii_lowercase())
+        .collect();
+    if !exts.iter().any(|e| e == ".exe") {
+        exts.push(".exe".into());
+    }
+    let mut out = vec![dir.join(program)];
+    for ext in exts {
+        let mut name = program.to_os_string();
+        name.push(ext);
+        out.push(dir.join(name));
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn candidates(dir: &Path, program: &OsStr) -> Vec<PathBuf> {
+    vec![dir.join(program)]
+}
+
+/// Queued or running renders allowed per render slot.
+const QUEUE_PER_JOB: usize = 32;
+/// Offline-audio encodes that run at once.
+const AUDIO_JOBS: usize = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Preset {
+    Thumb,
+    Preview,
+    /// Ogg Opus for listening offline; made from audio in the server, with no external tool.
+    OfflineAudio,
+}
+
+impl Preset {
+    /// The preset a URL segment names.
+    pub fn parse(name: &str) -> Option<Preset> {
+        match name {
+            "thumb" => Some(Preset::Thumb),
+            "preview" => Some(Preset::Preview),
+            "offline-audio" => Some(Preset::OfflineAudio),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Preset::Thumb => "thumb",
+            Preset::Preview => "preview",
+            Preset::OfflineAudio => "offline-audio",
+        }
+    }
+
+    /// Longest side in pixels; 0 for a preset that is not an image.
+    pub fn size(self) -> u32 {
+        match self {
+            Preset::Thumb => 256,
+            Preset::Preview => 1920,
+            Preset::OfflineAudio => 0,
+        }
+    }
+
+    /// File extension of the rendered file.
+    pub fn ext(self) -> &'static str {
+        match self {
+            Preset::Thumb | Preset::Preview => "webp",
+            Preset::OfflineAudio => "ogg",
+        }
+    }
+
+    pub fn mime(self) -> &'static str {
+        match self {
+            Preset::Thumb | Preset::Preview => "image/webp",
+            Preset::OfflineAudio => "audio/ogg",
+        }
+    }
+
+    /// How long one render may take: encoding a whole track takes far longer than scaling
+    /// an image, so audio gets ten minutes whatever `default` is.
+    pub fn timeout(self, default: Duration) -> Duration {
+        match self {
+            Preset::OfflineAudio => Duration::from_secs(600),
+            _ => default,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProcessError {
+    /// This file cannot be rendered (bad data, timeout); retrying will not help.
+    #[error("unprocessable: {0}")]
+    Unprocessable(String),
+    /// The external tool is not installed.
+    #[error("{0} is not installed")]
+    ToolMissing(&'static str),
+    /// An offline-audio encode ran out of time. It is not recorded as unprocessable: a long
+    /// file on a busy or slow machine may well finish another time.
+    #[error("the render timed out")]
+    TimedOut,
+    #[error("i/o error: {0}")]
+    Io(String),
+    /// Too many renders are queued; try again shortly.
+    #[error("too many renders are queued")]
+    Busy,
+}
+
+/// Makes offline audio from a source into a file, stopping when the flag is set.
+type AudioEncoder = dyn Fn(&Path, &Path, &AtomicBool) -> Result<(), ProcessError> + Send + Sync;
+
+/// [`offline_audio::encode_offline_audio`] with its errors as [`ProcessError`]s. A cancelled
+/// encode ran out of time.
+fn encode_audio(src: &Path, dest: &Path, cancel: &AtomicBool) -> Result<(), ProcessError> {
+    offline_audio::encode_offline_audio(src, dest, cancel).map_err(|e| match e {
+        EncodeError::Cancelled => ProcessError::TimedOut,
+        EncodeError::Unprocessable(reason) => ProcessError::Unprocessable(reason),
+        EncodeError::Io(e) => ProcessError::Io(e),
+    })
+}
+
+type Outcome = Result<PathBuf, ProcessError>;
+/// The sending side of one render's result; waiters `subscribe` to it, so its
+/// `receiver_count` is the number of requests still waiting.
+type Pending = Arc<watch::Sender<Option<Outcome>>>;
+/// What a render reads.
+enum Source {
+    /// A file; `render` checked that the path is absolute.
+    File(PathBuf),
+    /// Image bytes, written to a staged file only if a render actually runs.
+    Bytes { bytes: Vec<u8>, ext: String },
+}
+
+/// Called with `(hash, preset, reason)` when a render fails as unprocessable.
+type Hook = Box<dyn Fn(&str, Preset, &str) + Send + Sync>;
+
+/// Renders thumbnails. Cheap to share behind an `Arc`; renders run detached from the
+/// requests that asked for them, so a dropped request neither kills nor leaks a render.
+pub struct Processor {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    thumbs_dir: PathBuf,
+    /// Set when the thumbs directory cannot be used; every render then fails with it.
+    config_error: Option<String>,
+    /// Slots for thumbnails and previews.
+    permits: Semaphore,
+    /// Slots for offline-audio encodes, kept apart so thumbnails never wait for audio.
+    audio_permits: Semaphore,
+    queue_limit: usize,
+    timeout: Duration,
+    audio_timeout: Duration,
+    image: ImageTool,
+    /// The sRGB profile `sips` converts to; without the file it converts nothing.
+    srgb_profile: PathBuf,
+    ffmpeg: OsString,
+    /// What makes offline audio: [`offline_audio`] unless a test replaced it.
+    audio_encoder: Arc<AudioEncoder>,
+    /// Renders queued or running, by key. Its length is the queue size.
+    inflight: Mutex<HashMap<(String, Preset), Pending>>,
+    on_unprocessable: OnceLock<Hook>,
+    started: AtomicUsize,
+    tmp_counter: AtomicUsize,
+}
+
+/// Deletes the listed files when dropped, on every exit path.
+struct Cleanup(Vec<PathBuf>);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// Sets the flag when dropped, on every exit path.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Removes a single-flight entry when dropped, even if the render task panicked. Only its
+/// own entry: a later render for the same key may have replaced it.
+struct Unregister {
+    inner: Arc<Inner>,
+    key: (String, Preset),
+    tx: Pending,
+}
+
+impl Drop for Unregister {
+    fn drop(&mut self) {
+        let mut map = self.inner.inflight.lock().unwrap();
+        if map
+            .get(&self.key)
+            .is_some_and(|tx| Arc::ptr_eq(tx, &self.tx))
+        {
+            map.remove(&self.key);
+        }
+    }
+}
+
+impl Processor {
+    /// Tools come from `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG`, else from `PATH` or a
+    /// well-known directory (see [`find_tool`]); the path found is what runs. Without
+    /// `vipsthumbnail`, macOS's `sips` makes the images (see [`find_image_tool`]).
+    /// `thumbs_dir` must be absolute and must not contain `%` (vipsthumbnail expands it in
+    /// output names); otherwise every render fails with an `Io` error.
+    pub fn new(thumbs_dir: PathBuf, max_jobs: usize, timeout: Duration) -> Processor {
+        let image =
+            find_image_tool().unwrap_or_else(|| ImageTool::Vips(tool_to_run(Tool::Vipsthumbnail)));
+        Processor::with_image_tool(
+            thumbs_dir,
+            max_jobs,
+            timeout,
+            image,
+            tool_to_run(Tool::Ffmpeg),
+        )
+    }
+
+    pub fn with_tools(
+        thumbs_dir: PathBuf,
+        max_jobs: usize,
+        timeout: Duration,
+        vipsthumbnail: impl Into<OsString>,
+        ffmpeg: impl Into<OsString>,
+    ) -> Processor {
+        Processor::with_image_tool(
+            thumbs_dir,
+            max_jobs,
+            timeout,
+            ImageTool::Vips(vipsthumbnail.into()),
+            ffmpeg,
+        )
+    }
+
+    /// Like [`Processor::with_tools`], with the image tool given as an [`ImageTool`].
+    pub fn with_image_tool(
+        thumbs_dir: PathBuf,
+        max_jobs: usize,
+        timeout: Duration,
+        image: ImageTool,
+        ffmpeg: impl Into<OsString>,
+    ) -> Processor {
+        let config_error = if !thumbs_dir.is_absolute() {
+            Some("thumbs directory is not absolute".to_string())
+        } else if thumbs_dir.to_string_lossy().contains('%') {
+            Some("thumbs directory contains '%'".to_string())
+        } else {
+            None
+        };
+        let jobs = max_jobs.max(1);
+        Processor {
+            inner: Arc::new(Inner {
+                thumbs_dir,
+                config_error,
+                permits: Semaphore::new(jobs),
+                audio_permits: Semaphore::new(AUDIO_JOBS),
+                queue_limit: jobs * QUEUE_PER_JOB,
+                timeout,
+                audio_timeout: Preset::OfflineAudio.timeout(timeout),
+                image,
+                srgb_profile: SRGB_PROFILE.into(),
+                ffmpeg: ffmpeg.into(),
+                audio_encoder: Arc::new(encode_audio),
+                inflight: Mutex::new(HashMap::new()),
+                on_unprocessable: OnceLock::new(),
+                started: AtomicUsize::new(0),
+                tmp_counter: AtomicUsize::new(0),
+            }),
+        }
+    }
+
+    /// Replaces the sRGB profile file `sips` converts to.
+    #[cfg(all(test, unix))]
+    fn with_srgb_profile(mut self, profile: PathBuf) -> Processor {
+        Arc::get_mut(&mut self.inner)
+            .expect("a new processor is not shared yet")
+            .srgb_profile = profile;
+        self
+    }
+
+    /// Replaces the time an offline-audio encode may take (by default
+    /// [`Preset::timeout`] of [`Preset::OfflineAudio`]).
+    pub fn with_audio_timeout(mut self, timeout: Duration) -> Processor {
+        Arc::get_mut(&mut self.inner)
+            .expect("a new processor is not shared yet")
+            .audio_timeout = timeout;
+        self
+    }
+
+    /// Replaces what makes offline audio, for tests: it gets the source, the file to write
+    /// and the cancel flag, which is set when the encode runs out of time.
+    #[doc(hidden)]
+    pub fn with_audio_encoder(
+        mut self,
+        encoder: impl Fn(&Path, &Path, &AtomicBool) -> Result<(), ProcessError> + Send + Sync + 'static,
+    ) -> Processor {
+        Arc::get_mut(&mut self.inner)
+            .expect("a new processor is not shared yet")
+            .audio_encoder = Arc::new(encoder);
+        self
+    }
+
+    /// Removes stale `.tmp-*` and `.src-*` files that an earlier run left under the thumbs
+    /// directory. Call once at startup, before serving. Returns how many were removed.
+    pub fn sweep_tmp(&self) -> usize {
+        let mut removed = 0;
+        for entry in walkdir::WalkDir::new(&self.inner.thumbs_dir)
+            .into_iter()
+            .flatten()
+        {
+            let name = entry.file_name().to_string_lossy();
+            if (name.starts_with(".tmp-") || name.starts_with(".src-"))
+                && !entry.file_type().is_dir()
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    /// Sets what records an unprocessable result. It runs in the render task (on a blocking
+    /// thread), before the result reaches any waiter, so it runs even when every request has
+    /// gone away. Only the first call has an effect.
+    pub fn set_unprocessable_hook(
+        &self,
+        hook: impl Fn(&str, Preset, &str) + Send + Sync + 'static,
+    ) {
+        if self.inner.on_unprocessable.set(Box::new(hook)).is_err() {
+            tracing::warn!("unprocessable hook already set; ignoring another");
+        }
+    }
+
+    /// How many thumbnail and preview renders may be queued or running at once. Offline
+    /// audio has a queue of its own.
+    pub fn queue_limit(&self) -> usize {
+        self.inner.queue_limit
+    }
+
+    /// How many renders are queued or running.
+    pub fn renders_queued(&self) -> usize {
+        self.inner.inflight.lock().unwrap().len()
+    }
+
+    /// How many renders actually ran a tool (not counting cache hits or shared waits).
+    pub fn renders_started(&self) -> usize {
+        self.inner.started.load(Ordering::SeqCst)
+    }
+
+    /// Where the thumbnail for `hash` (`blake3:<hex>`) lives, or `None` if the hash is not
+    /// of that form (it becomes part of a path, so it must be plain hex).
+    pub fn thumb_path(&self, hash: &str, preset: Preset) -> Option<PathBuf> {
+        let hex = hash.strip_prefix("blake3:")?;
+        if hex.len() < 2 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(
+            self.inner
+                .thumbs_dir
+                .join(preset.name())
+                .join(&hex[..2])
+                .join(format!("{hex}.{}", preset.ext())),
+        )
+    }
+
+    /// Returns the path of the rendered thumbnail, rendering it first if needed.
+    /// `src` must be absolute. A render that has started keeps running if this future is
+    /// dropped; one still waiting for a slot is dropped once nobody waits for it.
+    pub async fn render(
+        &self,
+        src: &Path,
+        kind: MediaKind,
+        hash: &str,
+        preset: Preset,
+    ) -> Result<PathBuf, ProcessError> {
+        if !src.is_absolute() {
+            return Err(ProcessError::Io("source path is not absolute".into()));
+        }
+        self.render_source(Source::File(src.to_path_buf()), kind, hash, preset)
+            .await
+    }
+
+    /// Like [`Processor::render`] for an image given as bytes (for example cover art
+    /// embedded in a track). `key` is `blake3:<hex>`, names the result and is what
+    /// single-flight and the render queue count; `ext` is the extension the decoder needs.
+    pub async fn render_image_bytes(
+        &self,
+        bytes: &[u8],
+        ext: &str,
+        key: &str,
+        preset: Preset,
+    ) -> Result<PathBuf, ProcessError> {
+        let ext: String = ext
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(8)
+            .collect();
+        let src = Source::Bytes {
+            bytes: bytes.to_vec(),
+            ext: if ext.is_empty() { "bin".into() } else { ext },
+        };
+        self.render_source(src, MediaKind::Image, key, preset).await
+    }
+
+    async fn render_source(
+        &self,
+        src: Source,
+        kind: MediaKind,
+        hash: &str,
+        preset: Preset,
+    ) -> Result<PathBuf, ProcessError> {
+        if let Some(e) = &self.inner.config_error {
+            return Err(ProcessError::Io(e.clone()));
+        }
+        let out = self
+            .thumb_path(hash, preset)
+            .ok_or_else(|| ProcessError::Io("malformed content hash".into()))?;
+        if exists(&out).await? {
+            return Ok(out);
+        }
+        let key = (hash.to_string(), preset);
+        let mut pending = {
+            let mut map = self.inner.inflight.lock().unwrap();
+            match map.get(&key) {
+                Some(tx) => tx.subscribe(),
+                None => {
+                    let audio = is_audio(preset);
+                    let limit = if audio {
+                        AUDIO_JOBS * QUEUE_PER_JOB
+                    } else {
+                        self.inner.queue_limit
+                    };
+                    if map.keys().filter(|k| is_audio(k.1) == audio).count() >= limit {
+                        return Err(ProcessError::Busy);
+                    }
+                    let (tx, rx) = watch::channel(None);
+                    let tx = Arc::new(tx);
+                    map.insert(key.clone(), tx.clone());
+                    tokio::spawn(render_task(self.inner.clone(), key, tx, src, kind, out));
+                    rx
+                }
+            }
+        };
+        let done = pending
+            .wait_for(|v| v.is_some())
+            .await
+            .map_err(|_| ProcessError::Io("render task ended without a result".into()))?;
+        done.clone().unwrap_or_else(|| {
+            Err(ProcessError::Io(
+                "render task ended without a result".into(),
+            ))
+        })
+    }
+}
+
+/// One detached render: waits for a slot, gives up if nobody waits any more, renders,
+/// records an unprocessable result, then hands the result to the waiters.
+async fn render_task(
+    inner: Arc<Inner>,
+    key: (String, Preset),
+    tx: Pending,
+    src: Source,
+    kind: MediaKind,
+    out: PathBuf,
+) {
+    let _unregister = Unregister {
+        inner: inner.clone(),
+        key: key.clone(),
+        tx: tx.clone(),
+    };
+    // Wait for a slot, but give up as soon as nobody waits for the result, so an abandoned
+    // render does not hold its queue place until a slot frees up.
+    let permits = if is_audio(key.1) {
+        &inner.audio_permits
+    } else {
+        &inner.permits
+    };
+    let permit = loop {
+        tokio::select! {
+            biased;
+            permit = permits.acquire() => match permit {
+                Ok(p) => break p,
+                Err(e) => {
+                    tx.send_replace(Some(Err(ProcessError::Io(e.to_string()))));
+                    return;
+                }
+            },
+            () = tx.closed() => {
+                if abandon_if_unwatched(&inner, &key, &tx) {
+                    return;
+                }
+                // A request joined after the last one left; keep waiting for a slot.
+                tokio::task::yield_now().await;
+            }
+        }
+    };
+    if abandon_if_unwatched(&inner, &key, &tx) {
+        return;
+    }
+    let result = inner.render_once(src, kind, &out, key.1).await;
+    drop(permit);
+    if let Err(ProcessError::Unprocessable(reason)) = &result
+        && inner.on_unprocessable.get().is_some()
+    {
+        let (inner, hash, preset, reason) = (inner.clone(), key.0.clone(), key.1, reason.clone());
+        let recorded = tokio::task::spawn_blocking(move || {
+            if let Some(hook) = inner.on_unprocessable.get() {
+                hook(&hash, preset, &reason);
+            }
+        })
+        .await;
+        if recorded.is_err() {
+            tracing::error!("recording an unprocessable thumbnail panicked");
+        }
+    }
+    // `send_replace` stores the result even with no receiver: a request may subscribe after
+    // the last one left but before `Unregister` removes the entry, and must still see it.
+    tx.send_replace(Some(result));
+}
+
+/// Whether `preset` renders in the offline-audio pool.
+fn is_audio(preset: Preset) -> bool {
+    preset == Preset::OfflineAudio
+}
+
+/// Removes the render's entry and returns `true` if no request waits for it any more.
+fn abandon_if_unwatched(inner: &Inner, key: &(String, Preset), tx: &Pending) -> bool {
+    // Waiters subscribe under this lock, so none can join after the check.
+    let mut map = inner.inflight.lock().unwrap();
+    if tx.receiver_count() != 0 {
+        return false;
+    }
+    if map.get(key).is_some_and(|t| Arc::ptr_eq(t, tx)) {
+        map.remove(key);
+    }
+    tracing::debug!("dropping a queued render nobody waits for");
+    true
+}
+
+/// `try_exists`, with an error being an `Io` failure (logged) instead of "absent".
+async fn exists(path: &Path) -> Result<bool, ProcessError> {
+    tokio::fs::try_exists(path).await.map_err(|e| {
+        tracing::error!("cannot check for a thumbnail: {e}");
+        ProcessError::Io(format!("cannot check for a thumbnail: {e}"))
+    })
+}
+
+/// A file extension that is safe to put in a file name: a few ASCII alphanumerics.
+fn safe_ext(src: &Path) -> String {
+    let ext: String = src
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect();
+    if ext.is_empty() { "bin".into() } else { ext }
+}
+
+#[cfg(unix)]
+async fn link_or_copy(src: &Path, dest: &Path) -> std::io::Result<()> {
+    tokio::fs::symlink(src, dest).await
+}
+
+#[cfg(not(unix))]
+async fn link_or_copy(src: &Path, dest: &Path) -> std::io::Result<()> {
+    tokio::fs::copy(src, dest).await.map(|_| ())
+}
+
+impl Inner {
+    async fn render_once(
+        &self,
+        src: Source,
+        kind: MediaKind,
+        out: &Path,
+        preset: Preset,
+    ) -> Result<PathBuf, ProcessError> {
+        // The caller holds a permit. A render that finished while this one waited for it.
+        if exists(out).await? {
+            return Ok(out.to_path_buf());
+        }
+        self.started.fetch_add(1, Ordering::SeqCst);
+        let dir = out.parent().expect("thumb path has a parent");
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(|e| ProcessError::Io(e.to_string()))?;
+        let n = self.tmp_counter.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        // The tool picks the format from the extension, so the temporary name ends in the
+        // preset's.
+        let tmp = dir.join(format!(".tmp-{pid}-{n}.{}", preset.ext()));
+        let mut cleanup = Cleanup(vec![tmp.clone()]);
+        let result = match (kind, preset, &src) {
+            (MediaKind::Image, Preset::Thumb | Preset::Preview, _) => {
+                self.render_image(&src, dir, &tmp, preset, (pid, n), &mut cleanup)
+                    .await
+            }
+            (MediaKind::Video, Preset::Thumb | Preset::Preview, Source::File(path)) => {
+                self.run_ffmpeg(path, &tmp, preset).await
+            }
+            (MediaKind::Audio, Preset::OfflineAudio, Source::File(path)) => {
+                self.encode_audio(path, &tmp).await
+            }
+            _ => Err(ProcessError::Unprocessable(
+                "cannot render this kind of media with this preset".into(),
+            )),
+        };
+        match result {
+            Ok(()) => tokio::fs::rename(&tmp, out)
+                .await
+                .map(|()| out.to_path_buf())
+                .map_err(|e| ProcessError::Io(e.to_string())),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Makes an image thumbnail in this process; for what the crate cannot read, the external
+    /// image tool does it from a staged copy of the source. With no tool found that is
+    /// `ToolMissing` (not recorded as unprocessable, so a tool installed later is tried),
+    /// except when the in-process decode found the data corrupt (`Error::Decode`): that is
+    /// `Unprocessable` and recorded, since no tool would help and a client would otherwise
+    /// retry it on every view (a corrupt cover in music, which has no tool, for one).
+    /// The in-process attempt and the tool each get the preset's full timeout, so one render
+    /// can take up to twice as long.
+    async fn render_image(
+        &self,
+        src: &Source,
+        dir: &Path,
+        tmp: &Path,
+        preset: Preset,
+        (pid, n): (u32, usize),
+        cleanup: &mut Cleanup,
+    ) -> Result<(), ProcessError> {
+        use corundum_framework_image::Error as ImageError;
+        let source = match src {
+            Source::File(path) => InSource::Path(path.clone()),
+            Source::Bytes { bytes, ext } => InSource::Bytes {
+                bytes: bytes.clone(),
+                ext: Some(ext.clone()),
+            },
+        };
+        let longest = preset.size();
+        let task = tokio::task::spawn_blocking(move || inprocess_image::render(source, longest));
+        // The decode cannot be stopped once begun, but it is bounded by the crate's limits,
+        // and it only returns bytes: nothing is written for a render that timed out.
+        let mut corrupt = false;
+        let failure = match tokio::time::timeout(preset.timeout(self.timeout), task).await {
+            Err(_) => return Err(ProcessError::Unprocessable("timeout".into())),
+            Ok(Ok(Ok(webp))) => {
+                tracing::debug!("made a {} thumbnail in-process", preset.name());
+                return tokio::fs::write(tmp, webp)
+                    .await
+                    .map_err(|e| ProcessError::Io(e.to_string()));
+            }
+            Ok(Ok(Err(ImageError::Io(e)))) => {
+                return Err(ProcessError::Io(format!("cannot read the image: {e}")));
+            }
+            Ok(Ok(Err(e))) => {
+                corrupt = matches!(e, ImageError::Decode(_));
+                e.to_string()
+            }
+            Ok(Err(e)) => format!("the image decoder failed: {e}"),
+        };
+        tracing::debug!("cannot make a thumbnail in-process ({failure}); trying the image tool");
+        // libvips reads a trailing `[...]` of a file name as loader options, so the tool gets
+        // the image under a name we chose.
+        let ext = match src {
+            Source::File(path) => safe_ext(path),
+            Source::Bytes { ext, .. } => ext.clone(),
+        };
+        let staged = dir.join(format!(".src-{pid}-{n}.{ext}"));
+        cleanup.0.push(staged.clone());
+        let put = match src {
+            Source::File(path) => link_or_copy(path, &staged).await,
+            Source::Bytes { bytes, .. } => tokio::fs::write(&staged, bytes).await,
+        };
+        if let Err(e) = put {
+            return Err(ProcessError::Io(format!("cannot stage the source: {e}")));
+        }
+        let result = match &self.image {
+            ImageTool::Vips(vips) => self.run_vips(vips, &staged, tmp, preset).await,
+            ImageTool::Sips(sips) => self.run_sips(sips, &staged, tmp, preset).await,
+        };
+        let result = match result {
+            Err(ProcessError::ToolMissing(_)) if corrupt => {
+                Err(ProcessError::Unprocessable(failure))
+            }
+            other => other,
+        };
+        if result.is_ok() {
+            tracing::debug!("made a {} thumbnail with the image tool", preset.name());
+        }
+        result
+    }
+
+    async fn run_vips(
+        &self,
+        vips: &OsStr,
+        src: &Path,
+        tmp: &Path,
+        preset: Preset,
+    ) -> Result<(), ProcessError> {
+        let n = preset.size();
+        let mut dest = tmp.as_os_str().to_owned();
+        dest.push("[Q=80,strip]");
+        let mut cmd = Command::new(vips);
+        // `NxN>` only shrinks, like the `min()` in the ffmpeg filter.
+        cmd.arg(src)
+            .arg("--size")
+            .arg(format!("{n}x{n}>"))
+            .arg("--export-profile")
+            .arg("srgb")
+            .arg("-o")
+            .arg(dest);
+        run_tool(cmd, "vipsthumbnail", preset.timeout(self.timeout), tmp).await
+    }
+
+    /// Scales with `sips` to a JPEG (never enlarging), then finishes in Rust: the EXIF
+    /// orientation and lossy WebP. Both `sips` runs share one timeout budget.
+    async fn run_sips(
+        &self,
+        sips: &OsStr,
+        src: &Path,
+        tmp: &Path,
+        preset: Preset,
+    ) -> Result<(), ProcessError> {
+        let timeout = preset.timeout(self.timeout);
+        let deadline = Instant::now() + timeout;
+        let mut cmd = Command::new(sips);
+        cmd.args(["-g", "pixelWidth", "-g", "pixelHeight"]).arg(src);
+        let stdout = run_tool_stdout(cmd, "sips", timeout).await?;
+        let (width, height) = sips::parse_dimensions(&stdout)
+            .ok_or_else(|| ProcessError::Unprocessable("sips did not report the size".into()))?;
+        let mut jpeg = tmp.as_os_str().to_owned();
+        jpeg.push(".sips.jpg");
+        let jpeg = PathBuf::from(jpeg);
+        let _cleanup = Cleanup(vec![jpeg.clone()]);
+        let mut cmd = Command::new(sips);
+        cmd.arg("-Z")
+            .arg(sips::target_size(width, height, preset.size()).to_string());
+        // Convert to sRGB when the profile is there; if not, keep the colours as they are.
+        if is_file(&self.srgb_profile) {
+            cmd.arg("-m").arg(&self.srgb_profile);
+        }
+        cmd.args(["-s", "format", "jpeg", "-s", "formatOptions", "90"])
+            .arg(src)
+            .arg("--out")
+            .arg(&jpeg);
+        let left = deadline.saturating_duration_since(Instant::now());
+        run_tool(cmd, "sips", left, &jpeg).await?;
+        let bytes = tokio::fs::read(&jpeg)
+            .await
+            .map_err(|e| ProcessError::Io(e.to_string()))?;
+        let webp = tokio::task::spawn_blocking(move || sips::finish(&bytes, 80.0))
+            .await
+            .map_err(|e| ProcessError::Io(format!("finishing the image: {e}")))?
+            .map_err(|e| ProcessError::Unprocessable(format!("cannot finish the image: {e}")))?;
+        tokio::fs::write(tmp, webp)
+            .await
+            .map_err(|e| ProcessError::Io(e.to_string()))
+    }
+
+    async fn run_ffmpeg(&self, src: &Path, tmp: &Path, preset: Preset) -> Result<(), ProcessError> {
+        let n = preset.size();
+        let filter =
+            format!("scale=w='min({n},iw)':h='min({n},ih)':force_original_aspect_ratio=decrease");
+        let attempt = |seek: &'static str| {
+            let mut cmd = Command::new(&self.ffmpeg);
+            cmd.args(["-nostdin", "-v", "error", "-ss", seek])
+                // Only plain files and ordinary container formats: no playlists, concat
+                // scripts or network protocols that a crafted file could abuse.
+                .args(["-protocol_whitelist", "file"])
+                .args([
+                    "-format_whitelist",
+                    "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi",
+                ])
+                .arg("-i")
+                .arg(src)
+                .args(["-frames:v", "1", "-vf"])
+                .arg(&filter)
+                .args(["-c:v", "libwebp", "-quality", "80", "-y"])
+                .arg(tmp);
+            cmd
+        };
+        // Both attempts share one timeout budget.
+        let timeout = preset.timeout(self.timeout);
+        let deadline = Instant::now() + timeout;
+        match run_tool(attempt("1"), "ffmpeg", timeout, tmp).await {
+            Err(ProcessError::Unprocessable(reason)) if reason != "timeout" => {
+                // Shorter than one second: seeking past the end yields no frame.
+                let left = deadline.saturating_duration_since(Instant::now());
+                run_tool(attempt("0"), "ffmpeg", left, tmp).await
+            }
+            other => other,
+        }
+    }
+
+    /// Makes offline audio in a blocking thread within the audio timeout. When time is up
+    /// the encode is told to stop, and the result comes once it has. It is told to stop too
+    /// if this future is dropped (the runtime shutting down), which would otherwise wait for
+    /// the whole encode.
+    async fn encode_audio(&self, src: &Path, tmp: &Path) -> Result<(), ProcessError> {
+        let cancel = CancelOnDrop(Arc::new(AtomicBool::new(false)));
+        let encoder = self.audio_encoder.clone();
+        let (src, dest, flag) = (src.to_path_buf(), tmp.to_path_buf(), cancel.0.clone());
+        let mut task = tokio::task::spawn_blocking(move || encoder(&src, &dest, &flag));
+        let joined = match tokio::time::timeout(self.audio_timeout, &mut task).await {
+            Ok(joined) => joined,
+            Err(_) => {
+                cancel.0.store(true, Ordering::SeqCst);
+                let _ = task.await;
+                tracing::warn!("an offline-audio encode timed out; not recording it");
+                return Err(ProcessError::TimedOut);
+            }
+        };
+        match joined {
+            Ok(result) => result,
+            Err(e) if e.is_panic() => {
+                tracing::error!("an offline-audio encode panicked");
+                Err(ProcessError::Unprocessable("the encoder panicked".into()))
+            }
+            Err(e) => Err(ProcessError::Io(format!("the encode did not finish: {e}"))),
+        }
+    }
+}
+
+/// Whether a tool's error output says it could not write (or read) files: the machine's
+/// problem, not the media file's.
+fn is_io_failure(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    [
+        "unable to open for write",
+        "unable to write",
+        "error opening output",
+        "permission denied",
+        "no space left",
+        "read-only file system",
+        "disk quota",
+    ]
+    .iter()
+    .any(|m| s.contains(m))
+}
+
+/// Runs `cmd` to completion within `timeout`. Success means exit status 0 and a non-empty
+/// file at `output`; ffmpeg exits 0 with an empty file when asked to seek past the end.
+async fn run_tool(
+    cmd: Command,
+    name: &'static str,
+    timeout: Duration,
+    output: &Path,
+) -> Result<(), ProcessError> {
+    run_child(cmd, name, timeout, Stdio::null()).await?;
+    match tokio::fs::metadata(output).await {
+        Ok(m) if m.len() > 0 => Ok(()),
+        _ => Err(ProcessError::Unprocessable(format!(
+            "{name} produced no output"
+        ))),
+    }
+}
+
+/// Like [`run_tool`] for a tool that answers on its standard output: success is exit status 0,
+/// and the result is what it printed.
+async fn run_tool_stdout(
+    cmd: Command,
+    name: &'static str,
+    timeout: Duration,
+) -> Result<String, ProcessError> {
+    let stdout = run_child(cmd, name, timeout, Stdio::piped()).await?;
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
+}
+
+/// Runs `cmd` with `stdout` as given within `timeout`, killing it when time is up. Returns what
+/// it printed (nothing, if `stdout` is not piped) when it exits with status 0.
+async fn run_child(
+    mut cmd: Command,
+    name: &'static str,
+    timeout: Duration,
+    stdout: Stdio,
+) -> Result<Vec<u8>, ProcessError> {
+    cmd.stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::error!(
+                "external tool `{name}` was not found; install it or point its ASTERIA_* variable at it"
+            );
+            return Err(ProcessError::ToolMissing(name));
+        }
+        Err(e) => return Err(ProcessError::Io(format!("{name}: {e}"))),
+    };
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let reader = tokio::spawn(async move {
+        // Keep the first 4 KiB, and drain the rest so the child never blocks on a full pipe.
+        let mut kept = Vec::new();
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = stderr.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+            if kept.len() < 4096 {
+                kept.extend_from_slice(&buf[..n]);
+            }
+        }
+        String::from_utf8_lossy(&kept).into_owned()
+    });
+    // Standard output, when piped, is read to the end alongside; it is small (a few lines).
+    let out_reader = child.stdout.take().map(|mut out| {
+        tokio::spawn(async move {
+            let mut all = Vec::new();
+            let _ = out.read_to_end(&mut all).await;
+            all
+        })
+    });
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => {
+            reader.abort();
+            if let Some(r) = &out_reader {
+                r.abort();
+            }
+            return Err(ProcessError::Io(format!("{name}: {e}")));
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            reader.abort();
+            if let Some(r) = &out_reader {
+                r.abort();
+            }
+            return Err(ProcessError::Unprocessable("timeout".into()));
+        }
+    };
+    let stderr = reader.await.unwrap_or_default();
+    if !status.success() {
+        if let Some(r) = &out_reader {
+            r.abort();
+        }
+        let detail = stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.contains("VIPS-WARNING"))
+            .unwrap_or("no error output");
+        if is_io_failure(&stderr) {
+            return Err(ProcessError::Io(format!(
+                "{name} failed ({status}): {detail}"
+            )));
+        }
+        return Err(ProcessError::Unprocessable(format!(
+            "{name} failed ({status}): {detail}"
+        )));
+    }
+    match out_reader {
+        Some(r) => Ok(r.await.unwrap_or_default()),
+        None => Ok(Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod tool_tests {
+    use super::*;
+
+    fn program(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    fn exe_name(name: &str) -> String {
+        if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// A temp dir and, inside it, a folder with a space in its name, as in a macOS package.
+    fn tempdir_with_space() -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root
+            .path()
+            .join("Asteria Photos.app")
+            .join("Contents")
+            .join("MacOS");
+        std::fs::create_dir_all(&dir).unwrap();
+        (root, dir)
+    }
+
+    #[test]
+    fn a_tool_beside_the_executable_wins_over_path() {
+        let (_root, exe_dir) = tempdir_with_space();
+        let on_path = tempfile::tempdir().unwrap();
+        let bundled = program(&exe_dir, &exe_name("ffmpeg"));
+        program(on_path.path(), &exe_name("ffmpeg"));
+        let found = find_program(
+            OsStr::new("ffmpeg"),
+            &bundled_dirs(&exe_dir),
+            Some(on_path.path().as_os_str()),
+            &[],
+        );
+        assert_eq!(found, Some(bundled));
+    }
+
+    /// macOS puts `/usr/local/bin/asteria-photos` as a link into the `.app`: the tools are
+    /// looked for beside the link's target, where the package put them.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_executable_finds_the_tools_beside_its_target() {
+        let (_root, exe_dir) = tempdir_with_space();
+        let exe = program(&exe_dir, "asteria-photos");
+        let bundled = program(&exe_dir, "ffmpeg");
+        let bin = tempfile::tempdir().unwrap();
+        let link = bin.path().join("asteria-photos");
+        std::os::unix::fs::symlink(&exe, &link).unwrap();
+        let found = find_program(OsStr::new("ffmpeg"), &exe_bundled_dirs(&link), None, &[]);
+        assert_eq!(
+            found.map(|f| f.canonicalize().unwrap()),
+            Some(bundled.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn vipsthumbnail_is_found_in_its_bundled_bin_folder() {
+        let (_root, exe_dir) = tempdir_with_space();
+        let bin = exe_dir.join("vips").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let expected = program(&bin, &exe_name("vipsthumbnail"));
+        let found = find_program(
+            OsStr::new("vipsthumbnail"),
+            &bundled_dirs(&exe_dir),
+            None,
+            &[],
+        );
+        assert_eq!(found, Some(expected));
+    }
+
+    #[test]
+    fn a_tool_in_the_apps_resources_is_found() {
+        let (_root, exe_dir) = tempdir_with_space();
+        let resources = exe_dir.parent().unwrap().join("Resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        let expected = program(&resources, &exe_name("ffmpeg"));
+        let found = find_program(OsStr::new("ffmpeg"), &bundled_dirs(&exe_dir), None, &[]);
+        assert_eq!(found, Some(expected));
+    }
+
+    #[test]
+    fn only_an_apps_executable_looks_in_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = bundled_dirs(dir.path());
+        assert!(!dirs.iter().any(|d| d.ends_with("Resources")));
+    }
+
+    #[test]
+    fn a_path_in_the_variable_is_used_as_it_is() {
+        let (_root, exe_dir) = tempdir_with_space();
+        let bundled = program(&exe_dir, &exe_name("ffmpeg"));
+        let elsewhere = tempfile::tempdir().unwrap();
+        let chosen = program(elsewhere.path(), "my-ffmpeg");
+        let missing = elsewhere.path().join("nothing-here");
+        let before = bundled_dirs(&exe_dir);
+        assert_eq!(
+            find_program(chosen.as_os_str(), &before, None, &[]),
+            Some(chosen)
+        );
+        assert_eq!(find_program(missing.as_os_str(), &before, None, &[]), None);
+        assert!(bundled.is_file());
+    }
+
+    #[test]
+    fn an_env_path_that_exists_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = program(dir.path(), "my-vips");
+        // The path has a directory part, so `PATH` is not consulted.
+        assert_eq!(find_program(tool.as_os_str(), &[], None, &[]), Some(tool));
+    }
+
+    #[test]
+    fn an_env_path_that_does_not_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("nothing-here");
+        let on_path = std::env::join_paths([dir.path()]).unwrap();
+        assert_eq!(
+            find_program(gone.as_os_str(), &[], Some(&on_path), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_program_on_the_path_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = if cfg!(windows) { "vipsx.exe" } else { "vipsx" };
+        let tool = program(dir.path(), name);
+        let path = std::env::join_paths([dir.path()]).unwrap();
+        assert_eq!(
+            find_program(OsStr::new("vipsx"), &[], Some(&path), &[]),
+            Some(tool)
+        );
+        assert_eq!(
+            find_program(OsStr::new("not-there"), &[], Some(&path), &[]),
+            None
+        );
+        assert_eq!(find_program(OsStr::new("vipsx"), &[], None, &[]), None);
+    }
+
+    #[test]
+    fn a_program_only_in_a_well_known_dir_is_found_after_the_path() {
+        let path_dir = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        let name = if cfg!(windows) { "vipsx.exe" } else { "vipsx" };
+        let tool = program(extra.path(), name);
+        let path = std::env::join_paths([path_dir.path()]).unwrap();
+        let extras = [extra.path().to_path_buf()];
+        assert_eq!(
+            find_program(OsStr::new("vipsx"), &[], Some(&path), &extras),
+            Some(tool.clone())
+        );
+        // Without a PATH at all too.
+        assert_eq!(
+            find_program(OsStr::new("vipsx"), &[], None, &extras),
+            Some(tool.clone())
+        );
+        // PATH comes first.
+        let on_path = program(path_dir.path(), name);
+        assert_eq!(
+            find_program(OsStr::new("vipsx"), &[], Some(&path), &extras),
+            Some(on_path)
+        );
+    }
+
+    #[test]
+    fn the_processor_runs_the_resolved_path_or_else_the_bare_name() {
+        let extra = tempfile::tempdir().unwrap();
+        let name = if cfg!(windows) { "vipsx.exe" } else { "vipsx" };
+        let tool = program(extra.path(), name);
+        let extras = [extra.path().to_path_buf()];
+        assert_eq!(
+            resolve_program(OsString::from("vipsx"), &[], None, &extras),
+            tool.into_os_string()
+        );
+        assert_eq!(
+            resolve_program(OsString::from("not-there"), &[], None, &extras),
+            OsString::from("not-there")
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod sips_tests {
+    use super::*;
+    use crate::sips::jpeg_with_orientation;
+
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn leftovers(dir: &Path) -> Vec<PathBuf> {
+        walkdir::WalkDir::new(dir)
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.into_path())
+            .filter(|p| p.extension().is_none_or(|e| e != "webp"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn stdout_of_a_tool_is_returned_and_failures_are_mapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = script(dir.path(), "ok.sh", "echo hello");
+        let out = run_tool_stdout(Command::new(&ok), "sips", Duration::from_secs(10)).await;
+        assert_eq!(out.as_deref(), Ok("hello\n"));
+
+        let bad = script(dir.path(), "bad.sh", "echo 'Error 13' >&2; exit 13");
+        let err = run_tool_stdout(Command::new(&bad), "sips", Duration::from_secs(10)).await;
+        assert!(matches!(err, Err(ProcessError::Unprocessable(m)) if m.contains("Error 13")));
+
+        let gone = dir.path().join("gone");
+        let err = run_tool_stdout(Command::new(&gone), "sips", Duration::from_secs(10)).await;
+        assert_eq!(err, Err(ProcessError::ToolMissing("sips")));
+
+        let slow = script(dir.path(), "slow.sh", "sleep 30");
+        let err = run_tool_stdout(Command::new(&slow), "sips", Duration::from_millis(200)).await;
+        assert_eq!(err, Err(ProcessError::Unprocessable("timeout".into())));
+    }
+
+    /// A stand-in for `sips`: answers `-g` with a size, and for a conversion writes `jpeg`
+    /// to the `--out` path, recording its arguments.
+    fn fake_sips(dir: &Path, jpeg: &Path, width: u32, height: u32) -> PathBuf {
+        let log = dir.join("args.log");
+        script(
+            dir,
+            "sips",
+            &format!(
+                "echo \"$@\" >> '{log}'\n\
+                 if [ \"$1\" = -g ]; then\n\
+                 printf '%s\\n  pixelWidth: {width}\\n  pixelHeight: {height}\\n' \"$5\"\n\
+                 exit 0\n\
+                 fi\n\
+                 while [ \"$1\" != --out ]; do shift; done\n\
+                 cp '{jpeg}' \"$2\"",
+                log = log.display(),
+                jpeg = jpeg.display(),
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn sips_output_is_finished_in_rust() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg = dir.path().join("in.jpg");
+        std::fs::write(&jpeg, jpeg_with_orientation(400, 200, 6)).unwrap();
+        let sips = fake_sips(dir.path(), &jpeg, 400, 200);
+        let src = dir.path().join("photo.jpg");
+        std::fs::write(&src, b"x").unwrap();
+        let thumbs = dir.path().join("thumbs");
+        let profile = dir.path().join("sRGB Profile.icc");
+        std::fs::write(&profile, b"icc").unwrap();
+        let p = Processor::with_image_tool(
+            thumbs.clone(),
+            1,
+            Duration::from_secs(30),
+            ImageTool::Sips(sips.into_os_string()),
+            "ffmpeg",
+        )
+        .with_srgb_profile(profile.clone());
+        let out = p
+            .render(&src, MediaKind::Image, "blake3:abcdef0123", Preset::Preview)
+            .await
+            .unwrap();
+        let img = image::open(&out).unwrap();
+        assert_eq!((img.width(), img.height()), (200, 400));
+        // 400x200 is below 1920, so sips is asked for 400, not 1920.
+        let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+        assert!(
+            args.contains(&format!("-Z 400 -m {} -s format jpeg", profile.display())),
+            "{args}"
+        );
+        assert!(leftovers(&thumbs).is_empty(), "{:?}", leftovers(&thumbs));
+    }
+
+    #[tokio::test]
+    async fn without_the_profile_file_sips_runs_without_matching() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg = dir.path().join("in.jpg");
+        std::fs::write(&jpeg, jpeg_with_orientation(40, 20, 1)).unwrap();
+        let sips = fake_sips(dir.path(), &jpeg, 40, 20);
+        let src = dir.path().join("photo.jpg");
+        std::fs::write(&src, b"x").unwrap();
+        let p = Processor::with_image_tool(
+            dir.path().join("thumbs"),
+            1,
+            Duration::from_secs(30),
+            ImageTool::Sips(sips.into_os_string()),
+            "ffmpeg",
+        )
+        .with_srgb_profile(dir.path().join("missing.icc"));
+        p.render(&src, MediaKind::Image, "blake3:abcdef0123", Preset::Thumb)
+            .await
+            .unwrap();
+        let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+        assert!(args.contains("-Z 40 -s format jpeg"), "{args}");
+        assert!(!args.contains("-m "), "{args}");
+    }
+
+    #[tokio::test]
+    async fn a_sips_that_writes_garbage_is_unprocessable_and_leaves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg = dir.path().join("in.jpg");
+        std::fs::write(&jpeg, b"not a jpeg").unwrap();
+        let sips = fake_sips(dir.path(), &jpeg, 10, 10);
+        let src = dir.path().join("photo.jpg");
+        std::fs::write(&src, b"x").unwrap();
+        let thumbs = dir.path().join("thumbs");
+        let p = Processor::with_image_tool(
+            thumbs.clone(),
+            1,
+            Duration::from_secs(30),
+            ImageTool::Sips(sips.into_os_string()),
+            "ffmpeg",
+        );
+        let err = p
+            .render(&src, MediaKind::Image, "blake3:abcdef0123", Preset::Thumb)
+            .await;
+        assert!(
+            matches!(err, Err(ProcessError::Unprocessable(_))),
+            "{err:?}"
+        );
+        assert!(leftovers(&thumbs).is_empty(), "{:?}", leftovers(&thumbs));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_sips_tests {
+    use super::*;
+    use crate::sips::jpeg_with_orientation;
+
+    const HASH: &str = "blake3:abcdef0123456789";
+
+    fn processor(thumbs: &Path) -> Processor {
+        Processor::with_image_tool(
+            thumbs.to_path_buf(),
+            1,
+            Duration::from_secs(60),
+            ImageTool::Sips(SIPS_PATH.into()),
+            "ffmpeg",
+        )
+    }
+
+    fn size_of(webp: &Path) -> (u32, u32) {
+        let img = image::open(webp).unwrap();
+        (img.width(), img.height())
+    }
+
+    #[tokio::test]
+    async fn sips_renders_a_heic_thumbnail() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpg = dir.path().join("big.jpg");
+        let image = image::RgbImage::from_pixel(1200, 800, image::Rgb([200, 30, 30]));
+        image.save(&jpg).unwrap();
+        let heic = dir.path().join("big.heic");
+        let status = std::process::Command::new(SIPS_PATH)
+            .args(["-s", "format", "heic"])
+            .arg(&jpg)
+            .arg("--out")
+            .arg(&heic)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let out = processor(&dir.path().join("thumbs"))
+            .render(&heic, MediaKind::Image, HASH, Preset::Thumb)
+            .await
+            .unwrap();
+        let (w, h) = size_of(&out);
+        assert_eq!(w.max(h), 256);
+    }
+
+    #[tokio::test]
+    async fn sips_keeps_a_portrait_photo_upright() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("portrait.jpg");
+        std::fs::write(&src, jpeg_with_orientation(400, 200, 6)).unwrap();
+        let out = processor(&dir.path().join("thumbs"))
+            .render(&src, MediaKind::Image, HASH, Preset::Preview)
+            .await
+            .unwrap();
+        assert_eq!(size_of(&out), (200, 400));
+    }
+
+    #[tokio::test]
+    async fn sips_keeps_a_portrait_heic_upright() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpg = dir.path().join("portrait.jpg");
+        std::fs::write(&jpg, jpeg_with_orientation(400, 200, 6)).unwrap();
+        let heic = dir.path().join("portrait.heic");
+        let status = std::process::Command::new(SIPS_PATH)
+            .args(["-s", "format", "heic"])
+            .arg(&jpg)
+            .arg("--out")
+            .arg(&heic)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let out = processor(&dir.path().join("thumbs"))
+            .render(&heic, MediaKind::Image, HASH, Preset::Preview)
+            .await
+            .unwrap();
+        // Upright whichever way sips carries the rotation into the HEIC: not left on its
+        // side, and not turned twice.
+        assert_eq!(size_of(&out), (200, 400));
+    }
+
+    #[tokio::test]
+    async fn sips_marks_a_broken_file_unprocessable() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("x.jpg");
+        std::fs::write(
+            &src,
+            (0..100u8).map(|n| n.wrapping_mul(37)).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let err = processor(&dir.path().join("thumbs"))
+            .render(&src, MediaKind::Image, HASH, Preset::Thumb)
+            .await;
+        assert!(
+            matches!(err, Err(ProcessError::Unprocessable(_))),
+            "{err:?}"
+        );
+    }
+}

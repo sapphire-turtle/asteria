@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use asteria_framework_client::rpc::{CONNECT_TIMEOUT, DEFAULT_RETRY_AFTER, MAX_RETRY_AFTER};
+use asteria_common_client::rpc::{CONNECT_TIMEOUT, DEFAULT_RETRY_AFTER, MAX_RETRY_AFTER};
 use corundum_framework_audio::decode::Source;
 use corundum_framework_audio::feed::{SourceStatus, Watch};
 use corundum_framework_audio::{TrackError, Wait};

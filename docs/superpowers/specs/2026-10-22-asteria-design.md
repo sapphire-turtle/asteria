@@ -38,11 +38,11 @@ AIエージェントに整理を手伝ってもらえる、セルフホストの
 
 ```
 asteria/
-├─ crates/                                   framework（将来 asteria-framework リポジトリに切り出せる）
-│  ├─ asteria-framework-api/     MIT OR Apache-2.0  共通の wire 型
-│  ├─ asteria-framework/         GPL-3.0-or-later   コア（ライブラリ、XMP、ハッシュ、ジャーナル、ファイル操作と取り消し、操作ログのマージ）
-│  ├─ asteria-framework-server/  GPL-3.0-or-later   HTTP（JSON-RPC＋バイナリ）、認証、DB キャッシュ、MCP、メディア処理、サーバーの CLI の共通部分
-│  └─ asteria-framework-client/  GPL-3.0-or-later   接続、オフラインキャッシュ、操作キュー、egui の共通部品
+├─ crates/                                   framework（将来 asteria-common-core リポジトリに切り出せる）
+│  ├─ asteria-common-api/     MIT OR Apache-2.0  共通の wire 型
+│  ├─ asteria-common-core/         GPL-3.0-or-later   コア（ライブラリ、XMP、ハッシュ、ジャーナル、ファイル操作と取り消し、操作ログのマージ）
+│  ├─ asteria-common-server/  GPL-3.0-or-later   HTTP（JSON-RPC＋バイナリ）、認証、DB キャッシュ、MCP、メディア処理、サーバーの CLI の共通部分
+│  └─ asteria-common-client/  GPL-3.0-or-later   接続、オフラインキャッシュ、操作キュー、egui の共通部品
 ├─ photos/                                   photos（将来 asteria-photos リポジトリの root）
 │  ├─ crates/
 │  │  ├─ asteria-photos-api/     MIT OR Apache-2.0  photos の wire 型（framework-api を re-export）
@@ -72,18 +72,18 @@ asteria/
 
 ### 依存の向き
 
-- `asteria-framework-api` は何にも依存しない。依存してよいのは serde と ID 型だけ。
-- `asteria-photos-api` と `asteria-music-api` は `asteria-framework-api` に依存し、それを re-export する。
-- `asteria-framework` は `asteria-framework-api` に依存する。`-server` と `-client` は `asteria-framework` に依存する。
+- `asteria-common-api` は何にも依存しない。依存してよいのは serde と ID 型だけ。
+- `asteria-photos-api` と `asteria-music-api` は `asteria-common-api` に依存し、それを re-export する。
+- `asteria-common-core` は `asteria-common-api` に依存する。`-server` と `-client` は `asteria-common-core` に依存する。
 - 各アプリは、framework の該当クレートと自分の `*-api` に依存する。photos と music は互いに依存しない。
 - サーバーとクライアントを別クレートにするのは、サーバーに egui を、クライアントに ffmpeg や vips を持ち込まないため。
-- 現状、photos の閲覧用 DTO（`MediaItem`、`LibraryInfo`、`FolderListing` など）は `asteria-framework-api` にある。これらを変えると、photos-api と music-api の両方のメジャーバージョンが上がる。music 側に関係のない変更が増えるようなら、後で photos-api に移す。
+- 現状、photos の閲覧用 DTO（`MediaItem`、`LibraryInfo`、`FolderListing` など）は `asteria-common-api` にある。これらを変えると、photos-api と music-api の両方のメジャーバージョンが上がる。music 側に関係のない変更が増えるようなら、後で photos-api に移す。
 
 ### バージョン管理
 
 - `*-api` の3クレートは、それぞれ単独でバージョンを管理する。**メジャーバージョン＝API バージョン**とする。
 - バージョンを代表するのはアプリ側の API（`asteria-photos-api` / `asteria-music-api`）。クライアントはハンドシェイクで、このバージョンだけを確認する。
-- `asteria-framework-api` に破壊的変更を入れたら、photos-api と music-api の両方のメジャーバージョンを上げる。
+- `asteria-common-api` に破壊的変更を入れたら、photos-api と music-api の両方のメジャーバージョンを上げる。
 - `*-api` 以外のクレートは、ワークスペースで共通のバージョンにする。
 
 ### ライセンス
@@ -564,7 +564,7 @@ music-server は photos-server と同じ形（Plan 8b からはライブラリ�
 
 ### 5.3 アップロード（photos）
 
-- 共通部分は `asteria-framework-client` の `upload` に置く。
+- 共通部分は `asteria-common-client` の `upload` に置く。
 - 送信キューはライブラリ ID とプロファイルの組ごとに `<data_dir>/uploads/<library_id>/<profile_id>.json` に保存し（同じサーバーを別のユーザーで使っても、キューを取り違えない）、アプリを閉じても次に開いたときに続きから送る。ローカルのファイルが変わっていたら最初から送り直し、サーバーのセッションが消えていたら `upload.begin` からやり直す。
 - 送信は `Session` の上で動く。別のサーバーに切り替えると止まり、戻ると続きから送る。サーバーがアップロードに対応していなければ（`upload.*` が `METHOD_NOT_FOUND`）、組を失敗にせずに送信を止め、そう表示する。
 - 確定で XMP が捨てられたなど、警告つきで完了した組は、その旨と理由を表示する。
@@ -649,7 +649,7 @@ music-server は photos-server と同じ形（Plan 8b からはライブラリ�
 - 画面幅に応じて、レイアウトをタッチ向けに切り替える。
 - iOS 向けには `asteria-<app>-mobile` を staticlib でビルドし、`<app>/mobile/ios/` の Xcode プロジェクトで包む。
 
-### 5.6 共通の UI 部品（asteria-framework-client）
+### 5.6 共通の UI 部品（asteria-common-client）
 
 - サムネイルのグリッド
 - 接続設定（サーバーの登録の一覧、追加・編集・削除、切り替え）
@@ -694,7 +694,7 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
 
 - **リリースの単位**：タグ `v<version>`（ワークスペース共通のバージョン）を push すると `release.yml` が動き、1つの GitHub リリースに次を載せる。
   - desktop の cargo-packager パッケージ：photos と music それぞれを `release-packager.yml` で作る。Linux は AppImage、macOS は DMG（と更新に使う `.app.tar.gz`。arm64 と x86_64 を1つにしたユニバーサル）、Windows は自分のユーザーだけに入れる NSIS のインストーラー。ファイル名は `asteria-<app>-desktop_<version>_<arch>.<ext>`（`x86_64.AppImage`、`universal.dmg`、`x64-setup.exe`）。
-    - どのパッケージも組織の minisign の鍵（`PACKAGER_SIGN_PRIVATE_KEY`）で署名し、`.sig` を並べる。アプリは公開鍵（`asteria-framework-desktop` の `UPDATE_PUBKEY`、鍵 ID F4A73F39AA17C8EB。sapphire-framework と同じ）を持ち、署名の合わない更新は入れない。
+    - どのパッケージも組織の minisign の鍵（`PACKAGER_SIGN_PRIVATE_KEY`）で署名し、`.sig` を並べる。アプリは公開鍵（`asteria-common-desktop` の `UPDATE_PUBKEY`、鍵 ID F4A73F39AA17C8EB。sapphire-framework と同じ）を持ち、署名の合わない更新は入れない。
     - 更新のフィードは `asteria-<app>-latest.json`（`PackageSpec::app_name`）。同じリリースに2つのアプリのフィードが並ぶ。
     - パッケージの設定は desktop のクレートの `[package.metadata.packager]`：製品名は `Asteria Photos` / `Asteria Music`、識別子は `org.sapphire-turtle.asteria-<app>`（どちらもランチャーと同じ）。Windows では `%LocalAppData%\<製品名>` に入る。
     - 実行ファイル名（#41）：パッケージの中も cargo の名前（`asteria-<app>-desktop`）のまま。Windows はワークフローがその横にコンソールのシム（cargo のバイナリ `asteria-<app>-console`）を `asteria-<app>.exe` として置く。
@@ -800,4 +800,4 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
 - OS 固有の処理は `#[cfg]` のモジュールに分ける。ファイルダイアログやドラッグ＆ドロップは、デスクトップ側のモジュールにだけ置く。
 - ディレクトリは `corundum_framework::dirs` を通してだけ取る。
 - 画面は corundum の Shell に乗せ、狭い幅でも使えるようにする。
-- `asteria-framework-client` は eframe に依存しない（egui だけ）。CI の macOS ジョブで、このクレートと `asteria-<app>-mobile` を `aarch64-apple-ios` 向けに `cargo check` する（mobile は Plan 8b から）。
+- `asteria-common-client` は eframe に依存しない（egui だけ）。CI の macOS ジョブで、このクレートと `asteria-<app>-mobile` を `aarch64-apple-ios` 向けに `cargo check` する（mobile は Plan 8b から）。

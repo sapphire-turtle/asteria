@@ -1,0 +1,376 @@
+mod common;
+
+use std::fs;
+use std::path::Path;
+
+use asteria_common_core::hash::{HashScope, content_hash, file_hash};
+use asteria_common_core::journal::{Actor, OpKind};
+use asteria_common_core::{Error, Library, UserId};
+use chrono::{TimeZone, Timelike, Utc};
+use grain_id::GrainId;
+
+/// A library root and, apart from it, the instance's state directory.
+struct Dirs {
+    root: tempfile::TempDir,
+    state: tempfile::TempDir,
+}
+
+impl Dirs {
+    fn path(&self) -> &Path {
+        self.root.path()
+    }
+}
+
+fn setup(rel: &str) -> (Dirs, Library) {
+    let dir = Dirs {
+        root: tempfile::tempdir().unwrap(),
+        state: tempfile::tempdir().unwrap(),
+    };
+    let lib = Library::init(dir.path(), "fluo10")
+        .unwrap()
+        .with_state_dir(dir.state.path());
+    let dest = dir.path().join(rel);
+    fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    fs::copy(common::fixture("red.jpg"), dest).unwrap();
+    (dir, lib)
+}
+
+fn t(s: u32) -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, s).unwrap()
+}
+
+#[test]
+fn journal_goes_to_the_state_dir_not_the_workspace() {
+    let (dir, lib) = setup("red.jpg");
+    let owner = lib.owner();
+    lib.set_rating(Path::new("red.jpg"), owner, 4, t(1), Actor::User(owner))
+        .unwrap();
+    let month = Utc::now().format("%Y-%m.jsonl").to_string();
+    assert!(dir.state.path().join("journal").join(month).is_file());
+    let mut meta: Vec<_> = fs::read_dir(dir.path().join(".asteria"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    meta.sort();
+    assert_eq!(meta, ["library.toml", "users.toml"]);
+}
+
+/// Without a state directory there is nowhere to journal, so nothing is written.
+#[test]
+fn sidecar_update_without_a_state_dir_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::init(dir.path(), "fluo10").unwrap();
+    fs::copy(common::fixture("red.jpg"), dir.path().join("red.jpg")).unwrap();
+    let owner = lib.owner();
+    let err = lib
+        .set_rating(Path::new("red.jpg"), owner, 4, t(1), Actor::User(owner))
+        .unwrap_err();
+    assert!(matches!(err, Error::NoStateDir), "{err}");
+    assert!(!dir.path().join("red.jpg.xmp").exists());
+    assert!(!dir.path().join(".asteria/journal").exists());
+}
+
+#[test]
+fn no_sidecar_is_created_for_noop_update() {
+    let (dir, lib) = setup("red.jpg");
+    let wrote = lib
+        .update_sidecar(Path::new("red.jpg"), Actor::User(lib.owner()), |_| {})
+        .unwrap();
+    assert!(!wrote);
+    assert!(!dir.path().join("red.jpg.xmp").exists());
+    assert!(lib.journal().unwrap().read_all().unwrap().is_empty());
+}
+
+#[test]
+fn first_rating_creates_sidecar_with_payload_hash() {
+    let (dir, lib) = setup("red.jpg");
+    let owner = lib.owner();
+    lib.set_rating(Path::new("red.jpg"), owner, 4, t(1), Actor::User(owner))
+        .unwrap();
+    assert!(dir.path().join("red.jpg.xmp").exists());
+    let sc = lib.read_sidecar(Path::new("red.jpg")).unwrap().unwrap();
+    assert_eq!(sc.rating.unwrap().value, 4);
+    let expected = content_hash(&dir.path().join("red.jpg")).unwrap();
+    let (hash, scope) = sc.content_hash.unwrap();
+    assert_eq!(hash, expected.hash);
+    assert_eq!(scope, HashScope::MediaPayload1);
+    let entries = lib.journal().unwrap().read_all().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, OpKind::WriteSidecar);
+    assert_eq!(entries[0].after["path"], "red.jpg");
+    assert_eq!(entries[0].after["fields"][0], "rating");
+}
+
+#[test]
+fn unchanged_update_on_existing_sidecar_writes_nothing() {
+    let (_dir, lib) = setup("red.jpg");
+    let owner = lib.owner();
+    let a = Actor::User(owner);
+    lib.set_rating(Path::new("red.jpg"), owner, 4, t(1), a)
+        .unwrap();
+    assert!(!lib.update_sidecar(Path::new("red.jpg"), a, |_| {}).unwrap());
+    assert_eq!(lib.journal().unwrap().read_all().unwrap().len(), 1);
+}
+
+#[test]
+fn non_owner_rating_goes_to_user_ratings() {
+    let (_dir, lib) = setup("red.jpg");
+    let other = UserId(GrainId::random());
+    lib.set_rating(Path::new("red.jpg"), other, 5, t(1), Actor::User(other))
+        .unwrap();
+    let sc = lib.read_sidecar(Path::new("red.jpg")).unwrap().unwrap();
+    assert!(sc.rating.is_none());
+    assert_eq!(sc.user_ratings.len(), 1);
+    assert_eq!(sc.user_ratings[&other].value, 5);
+}
+
+#[test]
+fn older_rating_does_not_overwrite_newer() {
+    let (_dir, lib) = setup("red.jpg");
+    let owner = lib.owner();
+    let a = Actor::User(owner);
+    let p = Path::new("red.jpg");
+    lib.set_rating(p, owner, 4, t(2), a).unwrap();
+    lib.set_rating(p, owner, 2, t(1), a).unwrap();
+    assert_eq!(
+        lib.read_sidecar(p).unwrap().unwrap().rating.unwrap().value,
+        4
+    );
+}
+
+#[test]
+fn malformed_sidecar_is_not_overwritten() {
+    let (dir, lib) = setup("red.jpg");
+    let sc = dir.path().join("red.jpg.xmp");
+    fs::copy(common::fixture("xmp/malformed.xmp"), &sc).unwrap();
+    let before = fs::read(&sc).unwrap();
+    let owner = lib.owner();
+    let err = lib
+        .set_rating(Path::new("red.jpg"), owner, 4, t(1), Actor::User(owner))
+        .unwrap_err();
+    assert!(matches!(err, Error::MalformedSidecar { .. }));
+    assert_eq!(fs::read(&sc).unwrap(), before);
+    assert!(lib.journal().unwrap().read_all().unwrap().is_empty());
+}
+
+#[test]
+fn japanese_media_path_works() {
+    let (dir, lib) = setup("京都旅行/red.jpg");
+    let owner = lib.owner();
+    lib.set_rating(
+        Path::new("京都旅行/red.jpg"),
+        owner,
+        3,
+        t(1),
+        Actor::User(owner),
+    )
+    .unwrap();
+    assert!(dir.path().join("京都旅行/red.jpg.xmp").exists());
+    let e = &lib.journal().unwrap().read_all().unwrap()[0];
+    assert_eq!(e.after["path"], "京都旅行/red.jpg");
+}
+
+#[test]
+fn invalid_rating_rejected() {
+    let (_dir, lib) = setup("red.jpg");
+    let owner = lib.owner();
+    for v in [6, -2] {
+        let err = lib
+            .set_rating(Path::new("red.jpg"), owner, v, t(1), Actor::User(owner))
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidRating(x) if x == v));
+    }
+}
+
+#[test]
+fn missing_media_is_reported() {
+    let (_dir, lib) = setup("red.jpg");
+    let err = lib
+        .update_sidecar(Path::new("nope.jpg"), Actor::User(lib.owner()), |_| {})
+        .unwrap_err();
+    assert!(matches!(err, Error::MediaNotFound(_)));
+}
+
+#[test]
+fn path_escape_is_rejected() {
+    let outer = tempfile::tempdir().unwrap();
+    let root = outer.path().join("lib");
+    fs::create_dir(&root).unwrap();
+    let lib = Library::init(&root, "fluo10")
+        .unwrap()
+        .with_state_dir(outer.path().join("state"));
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::copy(common::fixture("red.jpg"), root.join("sub/red.jpg")).unwrap();
+    fs::copy(common::fixture("red.jpg"), outer.path().join("outside.jpg")).unwrap();
+    let a = Actor::User(lib.owner());
+    let abs = root.join("sub/red.jpg");
+    for p in [
+        Path::new("../outside.jpg"),
+        Path::new("sub/../../outside.jpg"),
+        abs.as_path(),
+    ] {
+        let err = lib
+            .update_sidecar(p, a, |s| s.label = Some("x".into()))
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidPath(_)), "{p:?}");
+        assert!(matches!(lib.read_sidecar(p), Err(Error::InvalidPath(_))));
+    }
+    assert!(!outer.path().join("outside.jpg.xmp").exists());
+    assert!(!root.join("sub/red.jpg.xmp").exists());
+}
+
+#[test]
+fn meta_dir_and_sidecar_paths_are_rejected() {
+    let (dir, lib) = setup("red.jpg");
+    let a = Actor::User(lib.owner());
+    for p in [".asteria/library.toml", "red.jpg.xmp", "./red.jpg", ""] {
+        let err = lib
+            .update_sidecar(Path::new(p), a, |s| s.label = Some("x".into()))
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::InvalidPath(q) if q == Path::new(p)),
+            "{p}: {err:?}"
+        );
+        assert!(matches!(
+            lib.read_sidecar(Path::new(p)),
+            Err(Error::InvalidPath(_))
+        ));
+    }
+    assert!(!dir.path().join("red.jpg.xmp").exists());
+    assert!(!dir.path().join(".asteria/library.toml.xmp").exists());
+    assert!(!dir.path().join("red.jpg.xmp.xmp").exists());
+}
+
+#[test]
+fn read_sidecar_reports_malformed() {
+    let (dir, lib) = setup("red.jpg");
+    fs::copy(
+        common::fixture("xmp/malformed.xmp"),
+        dir.path().join("red.jpg.xmp"),
+    )
+    .unwrap();
+    let err = lib.read_sidecar(Path::new("red.jpg")).unwrap_err();
+    assert!(matches!(err, Error::MalformedSidecar { .. }));
+}
+
+#[test]
+fn older_non_owner_rating_does_not_overwrite_newer() {
+    let (_dir, lib) = setup("red.jpg");
+    let other = UserId(GrainId::random());
+    let a = Actor::User(other);
+    let p = Path::new("red.jpg");
+    lib.set_rating(p, other, 4, t(2), a).unwrap();
+    lib.set_rating(p, other, 2, t(1), a).unwrap();
+    let sc = lib.read_sidecar(p).unwrap().unwrap();
+    assert_eq!(sc.user_ratings[&other].value, 4);
+}
+
+#[test]
+fn sub_second_now_rating_round_trips_for_owner_and_non_owner() {
+    let (_dir, lib) = setup("red.jpg");
+    let owner = lib.owner();
+    let other = UserId(GrainId::random());
+    let p = Path::new("red.jpg");
+    // A fixed fractional time, so the test does not depend on the clock landing off a second.
+    let frac = Utc::now().with_nanosecond(123_456_789).unwrap();
+    lib.set_rating(p, owner, 4, frac, Actor::User(owner))
+        .unwrap();
+    let now = Utc::now();
+    lib.set_rating(p, other, 2, now, Actor::User(other))
+        .unwrap();
+    let sc = lib.read_sidecar(p).unwrap().unwrap();
+    assert_eq!(sc.rating.unwrap().modified, Some(frac));
+    assert_eq!(sc.user_ratings[&other].modified, Some(now));
+}
+
+#[test]
+fn equal_timestamp_greater_value_wins_in_either_order() {
+    let owner_and_other = |lib: &Library| [lib.owner(), UserId(GrainId::random())];
+    for (first, second) in [(2, 5), (5, 2)] {
+        let (_dir, lib) = setup("red.jpg");
+        let p = Path::new("red.jpg");
+        for user in owner_and_other(&lib) {
+            let a = Actor::User(user);
+            lib.set_rating(p, user, first, t(3), a).unwrap();
+            lib.set_rating(p, user, second, t(3), a).unwrap();
+            let sc = lib.read_sidecar(p).unwrap().unwrap();
+            let got = if user == lib.owner() {
+                sc.rating.unwrap()
+            } else {
+                sc.user_ratings[&user].clone()
+            };
+            assert_eq!(got.value, 5, "{first} then {second}");
+            assert_eq!(got.modified, Some(t(3)));
+        }
+    }
+}
+
+#[test]
+fn apply_rating_owner_non_owner_older_and_tie() {
+    use asteria_common_core::Sidecar;
+    let owner = UserId(GrainId::random());
+    let other = UserId(GrainId::random());
+    let t = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let mut sc = Sidecar::new();
+    assert!(sc.apply_rating(owner, owner, 3, t).unwrap());
+    assert_eq!(sc.rating.as_ref().unwrap().value, 3);
+    assert!(sc.apply_rating(owner, other, 2, t).unwrap());
+    assert_eq!(sc.user_ratings[&other].value, 2);
+    assert_eq!(sc.rating.as_ref().unwrap().value, 3);
+    // older timestamp loses
+    let older = t - chrono::Duration::seconds(1);
+    assert!(!sc.apply_rating(owner, owner, 5, older).unwrap());
+    assert_eq!(sc.rating.as_ref().unwrap().value, 3);
+    // tie: greater value wins, lesser loses, same is no change
+    assert!(!sc.apply_rating(owner, owner, 2, t).unwrap());
+    assert!(!sc.apply_rating(owner, owner, 3, t).unwrap());
+    assert!(sc.apply_rating(owner, owner, 4, t).unwrap());
+    assert_eq!(sc.rating.as_ref().unwrap().value, 4);
+    // newer wins even with a lower value
+    let newer = t + chrono::Duration::seconds(1);
+    assert!(sc.apply_rating(owner, other, 1, newer).unwrap());
+    assert_eq!(sc.user_ratings[&other].value, 1);
+    assert!(matches!(
+        sc.apply_rating(owner, owner, 6, t),
+        Err(Error::InvalidRating(6))
+    ));
+}
+
+#[test]
+fn update_sidecar_writes_current_file_hash() {
+    let (dir, lib) = setup("red.jpg");
+    let owner = lib.owner();
+    lib.set_rating(Path::new("red.jpg"), owner, 4, t(1), Actor::User(owner))
+        .unwrap();
+    let sc = lib.read_sidecar(Path::new("red.jpg")).unwrap().unwrap();
+    assert_eq!(
+        sc.file_hash.unwrap(),
+        file_hash(&dir.path().join("red.jpg")).unwrap()
+    );
+}
+
+#[test]
+fn file_hash_alone_does_not_rewrite() {
+    let (dir, lib) = setup("red.jpg");
+    let owner = lib.owner();
+    lib.set_rating(Path::new("red.jpg"), owner, 4, t(1), Actor::User(owner))
+        .unwrap();
+    let xmp = dir.path().join("red.jpg.xmp");
+    let before = fs::read(&xmp).unwrap();
+    let other = "blake3:".to_string() + &"cd".repeat(32);
+    let stale = String::from_utf8(before.clone()).unwrap();
+    let old = lib
+        .read_sidecar(Path::new("red.jpg"))
+        .unwrap()
+        .unwrap()
+        .file_hash
+        .unwrap()
+        .to_string();
+    fs::write(&xmp, stale.replace(&old, &other)).unwrap();
+    let before = fs::read(&xmp).unwrap();
+    let wrote = lib
+        .update_sidecar(Path::new("red.jpg"), Actor::User(owner), |_| {})
+        .unwrap();
+    assert!(!wrote);
+    assert_eq!(fs::read(&xmp).unwrap(), before);
+}

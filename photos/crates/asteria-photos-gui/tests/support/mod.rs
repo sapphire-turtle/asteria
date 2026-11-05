@@ -4,7 +4,7 @@
 // Each test binary uses its own subset of these helpers.
 #![allow(dead_code)]
 
-#[path = "../../../../../crates/asteria-framework-client/tests/common/mod.rs"]
+#[path = "../../../../../crates/asteria-common-client/tests/common/mod.rs"]
 pub mod common;
 pub mod server;
 
@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use asteria_framework_client::profiles::{ProfileId, Profiles, Token};
+use asteria_common_client::profiles::{ProfileId, Profiles, Token};
 use asteria_photos_gui::app::{AppPaths, PhotosApp};
 use corundum_framework::egui;
 use serde_json::{Value, json};

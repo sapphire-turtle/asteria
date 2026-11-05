@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use asteria_framework_client::profiles::Token;
+use asteria_common_client::profiles::Token;
 use asteria_music_api::{MediaItem, MusicTrack};
 use corundum_framework_audio::QueueItem;
 use url::Url;
@@ -162,7 +162,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    use asteria_framework_client::profiles::Token;
+    use asteria_common_client::profiles::Token;
     use corundum_framework_audio::fakes::FakeOutputs;
     use tempfile::TempDir;
 

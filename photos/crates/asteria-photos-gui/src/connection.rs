@@ -1,8 +1,8 @@
 //! [`Connection`]: everything tied to the server in use, dropped whole on a switch.
 
-use asteria_framework_client::profiles::ServerProfile;
-use asteria_framework_client::rpc::ClientError;
-use asteria_framework_client::session::{Session, SessionDirs, SessionState};
+use asteria_common_client::profiles::ServerProfile;
+use asteria_common_client::rpc::ClientError;
+use asteria_common_client::session::{Session, SessionDirs, SessionState};
 use corundum_framework::egui;
 
 use crate::browse::BrowseState;

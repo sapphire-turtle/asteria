@@ -11,9 +11,9 @@ use std::cell::RefCell;
 use std::io::Read;
 use std::path::Path;
 
-use asteria_framework::MediaKind;
-use asteria_framework::ids::LibraryId;
-use asteria_framework_server::{ExtContext, ServerError, item_id_for, media_item, rpc_error};
+use asteria_common_core::MediaKind;
+use asteria_common_core::ids::LibraryId;
+use asteria_common_server::{ExtContext, ServerError, item_id_for, media_item, rpc_error};
 use asteria_music_api::{
     Album, AlbumGetParams, AlbumListing, AlbumSummary, Artist, ArtistGetParams, ArtistListing,
     ArtistSummary, EntryStatus, ListParams, MusicTrack, Playlist, PlaylistEntry, PlaylistGetParams,
@@ -308,9 +308,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    use asteria_framework::journal::Actor;
-    use asteria_framework::{Library, MediaKind};
-    use asteria_framework_server::{
+    use asteria_common_core::journal::Actor;
+    use asteria_common_core::{Library, MediaKind};
+    use asteria_common_server::{
         AppExtension, Cache, ExtContext, ThumbSource, hash_pending, item_id_for, scan,
     };
     use asteria_music_api::*;
@@ -333,7 +333,7 @@ mod tests {
 
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../crates/asteria-framework/tests/fixtures")
+            .join("../../../crates/asteria-common-core/tests/fixtures")
             .join(name)
     }
 
@@ -881,7 +881,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn playlist_outside_the_library_is_not_found() {
-        use asteria_framework_server::ExtraRecord;
+        use asteria_common_server::ExtraRecord;
 
         let e = env();
         e.library();

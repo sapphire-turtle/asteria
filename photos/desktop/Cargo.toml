@@ -26,9 +26,9 @@ name = "photos-icons"
 path = "examples/photos-icons.rs"
 
 [dependencies]
-asteria-framework-client = { path = "../../crates/asteria-framework-client" }
-asteria-framework-desktop = { path = "../../crates/asteria-framework-desktop" }
-asteria-framework-server = { path = "../../crates/asteria-framework-server" }
+asteria-common-client = { path = "../../crates/asteria-common-client" }
+asteria-common-desktop = { path = "../../crates/asteria-common-desktop" }
+asteria-common-server = { path = "../../crates/asteria-common-server" }
 asteria-photos-gui = { path = "../crates/asteria-photos-gui" }
 asteria-photos-server = { path = "../crates/asteria-photos-server" }
 corundum-framework = { workspace = true, features = ["gui", "serde", "eframe", "service", "gui-package", "single-instance", "console"] }

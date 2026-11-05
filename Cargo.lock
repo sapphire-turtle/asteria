@@ -354,27 +354,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "asteria-framework"
-version = "0.1.0-rc.3"
-dependencies = [
- "asteria-framework-api",
- "blake3",
- "chrono",
- "crc32fast",
- "grain-id",
- "lofty",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "toml 1.1.8+spec-1.1.0",
- "tracing",
- "uuid",
- "xml-rs",
-]
-
-[[package]]
-name = "asteria-framework-api"
+name = "asteria-common-api"
 version = "2.3.0"
 dependencies = [
  "serde",
@@ -382,12 +362,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "asteria-framework-client"
+name = "asteria-common-client"
 version = "0.1.0-rc.3"
 dependencies = [
- "asteria-framework",
- "asteria-framework-api",
- "asteria-framework-server",
+ "asteria-common-api",
+ "asteria-common-core",
+ "asteria-common-server",
  "asteria-music-api",
  "asteria-photos-api",
  "axum",
@@ -408,23 +388,43 @@ dependencies = [
 ]
 
 [[package]]
-name = "asteria-framework-desktop"
+name = "asteria-common-core"
 version = "0.1.0-rc.3"
 dependencies = [
- "asteria-framework",
- "asteria-framework-client",
- "asteria-framework-server",
+ "asteria-common-api",
+ "blake3",
+ "chrono",
+ "crc32fast",
+ "grain-id",
+ "lofty",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml 1.1.8+spec-1.1.0",
+ "tracing",
+ "uuid",
+ "xml-rs",
+]
+
+[[package]]
+name = "asteria-common-desktop"
+version = "0.1.0-rc.3"
+dependencies = [
+ "asteria-common-client",
+ "asteria-common-core",
+ "asteria-common-server",
  "corundum-framework",
  "tempfile",
  "tracing",
 ]
 
 [[package]]
-name = "asteria-framework-server"
+name = "asteria-common-server"
 version = "0.1.0-rc.3"
 dependencies = [
- "asteria-framework",
- "asteria-framework-api",
+ "asteria-common-api",
+ "asteria-common-core",
  "axum",
  "base64 0.23.1",
  "blake3",
@@ -465,7 +465,7 @@ dependencies = [
 name = "asteria-music-api"
 version = "2.4.0"
 dependencies = [
- "asteria-framework-api",
+ "asteria-common-api",
  "serde",
  "serde_json",
 ]
@@ -474,8 +474,8 @@ dependencies = [
 name = "asteria-music-desktop"
 version = "0.1.0-rc.3"
 dependencies = [
- "asteria-framework-client",
- "asteria-framework-desktop",
+ "asteria-common-client",
+ "asteria-common-desktop",
  "asteria-music-gui",
  "asteria-music-server",
  "corundum-framework",
@@ -489,8 +489,8 @@ dependencies = [
 name = "asteria-music-gui"
 version = "0.1.0-rc.3"
 dependencies = [
- "asteria-framework-api",
- "asteria-framework-client",
+ "asteria-common-api",
+ "asteria-common-client",
  "asteria-music-api",
  "asteria-photos-api",
  "axum",
@@ -512,7 +512,7 @@ dependencies = [
 name = "asteria-music-headless"
 version = "0.1.0-rc.3"
 dependencies = [
- "asteria-framework-server",
+ "asteria-common-server",
  "asteria-music-api",
  "asteria-music-server",
  "lofty",
@@ -535,8 +535,8 @@ dependencies = [
 name = "asteria-music-server"
 version = "0.1.0-rc.3"
 dependencies = [
- "asteria-framework",
- "asteria-framework-server",
+ "asteria-common-core",
+ "asteria-common-server",
  "asteria-music-api",
  "blake3",
  "chrono",
@@ -553,7 +553,7 @@ dependencies = [
 name = "asteria-photos-api"
 version = "2.3.0"
 dependencies = [
- "asteria-framework-api",
+ "asteria-common-api",
  "serde_json",
 ]
 
@@ -561,9 +561,9 @@ dependencies = [
 name = "asteria-photos-desktop"
 version = "0.1.0-rc.3"
 dependencies = [
- "asteria-framework-client",
- "asteria-framework-desktop",
- "asteria-framework-server",
+ "asteria-common-client",
+ "asteria-common-desktop",
+ "asteria-common-server",
  "asteria-photos-gui",
  "asteria-photos-server",
  "corundum-framework",
@@ -576,10 +576,10 @@ dependencies = [
 name = "asteria-photos-gui"
 version = "0.1.0-rc.3"
 dependencies = [
- "asteria-framework",
- "asteria-framework-api",
- "asteria-framework-client",
- "asteria-framework-server",
+ "asteria-common-api",
+ "asteria-common-client",
+ "asteria-common-core",
+ "asteria-common-server",
  "asteria-photos-api",
  "axum",
  "corundum-framework",
@@ -595,8 +595,8 @@ dependencies = [
 name = "asteria-photos-headless"
 version = "0.1.0-rc.3"
 dependencies = [
- "asteria-framework",
- "asteria-framework-server",
+ "asteria-common-core",
+ "asteria-common-server",
  "asteria-photos-server",
  "reqwest 0.13.5",
  "serde_json",
@@ -614,9 +614,9 @@ dependencies = [
 name = "asteria-photos-server"
 version = "0.1.0-rc.3"
 dependencies = [
- "asteria-framework",
- "asteria-framework-api",
- "asteria-framework-server",
+ "asteria-common-api",
+ "asteria-common-core",
+ "asteria-common-server",
  "asteria-photos-api",
 ]
 

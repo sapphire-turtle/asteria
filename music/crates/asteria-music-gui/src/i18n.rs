@@ -14,6 +14,6 @@ pub const RESOURCES: Resources = Resources {
 
 /// Add the app's strings, and those of the client crate under it, to `ctx`'s translations.
 pub fn register(ctx: &egui::Context) {
-    asteria_framework_client::i18n::register(ctx);
+    asteria_common_client::i18n::register(ctx);
     i18n::register(ctx, RESOURCES);
 }
