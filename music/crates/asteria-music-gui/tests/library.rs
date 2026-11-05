@@ -94,7 +94,11 @@ fn clicking_a_track_replaces_the_queue_from_it() {
         a.connection().unwrap().library().album().is_some()
     });
     let lib = app.connection().unwrap().library();
-    let Some(Command::Replace { entries, start }) = lib.play_from(TrackList::Album, 2) else {
+    let Some(Command::Replace {
+        items: entries,
+        start,
+    }) = lib.play_from(TrackList::Album, 2)
+    else {
         panic!("expected a Replace");
     };
     assert_eq!(start, 2);
@@ -109,7 +113,11 @@ fn playlist_missing_entries_are_left_out_of_the_queue() {
     open_playlist(&ctx, &mut app);
     let lib = app.connection().unwrap().library();
     // [found, missing, moved, found]: entry 2 is the second of the three playable ones.
-    let Some(Command::Replace { entries, start }) = lib.play_from(TrackList::Playlist, 2) else {
+    let Some(Command::Replace {
+        items: entries,
+        start,
+    }) = lib.play_from(TrackList::Playlist, 2)
+    else {
         panic!("expected a Replace");
     };
     assert_eq!(titles(&entries), ["pa", "pm", "pd"]);
@@ -185,7 +193,8 @@ fn a_reply_after_switching_servers_is_ignored() {
     .serve();
     let (fx, ids) = fixture(&[("slow", slow), ("fast", fast)], 0);
     let ctx = egui::Context::default();
-    let mut app = MusicApp::new(fx.paths.clone(), &ctx, player(&ctx));
+    let (player, settings) = player(&ctx);
+    let mut app = MusicApp::new(fx.paths.clone(), &ctx, player, settings);
     frame(&ctx, &mut app);
     app.switch_to(ids[1]);
     run_until(&ctx, &mut app, "the fast server's albums", |a| {

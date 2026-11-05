@@ -28,9 +28,10 @@ path = "examples/music-icons.rs"
 [dependencies]
 asteria-framework-client = { path = "../../crates/asteria-framework-client" }
 asteria-framework-desktop = { path = "../../crates/asteria-framework-desktop" }
-asteria-framework-server = { path = "../../crates/asteria-framework-server" }
 asteria-music-gui = { path = "../crates/asteria-music-gui" }
 asteria-music-server = { path = "../crates/asteria-music-server" }
+# The sound device the player plays on.
+corundum-framework-audio = { workspace = true, features = ["cpal"] }
 corundum-framework = { workspace = true, features = ["gui", "serde", "eframe", "service", "gui-package", "single-instance", "console"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
@@ -38,25 +39,19 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 corundum-framework-build.workspace = true
 
 [dev-dependencies]
-# The player's fakes, for the window's tests.
-asteria-music-gui = { path = "../crates/asteria-music-gui", features = ["test-support"] }
+# The fake sound device, for the window's tests.
+corundum-framework-audio = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 
 # The package (.github/workflows/release.yml, sapphire-turtle/.github's release-packager.yml):
 # the window's binary; the release workflow adds the Windows console shim as
 # `asteria-music.exe`. The product name and the bundle id are the launcher's (`LAUNCHER` in
 # src/main.rs). Before packaging, the workflow renders the icons into `icons/` with the
-# `music-icons` example, and on Windows packaging/fetch-tools.sh puts the tools the package
-# carries into `bundled/`: libvips, and its licences. The resources put them beside the
-# executable, where the server looks; on macOS and Linux there is nothing, which adds
-# nothing.
+# `music-icons` example. It carries no tool: the server makes covers and offline audio
+# itself.
 [package.metadata.packager]
 productName = "Asteria Music"
 identifier = "org.sapphire-turtle.asteria-music"
 category = "Music"
 binaries = [{ path = "asteria-music-desktop", main = true }]
 icons = ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"]
-resources = [
-    { src = "bundled/vips", target = "vips" },
-    { src = "bundled/tools", target = "tools" },
-]

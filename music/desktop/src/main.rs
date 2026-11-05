@@ -11,7 +11,6 @@ use asteria_framework_desktop::{
     AboutPage, LocalServerPage, LocalServerSpec, UPDATE_PUBKEY, first_run_pages, service_spec,
     take_setup_request,
 };
-use asteria_framework_server::Tool;
 use corundum_framework::egui;
 use corundum_framework::gui::first_run::FirstRun;
 use corundum_framework::gui::store::Store;
@@ -22,10 +21,9 @@ use corundum_framework::platform::instance::Instance;
 use corundum_framework::platform::launcher::LauncherSpec;
 use corundum_framework::service::ServiceSpec;
 
-use asteria_music_gui::player::Player;
-use asteria_music_gui::player::feed::HttpOpener;
-use asteria_music_gui::player::output::CpalOutputs;
+use asteria_music_gui::player::{HttpOpener, OpenerSettings, Player};
 use asteria_music_gui::{APP_NAME, AppPaths, MusicApp};
+use corundum_framework_audio::CpalOutputs;
 
 /// The server on this computer, for the first run and Settings → Local server.
 static LOCAL: LocalServerSpec = LocalServerSpec {
@@ -33,8 +31,8 @@ static LOCAL: LocalServerSpec = LocalServerSpec {
     server: asteria_music_server::spec,
     service,
     url: "http://127.0.0.1:7811",
-    // Cover thumbnails; offline audio is made in the server.
-    tools: &[Tool::Vipsthumbnail],
+    // Covers (embedded pictures) and offline audio are made in the server.
+    tools: &[],
 };
 
 /// What the package is: the data directory's name (and the update feed's,
@@ -108,8 +106,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     run(instance)
 }
 
-/// Starts the playback thread for an app made in `ctx`.
-type SpawnPlayer = Box<dyn Fn(&egui::Context) -> Player>;
+/// Starts the playback thread for an app made in `ctx`, with the settings its opener reads.
+type SpawnPlayer = Box<dyn Fn(&egui::Context) -> (Player, OpenerSettings)>;
 
 /// What the window shows: the first run, or the app.
 enum Stage {
@@ -183,8 +181,9 @@ fn first_run(paths: &AppPaths) -> FirstRun {
 
 /// The app over `paths`, with a new player and Settings → Local server.
 fn app(paths: &AppPaths, ctx: &egui::Context, spawn_player: &SpawnPlayer) -> Box<MusicApp> {
+    let (player, settings) = spawn_player(ctx);
     Box::new(
-        MusicApp::new(paths.clone(), ctx, spawn_player(ctx)).with_extra_settings(vec![
+        MusicApp::new(paths.clone(), ctx, player, settings).with_extra_settings(vec![
             Box::new(LocalServerPage::new(&LOCAL)),
             Box::new(AboutPage::new(
                 "Asteria Music",
@@ -217,14 +216,17 @@ fn run(instance: Instance) -> Result<(), Box<dyn Error>> {
         .launcher(LAUNCHER);
     window::run(options, move |cc| {
         let spawn_player: SpawnPlayer = Box::new(|ctx| {
-            Player::spawn(
-                Box::new(HttpOpener::new()),
+            let settings = OpenerSettings::new();
+            let ctx = ctx.clone();
+            let player = Player::spawn(
+                Box::new(HttpOpener::new(settings.clone())),
                 Box::new(CpalOutputs),
-                ctx.clone(),
+                move || ctx.request_repaint(),
             )
             // The window cannot report an app that fails to start; this is the OS refusing
             // a thread.
-            .expect("starting the playback thread failed")
+            .expect("starting the playback thread failed");
+            (player, settings)
         });
         Box::new(DesktopApp::new(paths, &cc.egui_ctx, spawn_player))
     })?;
@@ -239,7 +241,14 @@ mod tests {
     use super::*;
     use asteria_framework_client::profiles::Token;
     use asteria_music_gui::app::Screen;
-    use asteria_music_gui::player::fakes::{FakeOpener, FakeOutputs};
+    use corundum_framework_audio::fakes::FakeOutputs;
+
+    /// Covers come out of the music files and are made in the server; nothing external is
+    /// needed, so the Tools page and the About page's licence line name no tool.
+    #[test]
+    fn the_local_server_needs_no_external_tool() {
+        assert!(LOCAL.tools.is_empty());
+    }
 
     /// The app's files in `dir`: no cache.
     fn temp_paths(dir: &tempfile::TempDir) -> AppPaths {
@@ -256,12 +265,16 @@ mod tests {
         let count = started.clone();
         let spawn: SpawnPlayer = Box::new(move |ctx| {
             count.set(count.get() + 1);
-            Player::spawn(
-                Box::new(FakeOpener::new()),
+            // The real opener with no server: nothing is fetched.
+            let settings = OpenerSettings::new();
+            let ctx = ctx.clone();
+            let player = Player::spawn(
+                Box::new(HttpOpener::new(settings.clone())),
                 Box::new(FakeOutputs::new()),
-                ctx.clone(),
+                move || ctx.request_repaint(),
             )
-            .unwrap()
+            .unwrap();
+            (player, settings)
         });
         (spawn, started)
     }

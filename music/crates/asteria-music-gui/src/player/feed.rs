@@ -1,33 +1,25 @@
-//! The real [`Opener`]: tracks fetched from the server by [`Stream`]s and decoded on a
-//! thread each.
+//! The real [`Opener`]: tracks fetched from the server by [`Stream`]s and decoded by
+//! corundum-framework-audio's feeds, on a thread each.
 
-use std::io::{self, Read, Seek, SeekFrom};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use asteria_framework_client::media_cache::safe_component;
 use asteria_music_api::ItemId;
+use corundum_framework_audio::feed::{FailedFeed, Watch, spawn_feed};
+use corundum_framework_audio::{Feed, Opener, OutputConfig, TrackError};
 use reqwest::header::HeaderValue;
-use symphonia::core::io::MediaSource;
 
-use super::decode::{self, DecodeError};
-use super::engine::{Feed, FeedEvent, Opener, OutputConfig, TrackError, Wait};
-use super::resample::Converter;
-use super::stream::{ReaderCancel, Stream, StreamReader, StreamRequest, StreamStatus, Timeouts};
-use super::{Endpoint, Quality, QueueEntry};
+use super::stream::{Stream, StreamRequest, StreamStatus, Timeouts};
+use super::{OpenerSettings, Quality, QueueEntry};
 
-/// Messages the decoder thread can hold before it waits for the player.
-const CHANNEL_CAPACITY: usize = 32;
 /// A per-process stream directory this long unmodified belongs to a dead process.
 const STALE_STREAM_DIR: Duration = Duration::from_secs(24 * 60 * 60);
 /// A file in the stream directory whose mtime is refreshed whenever a stream starts.
 const ALIVE_MARKER: &str = ".alive";
-/// No duration known yet.
-const NO_DURATION: u64 = u64::MAX;
 
 /// Makes `<cache root>/<library id>/stream/<process tag>/` and removes, beside it, the
 /// directories last modified more than STALE_STREAM_DIR ago. The process tag is the pid and
@@ -101,26 +93,19 @@ impl Drop for Slot {
 /// Never reuse a path within the process: a dropped `Stream` removes its file by name.
 static FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// The real Opener: fetches from the endpoint's server into `stream_dir`.
+/// The real Opener: fetches from the settings' server into its `stream_dir`, at the
+/// settings' quality, both as of the moment the fetch starts.
 pub struct HttpOpener {
-    endpoint: Option<Endpoint>,
-    quality: Quality,
+    settings: OpenerSettings,
     timeouts: Timeouts,
     current: Option<Slot>,
     preloaded: Option<Slot>,
 }
 
-impl Default for HttpOpener {
-    fn default() -> Self {
-        HttpOpener::new()
-    }
-}
-
 impl HttpOpener {
-    pub fn new() -> HttpOpener {
+    pub fn new(settings: OpenerSettings) -> HttpOpener {
         HttpOpener {
-            endpoint: None,
-            quality: Quality::default(),
+            settings,
             timeouts: Timeouts::default(),
             current: None,
             preloaded: None,
@@ -133,8 +118,13 @@ impl HttpOpener {
         self
     }
 
-    fn start(&self, entry: &QueueEntry, after: Option<Arc<Stream>>) -> Result<Slot, TrackError> {
-        let Some(endpoint) = &self.endpoint else {
+    fn start(
+        &self,
+        entry: &QueueEntry,
+        quality: Quality,
+        after: Option<Arc<Stream>>,
+    ) -> Result<Slot, TrackError> {
+        let Some(endpoint) = self.settings.endpoint() else {
             return Err(TrackError::Network("not connected".into()));
         };
         let id = &entry.media.id;
@@ -142,7 +132,7 @@ impl HttpOpener {
         url.path_segments_mut()
             .map_err(|()| TrackError::Network("the server address cannot be a base".into()))?
             .pop_if_empty()
-            .extend(["media", id.0.as_str(), self.quality.preset()]);
+            .extend(["media", id.0.as_str(), quality.preset()]);
         let mut auth = HeaderValue::from_str(&format!("Bearer {}", endpoint.token.expose()))
             .map_err(|_| TrackError::Unauthorized)?;
         auth.set_sensitive(true);
@@ -154,7 +144,7 @@ impl HttpOpener {
                 url,
                 auth,
                 path: endpoint.stream_dir.join(format!("{n}.part")),
-                first_timeout: match self.quality {
+                first_timeout: match quality {
                     Quality::Low => self.timeouts.prepare,
                     Quality::Original => self.timeouts.chunk,
                 },
@@ -166,22 +156,22 @@ impl HttpOpener {
         .map_err(|e| TrackError::Network(format!("cannot write the stream file: {e}")))?;
         Ok(Slot {
             id: id.clone(),
-            quality: self.quality,
+            quality,
             stream,
         })
     }
 }
 
-impl Opener for HttpOpener {
+impl Opener<QueueEntry> for HttpOpener {
     fn open(&mut self, entry: &QueueEntry, at_ms: u64, target: OutputConfig) -> Box<dyn Feed> {
         let id = &entry.media.id;
-        let quality = self.quality;
+        let quality = self.settings.quality();
         if self.current.as_ref().is_some_and(|s| s.is(id, quality)) {
             // Reuse it.
         } else if self.preloaded.as_ref().is_some_and(|s| s.is(id, quality)) {
             self.current = self.preloaded.take();
         } else {
-            match self.start(entry, None) {
+            match self.start(entry, quality, None) {
                 Ok(slot) => self.current = Some(slot),
                 Err(e) => {
                     self.current = None;
@@ -190,14 +180,13 @@ impl Opener for HttpOpener {
             }
         }
         let stream = self.current.as_ref().expect("just set").stream.clone();
-        let ext = Path::new(&entry.media.path)
+        let hint = Path::new(&entry.media.path)
             .extension()
             .and_then(|e| e.to_str())
             .map(str::to_owned);
-        match TrackFeed::spawn(stream, ext, at_ms, target) {
-            Ok(feed) => Box::new(feed),
-            Err(e) => Box::new(FailedFeed(TrackError::Unplayable(e))),
-        }
+        let reader = stream.reader();
+        let watch: Arc<dyn Watch> = stream;
+        spawn_feed(Box::new(reader), Some(watch), hint, at_ms, target)
     }
 
     fn preload(&mut self, next: Option<&QueueEntry>) {
@@ -205,7 +194,7 @@ impl Opener for HttpOpener {
             self.preloaded = None;
             return;
         };
-        let (id, quality) = (&next.media.id, self.quality);
+        let (id, quality) = (&next.media.id, self.settings.quality());
         if self.current.as_ref().is_some_and(|s| s.is(id, quality))
             || self.preloaded.as_ref().is_some_and(|s| s.is(id, quality))
         {
@@ -213,259 +202,15 @@ impl Opener for HttpOpener {
         }
         self.preloaded = None;
         let after = self.current.as_ref().map(|s| s.stream.clone());
-        match self.start(next, after) {
+        match self.start(next, quality, after) {
             Ok(slot) => self.preloaded = Some(slot),
             Err(e) => tracing::debug!("cannot preload the next track: {e:?}"),
         }
     }
 
-    fn set_endpoint(&mut self, endpoint: Option<Endpoint>) {
-        self.clear();
-        self.endpoint = endpoint;
-    }
-
-    fn set_quality(&mut self, quality: Quality) {
-        self.quality = quality;
-    }
-
     fn clear(&mut self) {
         self.current = None;
         self.preloaded = None;
-    }
-}
-
-/// A feed that is already over.
-struct FailedFeed(TrackError);
-
-impl Feed for FailedFeed {
-    fn poll(&mut self) -> FeedEvent {
-        FeedEvent::Failed(self.0.clone())
-    }
-
-    fn duration_ms(&self) -> Option<u64> {
-        None
-    }
-}
-
-enum Message {
-    Pcm(Vec<f32>),
-    End,
-    Failed(TrackError),
-}
-
-/// One track being decoded on its own thread.
-struct TrackFeed {
-    rx: Receiver<Message>,
-    stream: Arc<Stream>,
-    stop: Arc<AtomicBool>,
-    reader: ReaderCancel,
-    duration: Arc<AtomicU64>,
-    /// How the feed ended, repeated by any later poll.
-    finished: Option<FeedEvent>,
-}
-
-impl TrackFeed {
-    fn spawn(
-        stream: Arc<Stream>,
-        ext: Option<String>,
-        at_ms: u64,
-        target: OutputConfig,
-    ) -> Result<TrackFeed, String> {
-        let (tx, rx) = sync_channel(CHANNEL_CAPACITY);
-        let stop = Arc::new(AtomicBool::new(false));
-        let duration = Arc::new(AtomicU64::new(NO_DURATION));
-        let reader = stream.reader();
-        let canceller = reader.canceller();
-        let job = Job {
-            reader: Some(reader),
-            stream: stream.clone(),
-            ext,
-            at_ms,
-            target,
-            tx,
-            stop: stop.clone(),
-            duration: duration.clone(),
-        };
-        std::thread::Builder::new()
-            .name("asteria-decode".into())
-            .spawn(move || {
-                let tx = job.tx.clone();
-                if catch_unwind(AssertUnwindSafe(|| job.run())).is_err() {
-                    let _ = tx.send(Message::Failed(TrackError::Unplayable(
-                        "the decoder crashed".into(),
-                    )));
-                }
-            })
-            .map_err(|e| format!("cannot start the decoder: {e}"))?;
-        Ok(TrackFeed {
-            rx,
-            stream,
-            stop,
-            reader: canceller,
-            duration,
-            finished: None,
-        })
-    }
-}
-
-impl Drop for TrackFeed {
-    fn drop(&mut self) {
-        // The thread leaves at once, even from a wait for bytes. The stream is the opener's
-        // and may be opened again (a seek), so only this feed's reader is cancelled.
-        self.stop.store(true, Ordering::Release);
-        self.reader.cancel();
-    }
-}
-
-impl Feed for TrackFeed {
-    fn poll(&mut self) -> FeedEvent {
-        if let Some(done) = &self.finished {
-            return done.clone();
-        }
-        let done = match self.rx.try_recv() {
-            Ok(Message::Pcm(p)) => return FeedEvent::Pcm(p),
-            Ok(Message::End) => FeedEvent::End,
-            Ok(Message::Failed(e)) => FeedEvent::Failed(e),
-            Err(TryRecvError::Empty) => {
-                return FeedEvent::Waiting(match self.stream.status() {
-                    StreamStatus::Waiting(w) => w,
-                    _ => Wait::Buffering,
-                });
-            }
-            Err(TryRecvError::Disconnected) => {
-                FeedEvent::Failed(TrackError::Unplayable("the decoder stopped".into()))
-            }
-        };
-        self.finished = Some(done.clone());
-        done
-    }
-
-    fn duration_ms(&self) -> Option<u64> {
-        match self.duration.load(Ordering::Acquire) {
-            NO_DURATION => None,
-            ms => Some(ms),
-        }
-    }
-}
-
-/// Everything the decoder thread needs.
-struct Job {
-    reader: Option<StreamReader>,
-    stream: Arc<Stream>,
-    ext: Option<String>,
-    at_ms: u64,
-    target: OutputConfig,
-    tx: SyncSender<Message>,
-    stop: Arc<AtomicBool>,
-    duration: Arc<AtomicU64>,
-}
-
-impl Job {
-    fn run(mut self) {
-        let message = match self.decode() {
-            Ok(()) => Message::End,
-            Err(Some(e)) => Message::Failed(e),
-            // Cancelled: nobody is listening.
-            Err(None) => return,
-        };
-        let _ = self.tx.send(message);
-    }
-
-    /// `Err(None)` when the feed was dropped.
-    fn decode(&mut self) -> Result<(), Option<TrackError>> {
-        let reader = Cancellable {
-            inner: self.reader.take().expect("decoded once"),
-            stop: self.stop.clone(),
-        };
-        let mut decoder =
-            decode::open(Box::new(reader), self.ext.as_deref()).map_err(|e| self.failure(e))?;
-        if let Some(ms) = decoder.duration_ms() {
-            self.duration.store(ms, Ordering::Release);
-        }
-        if self.at_ms > 0 {
-            decoder.seek(self.at_ms).map_err(|e| self.failure(e))?;
-        }
-        let mut converter = Converter::new(decoder.sample_rate(), decoder.channels(), self.target)
-            .map_err(|e| Some(TrackError::Unplayable(e)))?;
-        loop {
-            if self.stop.load(Ordering::Acquire) {
-                return Err(None);
-            }
-            match decoder.next_block() {
-                Ok(Some(block)) => {
-                    let pcm = converter.process(&block);
-                    self.send(pcm)?;
-                }
-                Ok(None) => break,
-                Err(e) => return Err(self.failure(e)),
-            }
-        }
-        // A fetch that failed under a decoder that took the cut-off for the end.
-        if let StreamStatus::Failed(e) = self.stream.status() {
-            return Err((!self.stop.load(Ordering::Acquire)).then_some(e));
-        }
-        let rest = converter.flush();
-        self.send(rest)
-    }
-
-    fn send(&self, pcm: Vec<f32>) -> Result<(), Option<TrackError>> {
-        if pcm.is_empty() {
-            return Ok(());
-        }
-        self.tx.send(Message::Pcm(pcm)).map_err(|_| None)
-    }
-
-    /// The stream's own failure if it has one, else the decoder's reason.
-    fn failure(&self, e: DecodeError) -> Option<TrackError> {
-        if self.stop.load(Ordering::Acquire) {
-            return None;
-        }
-        Some(match self.stream.status() {
-            StreamStatus::Failed(failed) => failed,
-            _ => TrackError::Unplayable(e.to_string()),
-        })
-    }
-}
-
-/// A reader that fails once its feed is dropped.
-struct Cancellable {
-    inner: StreamReader,
-    stop: Arc<AtomicBool>,
-}
-
-impl Cancellable {
-    fn check(&self) -> io::Result<()> {
-        if self.stop.load(Ordering::Acquire) {
-            Err(io::Error::other("the feed was dropped"))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl Read for Cancellable {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.check()?;
-        let n = self.inner.read(buf)?;
-        self.check()?;
-        Ok(n)
-    }
-}
-
-impl Seek for Cancellable {
-    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
-        self.check()?;
-        self.inner.seek(to)
-    }
-}
-
-impl MediaSource for Cancellable {
-    fn is_seekable(&self) -> bool {
-        true
-    }
-
-    fn byte_len(&self) -> Option<u64> {
-        self.inner.byte_len()
     }
 }
 
@@ -477,11 +222,11 @@ mod tests {
     use asteria_framework_client::profiles::Token;
     use tempfile::TempDir;
 
-    use super::super::engine::{Feed, FeedEvent, Opener, OutputConfig, TrackError, Wait};
-    use super::super::fakes::entry;
+    use corundum_framework_audio::{Feed, FeedEvent, Opener, OutputConfig, TrackError, Wait};
+
     use super::super::stream::Timeouts;
     use super::super::test_server::{Script, TestServer};
-    use super::super::{Endpoint, Quality};
+    use super::super::{Endpoint, OpenerSettings, Quality, entry};
     use super::*;
 
     const TARGET: OutputConfig = OutputConfig {
@@ -503,13 +248,22 @@ mod tests {
         }
     }
 
-    fn opener(server: &TestServer, dir: &TempDir) -> HttpOpener {
-        let mut o = HttpOpener::new().with_timeouts(Timeouts {
+    /// Settings holding the test server, at the original quality.
+    fn settings(server: &TestServer, dir: &TempDir) -> OpenerSettings {
+        let settings = OpenerSettings::new();
+        settings.set_endpoint(Some(endpoint(server, dir.path())));
+        settings
+    }
+
+    fn opener_on(settings: &OpenerSettings) -> HttpOpener {
+        HttpOpener::new(settings.clone()).with_timeouts(Timeouts {
             chunk: Duration::from_secs(10),
             prepare: Duration::from_secs(20),
-        });
-        o.set_endpoint(Some(endpoint(server, dir.path())));
-        o
+        })
+    }
+
+    fn opener(server: &TestServer, dir: &TempDir) -> HttpOpener {
+        opener_on(&settings(server, dir))
     }
 
     fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
@@ -585,14 +339,41 @@ mod tests {
             ..Script::default()
         });
         let dir = TempDir::new().unwrap();
-        let mut o = opener(&server, &dir);
-        o.set_quality(Quality::Low);
+        let settings = settings(&server, &dir);
+        settings.set_quality(Quality::Low);
+        let mut o = opener_on(&settings);
         let (_, last) = drain(o.open(&entry("track"), 0, TARGET).as_mut());
         assert_eq!(last, FeedEvent::End);
         let paths = server.paths();
         assert!(
             paths[0].ends_with("/media/track/offline-audio"),
             "{paths:?}"
+        );
+    }
+
+    #[test]
+    fn the_settings_are_read_when_a_fetch_starts() {
+        let server = TestServer::start(Script {
+            body: tone(),
+            ..Script::default()
+        });
+        let dir = TempDir::new().unwrap();
+        let settings = settings(&server, &dir);
+        let mut o = opener_on(&settings);
+        let (_, last) = drain(o.open(&entry("a"), 0, TARGET).as_mut());
+        assert_eq!(last, FeedEvent::End);
+        settings.set_quality(Quality::Low);
+        let (_, last) = drain(o.open(&entry("b"), 0, TARGET).as_mut());
+        assert_eq!(last, FeedEvent::End);
+        let paths = server.paths();
+        assert!(paths[0].ends_with("/media/a/original"), "{paths:?}");
+        assert!(paths[1].ends_with("/media/b/offline-audio"), "{paths:?}");
+        // With no server, the next track cannot start.
+        settings.set_endpoint(None);
+        let mut feed = o.open(&entry("c"), 0, TARGET);
+        assert_eq!(
+            feed.poll(),
+            FeedEvent::Failed(TrackError::Network("not connected".into()))
         );
     }
 
@@ -619,11 +400,10 @@ mod tests {
             ..Script::default()
         });
         let dir = TempDir::new().unwrap();
-        let mut o = HttpOpener::new().with_timeouts(Timeouts {
+        let mut o = HttpOpener::new(settings(&server, &dir)).with_timeouts(Timeouts {
             chunk: Duration::from_millis(300),
             prepare: Duration::from_secs(20),
         });
-        o.set_endpoint(Some(endpoint(&server, dir.path())));
         let (_, last) = drain(o.open(&entry("track"), 0, TARGET).as_mut());
         assert!(
             matches!(last, FeedEvent::Failed(TrackError::Network(_))),
@@ -680,7 +460,7 @@ mod tests {
 
     #[test]
     fn no_endpoint_is_not_connected() {
-        let mut o = HttpOpener::new();
+        let mut o = HttpOpener::new(OpenerSettings::new());
         let mut feed = o.open(&entry("a"), 0, TARGET);
         assert_eq!(
             feed.poll(),
@@ -711,8 +491,9 @@ mod tests {
             ..Script::default()
         });
         let dir = TempDir::new().unwrap();
-        let mut o = opener(&server, &dir);
-        o.set_quality(Quality::Low);
+        let settings = settings(&server, &dir);
+        settings.set_quality(Quality::Low);
+        let mut o = opener_on(&settings);
         let mut feed = o.open(&entry("track"), 0, TARGET);
         let end = Instant::now() + Duration::from_secs(5);
         loop {

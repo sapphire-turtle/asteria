@@ -68,7 +68,7 @@ fn install_hint(ui: &egui::Ui, tool: Tool) -> String {
 
 /// The app's external tools (its [`LocalServerSpec::tools`](crate::LocalServerSpec)): for
 /// each, where it is, or that it is missing and how to install it. Without them the server
-/// still runs; it only makes no thumbnails. Shared by the first run and the settings page.
+/// still runs; it only lacks the thumbnails these programs add. Shared by the first run and the settings page.
 pub fn tools_ui(ui: &mut egui::Ui, tools: &[Tool]) {
     if tools.is_empty() {
         ui.label(tr!(ui, "asteria-desktop-tools-none"));

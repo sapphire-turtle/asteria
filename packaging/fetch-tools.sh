@@ -5,11 +5,11 @@
 # server looks first:
 #
 #   photos on windows: <dest>/ffmpeg.exe and <dest>/vips/bin/vipsthumbnail.exe with
-#                      libvips's DLLs
+#                      libvips's DLLs (for HEIC, AVIF and some RAW; the server decodes the
+#                      common formats itself)
 #   photos on macos:   <dest>/ffmpeg, one universal binary of the arm64 and x86_64 builds
-#   music on windows:  <dest>/vips/bin/vipsthumbnail.exe with libvips's DLLs (cover
-#                      thumbnails; the server makes offline audio itself)
-#   music on macos:    nothing (macOS's sips makes the cover thumbnails)
+#                      (macOS's sips stands in for vips)
+#   music:             nothing (the server makes covers and offline audio itself)
 #
 # and their licences into <dest>/tools/LICENSES. Each download is checked against the
 # SHA-256 in packaging/tools.env, and ffmpeg must list the libwebp encoder, or the script
@@ -33,11 +33,12 @@ app=$2
 dest=$3
 
 # What the package carries: ffmpeg for photos' video thumbnails, and on Windows libvips for
-# both apps' image thumbnails.
+# photos' HEIC, AVIF and RAW thumbnails. Music carries nothing: its covers are embedded
+# pictures the server decodes itself.
 ffmpeg=no
 vips=no
 [ "$app" = photos ] && ffmpeg=yes
-[ "$os" = windows ] && vips=yes
+[ "$app" = photos ] && [ "$os" = windows ] && vips=yes
 if [ $ffmpeg = no ] && [ $vips = no ]; then
   echo "The $app package for $os carries no tools."
   exit 0

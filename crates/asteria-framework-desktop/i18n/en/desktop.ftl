@@ -34,12 +34,12 @@ asteria-desktop-not-running = The server is not running. To start it, run:
 
 # The external tools.
 asteria-desktop-tools-title = External tools
-asteria-desktop-tools-intro = The server makes thumbnails with these programs. Without them it still runs, just without thumbnails.
-asteria-desktop-tools-vips-purpose = Image thumbnails.
+asteria-desktop-tools-intro = The server makes most thumbnails itself. These programs add what it cannot read (HEIC, AVIF, some camera RAW, very large images) and video. Without them it still runs.
+asteria-desktop-tools-vips-purpose = Thumbnails of HEIC, AVIF and some camera RAW files.
 asteria-desktop-tools-ffmpeg-purpose = Video thumbnails.
 asteria-desktop-tools-found = Found: { $path }
 asteria-desktop-tools-missing = Not found.
-asteria-desktop-tools-sips = Not installed: images are made with sips, which macOS has built in.
+asteria-desktop-tools-sips = Not installed: those images are made with sips, which macOS has built in.
 asteria-desktop-tools-linux = Install the package { $package } with your distribution's package manager.
 asteria-desktop-tools-macos = Install it with Homebrew: brew install { $package }
 asteria-desktop-tools-windows-vips = Download libvips for Windows (github.com/libvips/build-win64-mxe/releases), and add its bin folder to PATH.

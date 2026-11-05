@@ -73,6 +73,11 @@ exceptions = [
     # typefaces it embeds, not code, so they are scoped to this crate rather than allowed
     # for every dependency.
     { name = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+    # rawler reads camera RAW previews for corundum-framework-image's `raw` feature, which the
+    # server turns on. It is LGPL-2.1 (declared with the deprecated id "LGPL-2.1", which reads
+    # as LGPL-2.1-only). asteria's apps are GPL-3.0-or-later, with which LGPL-2.1 is
+    # compatible, so linking it is fine; scoped to this crate so no other LGPL slips in.
+    { name = "rawler", allow = ["LGPL-2.1"] },
 ]
 
 [bans]

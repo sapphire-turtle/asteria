@@ -14,13 +14,13 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use asteria_framework_client::rpc::{CONNECT_TIMEOUT, DEFAULT_RETRY_AFTER, MAX_RETRY_AFTER};
+use corundum_framework_audio::decode::Source;
+use corundum_framework_audio::feed::{SourceStatus, Watch};
+use corundum_framework_audio::{TrackError, Wait};
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_RANGE, HeaderValue, RANGE, RETRY_AFTER};
-use symphonia::core::io::MediaSource;
 use url::Url;
-
-use super::engine::{TrackError, Wait};
 
 /// The size of one `Range` request.
 pub const CHUNK_BYTES: u64 = 1 << 20;
@@ -637,13 +637,26 @@ impl Seek for StreamReader {
     }
 }
 
-impl MediaSource for StreamReader {
-    fn is_seekable(&self) -> bool {
-        true
-    }
-
+impl Source for StreamReader {
     fn byte_len(&self) -> Option<u64> {
         self.stream.len()
+    }
+
+    /// Cancels this reader only: the stream is the opener's, and a seek opens it again.
+    fn canceller(&self) -> Option<Box<dyn Fn() + Send + Sync>> {
+        let cancel = StreamReader::canceller(self);
+        Some(Box::new(move || cancel.cancel()))
+    }
+}
+
+/// What the feed reports while it waits for bytes, and the failure it ends with.
+impl Watch for Stream {
+    fn status(&self) -> SourceStatus {
+        match Stream::status(self) {
+            StreamStatus::Waiting(w) => SourceStatus::Waiting(w),
+            StreamStatus::Failed(e) => SourceStatus::Failed(e),
+            StreamStatus::Fetching | StreamStatus::Complete => SourceStatus::Ready,
+        }
     }
 }
 

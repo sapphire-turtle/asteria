@@ -9,22 +9,14 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
-[features]
-# The fakes in `player::fakes`, for the integration tests (which enable it on this crate).
-test-support = []
-
 [dependencies]
 asteria-framework-client = { path = "../../../crates/asteria-framework-client" }
 asteria-music-api = { path = "../asteria-music-api" }
 tracing.workspace = true
 url.workspace = true
 reqwest.workspace = true
-symphonia.workspace = true
-ogg.workspace = true
-opus-pure.workspace = true
-rubato.workspace = true
-cpal.workspace = true
-rtrb.workspace = true
+# The playback engine, its decoder and the sound device.
+corundum-framework-audio = { workspace = true, features = ["cpal"] }
 corundum-framework = { workspace = true, features = ["gui", "serde", "eframe"] }
 getrandom.workspace = true
 serde.workspace = true
@@ -39,5 +31,5 @@ tempfile.workspace = true
 asteria-framework-api = { path = "../../../crates/asteria-framework-api", version = "2.3.0" }
 asteria-photos-api = { path = "../../../photos/crates/asteria-photos-api" }
 grain-id.workspace = true
-# The fakes of the player, for the integration tests.
-asteria-music-gui = { path = ".", features = ["test-support"] }
+# The fakes of the device and the opener, for the tests.
+corundum-framework-audio = { workspace = true, features = ["test-support"] }

@@ -34,12 +34,12 @@ asteria-desktop-not-running = サーバーは動いていません。起動す�
 
 # 外部ツール。
 asteria-desktop-tools-title = 外部ツール
-asteria-desktop-tools-intro = サーバーはこれらのプログラムでサムネイルを作ります。無くてもサーバーは動きますが、サムネイルは作られません。
-asteria-desktop-tools-vips-purpose = 画像のサムネイル。
+asteria-desktop-tools-intro = サムネイルの多くはサーバー自身が作ります。これらのプログラムは、サーバーが読めないもの（HEIC・AVIF・一部のカメラの RAW・非常に大きな画像）と動画の分を補います。無くてもサーバーは動きます。
+asteria-desktop-tools-vips-purpose = HEIC・AVIF と一部のカメラの RAW のサムネイル。
 asteria-desktop-tools-ffmpeg-purpose = 動画のサムネイル。
 asteria-desktop-tools-found = 見つかりました：{ $path }
 asteria-desktop-tools-missing = 見つかりません。
-asteria-desktop-tools-sips = 入っていません。画像は macOS に入っている sips で作ります。
+asteria-desktop-tools-sips = 入っていません。それらの画像は macOS に入っている sips で作ります。
 asteria-desktop-tools-linux = ディストリビューションのパッケージマネージャーで、パッケージ { $package } を入れてください。
 asteria-desktop-tools-macos = Homebrew で入れてください：brew install { $package }
 asteria-desktop-tools-windows-vips = Windows 版の libvips（github.com/libvips/build-win64-mxe/releases）をダウンロードし、その bin フォルダを PATH に足してください。

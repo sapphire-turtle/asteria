@@ -103,7 +103,8 @@ asteria/
 | GUI | eframe / egui |
 | 音声タグ | lofty |
 | EXIF | nom-exif 系 |
-| 画像・動画の変換 | ffmpeg、libvips（`vips` コマンド）を子プロセスとして呼ぶ |
+| 画像の変換 | プロセス内で行う：corundum-framework-image（JPEG・PNG・WebP・GIF・TIFF と RAW のプレビュー。純 Rust のデコーダー）。デコードできないもの（HEIC、AVIF、一部の RAW、上限を超える画像）だけ libvips（`vipsthumbnail`）、macOS では sips を子プロセスとして呼ぶ（2026-11-03 決定） |
+| 動画の変換 | ffmpeg を子プロセスとして呼ぶ |
 | 音声の変換（サーバーの `offline-audio`） | プロセス内で行う：symphonia と opus-pure（デコード）、rubato（48 kHz へ）、`opus` クレート（同梱の libopus でエンコード）、`ogg` クレート（多重化） |
 | 音声デコードと出力（クライアント） | symphonia、opus-pure（Opus）、cpal、rubato（サンプルレートの変換） |
 | OS のメディアキーと再生中の表示 | corundum-framework のメディアセッション（sapphire-turtle/corundum-framework#50） |
@@ -339,16 +340,17 @@ asteria/
 
 ### 4.5 メディア処理
 
-- 画像と動画は ffmpeg と vips を子プロセスとして呼ぶ。音声（`offline-audio`）はサーバーのプロセス内で作り、外部ツールを使わない（§4.9、2026-11-02 決定、#48）。どれもタイムアウトと同時実行数の上限を設ける。
+- 動画は ffmpeg を子プロセスとして呼ぶ。音声（`offline-audio`）はサーバーのプロセス内で作り、外部ツールを使わない（§4.9、2026-11-02 決定、#48）。画像もまずサーバーのプロセス内で、corundum-framework-image で作る（JPEG・PNG・WebP・GIF・TIFF と RAW のプレビュー。2026-11-03 決定、`docs/superpowers/plans/2026-11-03-corundum-media.md`）。vips と sips は、プロセス内でデコードできなかったもの（HEIC、AVIF、一部の RAW、下記の上限を超える画像）のための代わりの経路で、`Io`（原本を読めない）を除くどのエラーでも、ツールが見つかればそちらに回す。ツールがなければ `ToolMissing`（503、記録しない。ツールを入れれば次の要求で作り直す）になる。どれもタイムアウトと同時実行数の上限を設ける。
 - 生成物は（ファイル全体のハッシュ、プリセット名）をキーにキャッシュする。ファイル全体のハッシュは `file/1` スコープの BLAKE3 で、スキャンのときに payload ハッシュと一緒に計算してキャッシュに持つ。EXIF の向きや ICC などメタデータだけを変えた場合も作り直される。photos の画像はメタデータをほとんど書き換えない（評価などはサイドカーに書く）ので、作り直しが増えることはない（2026-10-22 決定）。
 - リクエストが来たときに生成するのを基本とする。オフライン用に指定されたものだけ、先に生成しておく。
 - 失敗したファイルは「処理不可」として理由を記録する。ファイルが変わるまで再試行しない。外部ツールがないことは処理不可にしない。
 - 実装の詳細（Plan 2）
-  - サムネイルは縮小だけで、拡大はしない（vips は `NxN>`、ffmpeg は `min()`）。
+  - サムネイルは縮小だけで、拡大はしない（プロセス内は縮小率が 1 を超えない計算、vips は `NxN>`、ffmpeg は `min()`）。
+  - プロセス内のデコードは `corundum_framework_image::Limits` の範囲に収める。サーバー用に 64 メガピクセル、ファイル 256 MiB とする（既定の 512 MiB・200 メガピクセルだと、1 枚のデコードに 2〜3 GB かかることがあり、2〜4 GB の NAS や Raspberry Pi では同時に 2 枚走るだけでサーバーが OOM で落ちるため）。超える画像や展開爆弾はプロセス内では断り、ストリームで読むツールに回す。デコードは `spawn_blocking` で、実行枠とタイムアウトの内側で行い、WebP（品質 80）のバイト列を返すだけにして、一時ファイルを書くのは非同期側だけにする（タイムアウトした後に書くことがない）。プロセス内の試行とツールには、それぞれプリセットのタイムアウトを丸ごと与える。プロセス内のタイムアウトはツールのタイムアウトと同じに扱う。
   - vips には原本ではなく、一時ディレクトリに置いた安全な名前のコピー（Unix ではシンボリックリンク）を渡す。libvips がファイル名の末尾の `[...]` を読み込みオプションとして解釈するため。
   - ffmpeg は `-protocol_whitelist file` と、コンテナ形式の `-format_whitelist` を付けて呼ぶ。プレイリストや concat スクリプト、ネットワークを経由させないため。
   - 生成は要求したリクエストから切り離して動き、処理不可の記録も生成側で行う。リクエストがすべて去っても結果は記録される。
-  - macOS で vipsthumbnail が見つからないときは、OS に入っている `sips` で画像を縮小する（2026-11-02 決定、Plan 8d）。sips は WebP を書けず、EXIF の向きを画素に反映せずタグを残し、`-Z` は拡大もする。そこで、先に `sips -g pixelWidth -g pixelHeight` で大きさを読んで拡大しない大きさを決め、sips で一時 JPEG に縮小し、その JPEG に残った向きのタグを Rust で読んで画素に反映し、WebP（品質 80、`webp` クレートの libwebp）にする。Rust が読むのは sips が書いた JPEG だけで、原本は子プロセスの sips だけが読む。HEIC と RAW も Apple の ImageIO で読める。
+  - macOS で vipsthumbnail が見つからないときは、OS に入っている `sips` で画像を縮小する（2026-11-02 決定、Plan 8d）。sips は WebP を書けず、EXIF の向きを画素に反映せずタグを残し、`-Z` は拡大もする。そこで、先に `sips -g pixelWidth -g pixelHeight` で大きさを読んで拡大しない大きさを決め、sips で一時 JPEG に縮小し、その JPEG に残った向きのタグを Rust で読んで画素に反映し、WebP（品質 80、`webp` クレートの libwebp）にする。Rust が読むのは sips が書いた JPEG だけで、sips が読む原本は子プロセスの sips だけが読む。サーバー自身が原本を読むのは、プロセス内の純 Rust のデコーダー（上の `Limits` で上限を決める）だけで、デコーダーがパニックしたときもツールに回す（2026-11-03 の更新）。HEIC と RAW も Apple の ImageIO で読める。
   - 生成待ちの列には上限（同時実行数 × 32）がある。超えた分は列に入れずに 503 を返す。順番を待っている間に、待っているリクエストがすべてなくなった生成は、実行枠を待たずにすぐ列から外し、ツールを起動しない。
 - 初期のプリセット（実装時に調整する）
 
@@ -680,7 +682,7 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
   1. 「ライブラリはどこにありますか？」：「このコンピューター」（フォルダを選ぶ）、「ほかのサーバー」（今のサーバー登録の画面へ）、「あとで」。
   2. 「このコンピューター」なら：選んだフォルダで `init` する（既にライブラリならそのまま使う）。持ち主の名前は OS のユーザー名。設定ファイルは既定の場所（§4.1）。続けて、名前 `desktop` の API キーを作り、`http://127.0.0.1:7810`（music は `7811`）を「このコンピューター」として接続先に登録して選ぶ。
   3. 「サーバーをバックグラウンドで動かし続けますか？」：corundum の `first_run::ServicePage`。はいならサービスに登録して起動する。いいえなら、サーバーが動いていないので、そのことと起動のしかた（`asteria-<app> serve`）を出す。
-  4. 外部ツール：アプリのサーバーが使うツール（`LocalServerSpec::tools`。photos は `vipsthumbnail` と `ffmpeg`、music はジャケットのサムネイルの `vipsthumbnail` だけ）があるかを出し、無ければ入れ方を案内する。無くても続けられる（サムネイルが作れないだけ）。ツールを使わないアプリでは、使わないことだけを出す。
+  4. 外部ツール：アプリのサーバーが使うツール（`LocalServerSpec::tools`。photos は `vipsthumbnail`（HEIC・AVIF と一部の RAW のため）と `ffmpeg`、music は無し）があるかを出し、無ければ入れ方を案内する。無くても続けられる（その形式のサムネイルが作れないだけ）。ツールを使わないアプリでは、使わないことだけを出す。
 - **サービス**：corundum-framework-service。名前はアプリ名（`asteria-photos` / `asteria-music`）、実行するのは自分の実行ファイルと `serve`。Linux は systemd のユーザーユニット、macOS は LaunchAgent、Windows はタスクスケジューラー（ログオン時）。
 - **設定の「ローカルサーバー」ページ**（desktop だけ）：ライブラリの場所と待ち受けアドレス、`settings::ServiceRow`（登録、起動、停止、削除）、API キーの管理（`KeysPage`、ローカルの `KeyStore` を直接扱う）、外部ツールの有無。
 - 外部ツールの有無は、サーバーがツールを探すのと同じ関数で desktop が確かめる（同じマシンなので結果は同じ）。ツールは `ASTERIA_*` の変数、`PATH`、よく使われるディレクトリ（macOS は `/opt/homebrew/bin` と `/usr/local/bin`、Linux は `/usr/local/bin`）の順に探し、サーバーは見つけた絶対パスを実行する（Finder から起動した GUI や LaunchAgent の `PATH` には Homebrew が入っていないため）。パッケージへの同梱は §5.9。
@@ -712,9 +714,9 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
 - **外部ツール**
   - 探す順番：`ASTERIA_*` の変数 → **実行ファイルの横（同梱。macOS の .app では `Contents/Resources` も）** → `PATH` → よく使われるディレクトリ。
   - 同梱するツールは、ワークフローの `pre-package` で `packaging/fetch-tools.sh` が desktop のクレートの `bundled/` に置き、`[package.metadata.packager]` の `resources` がパッケージに入れる。Windows ではインストール先の実行ファイルの横、macOS では `Contents/Resources`（cargo-packager は resources をそこに置く）。無いソースは何も足さないので、OS やアプリで同梱するものが違っても設定は1つで済む。
-  - Windows は libvips（build-win64-mxe の `vips-dev-x64-all-<version>.zip`、DLL ごと）を `vips\bin\vipsthumbnail.exe` として両アプリに同梱する。photos にはさらに ffmpeg（libwebp を含む GPL ビルド）を `ffmpeg.exe` として同梱する。
+  - Windows は libvips（build-win64-mxe の `vips-dev-x64-all-<version>.zip`、DLL ごと）を `vips\bin\vipsthumbnail.exe` として photos に同梱する（HEIC・AVIF と一部の RAW のため。music には要らない）。photos にはさらに ffmpeg（libwebp を含む GPL ビルド）を `ffmpeg.exe` として同梱する。
   - macOS は photos にだけ ffmpeg（martin-riedl.de の静的ビルド、arm64 と x86_64）を同梱する。画像は §4.5 の sips を使う。music は何も同梱しない。
-  - music は `offline-audio` をプロセス内で作る（§4.9）ので ffmpeg を同梱しない（2026-11-02 決定、#48）。ジャケットのサムネイルには vips（macOS では sips）を使う。どのアプリが何を同梱するかは `packaging/fetch-tools.sh <windows|macos> <photos|music> <dest>` が決める。
+  - music は `offline-audio` をプロセス内で作る（§4.9）ので ffmpeg を同梱しない（2026-11-02 決定、#48）。ジャケット（埋め込み画像）のサムネイルもプロセス内で作るので、music は vips も同梱しない（2026-11-03 決定）。どのアプリが何を同梱するかは `packaging/fetch-tools.sh <windows|macos> <photos|music> <dest>` が決める。
   - Linux は同梱しない（パッケージマネージャーで入れる。今の案内のまま）。
   - ワークフローはツールをバージョン付きの URL と SHA-256 で固定し（`packaging/tools.env`。2026-11-02 の時点で ffmpeg 9.0.2：Windows は BtbN の `autobuild-2026-11-01-12-49` の `win64-gpl-9.0`、macOS は martin-riedl.de の arm64 と x86_64 を `lipo` で1つに。libvips 8.18.7）、取ってきたら `-encoders` に libwebp があることを確かめる（無ければリリースを止める）。パッケージには `tools/LICENSES`（そのパッケージが同梱するツールのもの：ffmpeg は GPLv3、libvips は LGPL、それぞれのソースの場所）を入れる。asteria は GPL-3.0-or-later なので同梱できる。
   - 2026-11-01 のスパイク（GitHub の macOS ランナー）で確かめたこと：sips は JPEG・PNG・HEIC・RAW（NEF）を読める、LaunchAgent からも動く、壊れたファイルは終了コード 13。静的な ffmpeg は .app の中でも、ad hoc とハードンドランタイムの署名でも動く。公証は未確認（シークレットが無い）。
@@ -788,7 +790,7 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
    - クレートの分割と移動：`asteria-<app>-server` をライブラリにし、`-headless`、`-gui`、`-desktop`、`-mobile`（骨組み）を作る。desktop は CLI を兼ね、`asteria-<app>-desktop serve` でサーバーを立てられる。CI の iOS チェックを mobile に広げる。（Plan 8b、済）
    - corundum-framework 0.6.0 に上げた（コードの変更なし、2026-11-01）。
    - ローカルサーバー（§5.8）：認証を corundum の API キーに置き換え、設定ファイルの既定の場所を決め、desktop の初回起動の流れ（ライブラリを選ぶ、`init`、キーの発行と接続先への自動登録、サービス登録、外部ツールの確かめ）と、設定の「ローカルサーバー」ページを足す。cargo で入れた版でも使える。（Plan 8c、済）
-   - desktop の Velopack 配布と headless のリリース（§5.9）：1つのタグで両アプリの Velopack パッケージと headless のバイナリを出す。単一起動、更新、PATH、ランチャー、Windows のシムと GUI のサブシステム（corundum-framework#89）、`--veloapp-*` を引数の判定より前に処理、Windows（vips と ffmpeg）と macOS（ffmpeg）への外部ツールの同梱（#48 で music は ffmpeg を同梱しなくなった）、macOS の sips、headless の `update`。（Plan 8d。#58 で Velopack から cargo-packager に移した）
+   - desktop の Velopack 配布と headless のリリース（§5.9）：1つのタグで両アプリの Velopack パッケージと headless のバイナリを出す。単一起動、更新、PATH、ランチャー、Windows のシムと GUI のサブシステム（corundum-framework#89）、`--veloapp-*` を引数の判定より前に処理、Windows（vips と ffmpeg）と macOS（ffmpeg）への外部ツールの同梱（#48 で music は ffmpeg を、2026-11-03 に vips も同梱しなくなった）、macOS の sips、headless の `update`。（Plan 8d。#58 で Velopack から cargo-packager に移した。2026-11-03 に、画像をプロセス内で作るようにして、vips は photos の Windows だけに同梱するようにした）
 10. オフラインキャッシュと操作キュー。（Plan 9）
 11. payload ハッシュの第2段階。（Plan 10）
 12. iOS のクライアント（photos のアップロード、music のバックグラウンド再生）。corundum-framework が iOS のウィンドウに対応してから始める。

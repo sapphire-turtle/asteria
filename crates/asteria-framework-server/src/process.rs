@@ -24,6 +24,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::{Semaphore, watch};
 
+use crate::inprocess_image::{self, InSource};
 use crate::offline_audio::{self, EncodeError};
 use crate::sips;
 
@@ -795,25 +796,8 @@ impl Inner {
         let mut cleanup = Cleanup(vec![tmp.clone()]);
         let result = match (kind, preset, &src) {
             (MediaKind::Image, Preset::Thumb | Preset::Preview, _) => {
-                // libvips reads a trailing `[...]` of a file name as loader options, so it
-                // gets the image under a name we chose.
-                let ext = match &src {
-                    Source::File(path) => safe_ext(path),
-                    Source::Bytes { ext, .. } => ext.clone(),
-                };
-                let staged = dir.join(format!(".src-{pid}-{n}.{ext}"));
-                cleanup.0.push(staged.clone());
-                let put = match &src {
-                    Source::File(path) => link_or_copy(path, &staged).await,
-                    Source::Bytes { bytes, .. } => tokio::fs::write(&staged, bytes).await,
-                };
-                match put {
-                    Ok(()) => match &self.image {
-                        ImageTool::Vips(vips) => self.run_vips(vips, &staged, &tmp, preset).await,
-                        ImageTool::Sips(sips) => self.run_sips(sips, &staged, &tmp, preset).await,
-                    },
-                    Err(e) => Err(ProcessError::Io(format!("cannot stage the source: {e}"))),
-                }
+                self.render_image(&src, dir, &tmp, preset, (pid, n), &mut cleanup)
+                    .await
             }
             (MediaKind::Video, Preset::Thumb | Preset::Preview, Source::File(path)) => {
                 self.run_ffmpeg(path, &tmp, preset).await
@@ -832,6 +816,85 @@ impl Inner {
                 .map_err(|e| ProcessError::Io(e.to_string())),
             Err(e) => Err(e),
         }
+    }
+
+    /// Makes an image thumbnail in this process; for what the crate cannot read, the external
+    /// image tool does it from a staged copy of the source. With no tool found that is
+    /// `ToolMissing` (not recorded as unprocessable, so a tool installed later is tried),
+    /// except when the in-process decode found the data corrupt (`Error::Decode`): that is
+    /// `Unprocessable` and recorded, since no tool would help and a client would otherwise
+    /// retry it on every view (a corrupt cover in music, which has no tool, for one).
+    /// The in-process attempt and the tool each get the preset's full timeout, so one render
+    /// can take up to twice as long.
+    async fn render_image(
+        &self,
+        src: &Source,
+        dir: &Path,
+        tmp: &Path,
+        preset: Preset,
+        (pid, n): (u32, usize),
+        cleanup: &mut Cleanup,
+    ) -> Result<(), ProcessError> {
+        use corundum_framework_image::Error as ImageError;
+        let source = match src {
+            Source::File(path) => InSource::Path(path.clone()),
+            Source::Bytes { bytes, ext } => InSource::Bytes {
+                bytes: bytes.clone(),
+                ext: Some(ext.clone()),
+            },
+        };
+        let longest = preset.size();
+        let task = tokio::task::spawn_blocking(move || inprocess_image::render(source, longest));
+        // The decode cannot be stopped once begun, but it is bounded by the crate's limits,
+        // and it only returns bytes: nothing is written for a render that timed out.
+        let mut corrupt = false;
+        let failure = match tokio::time::timeout(preset.timeout(self.timeout), task).await {
+            Err(_) => return Err(ProcessError::Unprocessable("timeout".into())),
+            Ok(Ok(Ok(webp))) => {
+                tracing::debug!("made a {} thumbnail in-process", preset.name());
+                return tokio::fs::write(tmp, webp)
+                    .await
+                    .map_err(|e| ProcessError::Io(e.to_string()));
+            }
+            Ok(Ok(Err(ImageError::Io(e)))) => {
+                return Err(ProcessError::Io(format!("cannot read the image: {e}")));
+            }
+            Ok(Ok(Err(e))) => {
+                corrupt = matches!(e, ImageError::Decode(_));
+                e.to_string()
+            }
+            Ok(Err(e)) => format!("the image decoder failed: {e}"),
+        };
+        tracing::debug!("cannot make a thumbnail in-process ({failure}); trying the image tool");
+        // libvips reads a trailing `[...]` of a file name as loader options, so the tool gets
+        // the image under a name we chose.
+        let ext = match src {
+            Source::File(path) => safe_ext(path),
+            Source::Bytes { ext, .. } => ext.clone(),
+        };
+        let staged = dir.join(format!(".src-{pid}-{n}.{ext}"));
+        cleanup.0.push(staged.clone());
+        let put = match src {
+            Source::File(path) => link_or_copy(path, &staged).await,
+            Source::Bytes { bytes, .. } => tokio::fs::write(&staged, bytes).await,
+        };
+        if let Err(e) = put {
+            return Err(ProcessError::Io(format!("cannot stage the source: {e}")));
+        }
+        let result = match &self.image {
+            ImageTool::Vips(vips) => self.run_vips(vips, &staged, tmp, preset).await,
+            ImageTool::Sips(sips) => self.run_sips(sips, &staged, tmp, preset).await,
+        };
+        let result = match result {
+            Err(ProcessError::ToolMissing(_)) if corrupt => {
+                Err(ProcessError::Unprocessable(failure))
+            }
+            other => other,
+        };
+        if result.is_ok() {
+            tracing::debug!("made a {} thumbnail with the image tool", preset.name());
+        }
+        result
     }
 
     async fn run_vips(

@@ -153,9 +153,6 @@ async fn thumb_of_changed_file_is_503() {
 
 #[tokio::test]
 async fn thumb_is_webp_and_cached() {
-    if !have_tool("vipsthumbnail") {
-        return;
-    }
     let e = env();
     hash_all(&e);
     let id = item_id(&e, "a.jpg");
@@ -216,16 +213,19 @@ async fn corrupt_image_is_422_and_not_retried() {
 }
 
 #[tokio::test]
-async fn missing_tool_is_503_and_not_marked_unprocessable() {
+async fn with_no_tool_what_the_crate_cannot_read_is_503_and_retried() {
     let e = env_with(|t| {
         Processor::with_tools(t, 2, Duration::from_secs(5), "/nonexistent/vips", "ffmpeg")
     });
+    std::fs::write(e.root.join("a.jpg"), heic_bytes()).unwrap();
+    asteria_framework_server::scan(&e.lib, &e.cache, &Photos).unwrap();
     hash_all(&e);
     let id = item_id(&e, "a.jpg");
     let uri = format!("/media/{id}/thumb");
     let (s, h, _) = get(&e.app, Some(&e.owner_token), &uri, None).await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(h["retry-after"], "2");
+    // Not marked unprocessable: installing the tool later makes the next request render.
     let (s, _, _) = get(&e.app, Some(&e.owner_token), &uri, None).await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(e.processor.renders_started(), 2);
@@ -233,9 +233,6 @@ async fn missing_tool_is_503_and_not_marked_unprocessable() {
 
 #[tokio::test]
 async fn concurrent_requests_render_once() {
-    if !have_tool("vipsthumbnail") {
-        return;
-    }
     let e = Arc::new(env());
     hash_all(&e);
     let id = item_id(&e, "a.jpg");
@@ -320,6 +317,8 @@ async fn failure_after_the_request_left_is_still_marked_unprocessable() {
         "sleep 1\necho 'bad data' >&2\nexit 1",
     );
     let e = env_with(|t| Processor::with_tools(t, 1, Duration::from_secs(30), &fail, "ffmpeg"));
+    std::fs::write(e.root.join("a.jpg"), heic_bytes()).unwrap();
+    asteria_framework_server::scan(&e.lib, &e.cache, &Photos).unwrap();
     hash_all(&e);
     let id = item_id(&e, "a.jpg");
     let uri = format!("/media/{id}/thumb");
@@ -357,6 +356,9 @@ async fn full_render_queue_is_503_with_retry_after() {
     let tools = tempfile::tempdir().unwrap();
     let hang = script(tools.path(), "hang.sh", "exec sleep 30");
     let e = env_with(|t| Processor::with_tools(t, 1, Duration::from_secs(60), &hang, "ffmpeg"));
+    std::fs::write(e.root.join("a.jpg"), heic_bytes()).unwrap();
+    std::fs::write(e.root.join("sub/b.jpg"), heic_bytes()).unwrap();
+    asteria_framework_server::scan(&e.lib, &e.cache, &Photos).unwrap();
     hash_all(&e);
     let limit = e.processor.queue_limit();
     let src = e.root.join("sub/b.jpg");
@@ -554,9 +556,6 @@ async fn offline_audio_is_ogg_with_ranges() {
 
 #[tokio::test]
 async fn thumb_source_image_bytes_are_rendered_once_per_key() {
-    if !have_tool("vipsthumbnail") {
-        return;
-    }
     let red = std::fs::read(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../asteria-framework/tests/fixtures/red.jpg"),

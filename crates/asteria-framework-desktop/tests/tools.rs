@@ -11,7 +11,10 @@ fn only_the_apps_tools_are_listed() {
     let ctx = context();
     let output = frame(&ctx, Vec::new(), |ui| tools_ui(ui, &[Tool::Vipsthumbnail]));
     assert!(shows(&output, "vipsthumbnail"));
-    assert!(shows(&output, "Image thumbnails"));
+    assert!(shows(
+        &output,
+        "Thumbnails of HEIC, AVIF and some camera RAW files."
+    ));
     assert!(!shows(&output, "ffmpeg"));
     let output = frame(&ctx, Vec::new(), |ui| {
         tools_ui(ui, &[Tool::Vipsthumbnail, Tool::Ffmpeg])
