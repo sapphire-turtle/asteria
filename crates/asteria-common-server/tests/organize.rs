@@ -147,6 +147,12 @@ async fn request_errors_change_nothing() {
             codes::INVALID_PARAMS,
             "operations 0 and 1 have the same target",
         ),
+        // The same file on a case-insensitive filesystem (#33).
+        (
+            vec![mv(&e, "a.jpg", "same.jpg"), mv(&e, "sub/b.jpg", "SAME.jpg")],
+            codes::INVALID_PARAMS,
+            "operations 0 and 1 have the same target",
+        ),
     ];
     for (ops, code, message) in cases {
         let v = apply(&e, ops, false, None).await;
