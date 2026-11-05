@@ -255,7 +255,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -266,7 +266,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -291,7 +291,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-framework"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-framework-api",
  "blake3",
@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-framework-client"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-framework",
  "asteria-framework-api",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-framework-desktop"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-framework",
  "asteria-framework-client",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-framework-server"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-framework",
  "asteria-framework-api",
@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-desktop"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-framework-client",
  "asteria-framework-desktop",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-gui"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-framework-api",
  "asteria-framework-client",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-headless"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-framework-server",
  "asteria-music-api",
@@ -501,14 +501,14 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-mobile"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-music-gui",
 ]
 
 [[package]]
 name = "asteria-music-server"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-framework",
  "asteria-framework-server",
@@ -534,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-desktop"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-framework-client",
  "asteria-framework-desktop",
@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-gui"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-framework",
  "asteria-framework-api",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-headless"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-framework",
  "asteria-framework-server",
@@ -580,14 +580,14 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-mobile"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-photos-gui",
 ]
 
 [[package]]
 name = "asteria-photos-server"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 dependencies = [
  "asteria-framework",
  "asteria-framework-api",
@@ -1342,9 +1342,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf066a14c4f433a9d70cb4b3ad81ce5f9ea15bd6b5b2447063772cb0389ed641"
+checksum = "69e30c083394483d047107d08eaaff966ae4efe399d99a52f3b545c397764cd1"
 dependencies = [
  "corundum-framework-gui",
  "corundum-framework-keys",
@@ -1356,9 +1356,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-build"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c49d9d84e9cf796c36305e47c0980489d6b1406d5f66ac0a8a27fa286f725856"
+checksum = "f57fe601340e4aaf8c00cc63cbb2cf998f071810a2f6af8f55489557a801d9fd"
 dependencies = [
  "corundum-framework-platform",
  "winresource",
@@ -1366,9 +1366,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-gui"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0877f8a5b5d1b3a7fe7ad1fc683ecfbbae2af8b554cdfd605e8c951ee8551a1a"
+checksum = "e4c473e23a320322d4b98b2b6bfd0319e85e917189950dda24f7cbe65eb0f92e"
 dependencies = [
  "corundum-framework-keys",
  "corundum-framework-package",
@@ -1400,9 +1400,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-keys"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63e3e40e43c471b7e441bcfbbdade68d47521396aa972331396108bea2863fba"
+checksum = "b19d62107c04ec592ebf9dca93ca0645b5c642e97006500cf40fbff7e0848f35"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -1419,9 +1419,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-package"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1fd958ecb002be202bb1698188e6cca14e55c99b5947b9536b859bd83eb710e"
+checksum = "63e655b11575c76486e9f30f9c00f2a2c58a2a923cb2290be400bd9840437903"
 dependencies = [
  "cargo-packager-updater",
  "corundum-framework-platform",
@@ -1438,9 +1438,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-platform"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f3614bad3c1a38847fe45a6e3e738a6dcefe73410257a27c4286e8eafe3f214"
+checksum = "64d12a9c34ca016361b5d8bc45e987f2567c1b56ca241f4eb0a01d5e1e83fe36"
 dependencies = [
  "dirs 7.0.0",
  "interprocess",
@@ -1456,9 +1456,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-service"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faf8e0758c5fc6024937e0aea5d5175499d612bdb03432c1917981ef25d24606"
+checksum = "ff424b207f8d95af1565c1c2a1d7ceb067afbab1e25bb9ee1c441d7432f40740"
 dependencies = [
  "corundum-framework-platform",
  "libc",
@@ -1468,9 +1468,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-update"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "567c0c3c12c296d05b7b9d5fe28e3314fa71d873961e744cfd25e5875003fb6f"
+checksum = "647c1262cbe762c92f3d39168f4a1327040a58ac8e59af264a60f4a0bf3c1c5d"
 dependencies = [
  "clap",
  "corundum-framework-platform",
@@ -1644,7 +1644,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.3",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2002,7 +2002,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3543,7 +3543,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4088,7 +4088,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4551,7 +4551,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5059,7 +5059,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5117,7 +5117,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5250,7 +5250,7 @@ checksum = "609c5606d9d357b26e4ee1a7a01beac396628d0fa01ebbade2a09cefb88e65af"
 dependencies = [
  "fastrand",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5564,7 +5564,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5881,7 +5881,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6365,7 +6365,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7081,7 +7081,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
