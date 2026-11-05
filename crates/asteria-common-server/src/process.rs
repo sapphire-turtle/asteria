@@ -90,12 +90,14 @@ pub fn find_tool(tool: Tool) -> Option<PathBuf> {
     )
 }
 
-/// Where a package puts the tools it bundles, relative to the executable's directory: beside
-/// it (`ffmpeg` on Windows), in `vips/bin` (`vipsthumbnail` and its DLLs on Windows), and in
-/// a macOS `.app`, whose executable is in `Contents/MacOS`, in `Contents/Resources`
-/// (`ffmpeg`), where cargo-packager puts the package's resources.
+/// Where a package puts the tools it bundles, relative to the executable's directory: in
+/// `tools` (`ffmpeg` on Windows), in `vips/bin` (`vipsthumbnail` and its DLLs on Windows), and
+/// in a macOS `.app`, whose executable is in `Contents/MacOS`, in `Contents/Resources`
+/// (`ffmpeg`), where cargo-packager puts the package's resources. Never the executable's own
+/// directory: the Windows installer puts it on the user's `Path`, so a tool there would become
+/// the user's `ffmpeg` too (#51).
 fn bundled_dirs(exe_dir: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![exe_dir.to_path_buf(), exe_dir.join("vips").join("bin")];
+    let mut dirs = vec![exe_dir.join("tools"), exe_dir.join("vips").join("bin")];
     if exe_dir.ends_with("Contents/MacOS")
         && let Some(contents) = exe_dir.parent()
     {
@@ -1196,11 +1198,18 @@ mod tool_tests {
         (root, dir)
     }
 
+    /// The `tools` folder beside the executable, where a Windows package puts `ffmpeg.exe`.
+    fn tools_dir(exe_dir: &Path) -> PathBuf {
+        let tools = exe_dir.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        tools
+    }
+
     #[test]
-    fn a_tool_beside_the_executable_wins_over_path() {
+    fn a_tool_in_the_tools_folder_wins_over_path() {
         let (_root, exe_dir) = tempdir_with_space();
         let on_path = tempfile::tempdir().unwrap();
-        let bundled = program(&exe_dir, &exe_name("ffmpeg"));
+        let bundled = program(&tools_dir(&exe_dir), &exe_name("ffmpeg"));
         program(on_path.path(), &exe_name("ffmpeg"));
         let found = find_program(
             OsStr::new("ffmpeg"),
@@ -1211,6 +1220,16 @@ mod tool_tests {
         assert_eq!(found, Some(bundled));
     }
 
+    /// The installer puts the executable's folder on `Path`, so a tool there would be the
+    /// user's too (#51): nothing directly beside the executable counts as bundled.
+    #[test]
+    fn a_tool_directly_beside_the_executable_is_not_bundled() {
+        let (_root, exe_dir) = tempdir_with_space();
+        program(&exe_dir, &exe_name("ffmpeg"));
+        let found = find_program(OsStr::new("ffmpeg"), &bundled_dirs(&exe_dir), None, &[]);
+        assert_eq!(found, None);
+    }
+
     /// macOS puts `/usr/local/bin/asteria-photos` as a link into the `.app`: the tools are
     /// looked for beside the link's target, where the package put them.
     #[cfg(unix)]
@@ -1218,7 +1237,7 @@ mod tool_tests {
     fn a_linked_executable_finds_the_tools_beside_its_target() {
         let (_root, exe_dir) = tempdir_with_space();
         let exe = program(&exe_dir, "asteria-photos");
-        let bundled = program(&exe_dir, "ffmpeg");
+        let bundled = program(&tools_dir(&exe_dir), "ffmpeg");
         let bin = tempfile::tempdir().unwrap();
         let link = bin.path().join("asteria-photos");
         std::os::unix::fs::symlink(&exe, &link).unwrap();
@@ -1264,7 +1283,7 @@ mod tool_tests {
     #[test]
     fn a_path_in_the_variable_is_used_as_it_is() {
         let (_root, exe_dir) = tempdir_with_space();
-        let bundled = program(&exe_dir, &exe_name("ffmpeg"));
+        let bundled = program(&tools_dir(&exe_dir), &exe_name("ffmpeg"));
         let elsewhere = tempfile::tempdir().unwrap();
         let chosen = program(elsewhere.path(), "my-ffmpeg");
         let missing = elsewhere.path().join("nothing-here");

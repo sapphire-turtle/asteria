@@ -121,7 +121,7 @@ desktop アプリは、このコンピューターのフォルダをライブラ
   - `vipsthumbnail`（libvips に含まれる）：サーバー自身ではデコードできない HEIC・AVIF・一部のカメラの RAW の写真のサムネイル（多くは macOS のシステムの `sips` でも代わりに作れる）。Debian/Ubuntu は `sudo apt install libvips-tools`（ほかのディストリビューションも似た名前のパッケージ）、macOS は `brew install vips`、Windows は github.com/libvips/build-win64-mxe/releases の libvips を入れ、その `bin` フォルダを `PATH` に足す。
   - `ffmpeg`：photos の動画のサムネイル（music は使わない。オフライン用のコピーは自分で作る）。`sudo apt install ffmpeg`、`brew install ffmpeg`、Windows は ffmpeg.org/download.html から入れ、その `bin` フォルダを `PATH` に足す。
   - desktop アプリの Windows と macOS のパッケージには、そのアプリが使うものがはじめから入っている（photos：macOS は ffmpeg で、`vipsthumbnail` の代わりにシステムの `sips` を使う。Windows は両方。music：何もない）。
-  - または `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` にプログラムの場所を入れる。入れなければ実行ファイルの横（パッケージが置く場所）、`PATH`、続けて `/opt/homebrew/bin` と `/usr/local/bin`（macOS）または `/usr/local/bin`（Linux）を探す。ページの「もう一度確かめる」で探し直す。
+  - または `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` にプログラムの場所を入れる。入れなければパッケージが置く場所（Windows では実行ファイルの横の `tools` と `vips\bin`、macOS ではアプリの `Contents/Resources`）、`PATH`、続けて `/opt/homebrew/bin` と `/usr/local/bin`（macOS）または `/usr/local/bin`（Linux）を探す。ページの「もう一度確かめる」で探し直す。
 
 ## photos クライアントからのアップロード
 

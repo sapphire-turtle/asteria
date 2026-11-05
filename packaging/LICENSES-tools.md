@@ -12,7 +12,7 @@ this directory.
 
 ## FFmpeg (Asteria Photos, Windows and macOS)
 
-- `ffmpeg.exe` (Windows) and `ffmpeg` (macOS), FFmpeg 9.0.2.
+- `tools/ffmpeg.exe` (Windows) and `ffmpeg` (macOS), FFmpeg 9.0.2.
 - Licence: GNU General Public License, version 3 (both builds are configured with
   `--enable-gpl --enable-version3`). Text: `ffmpeg-LICENSE.txt` (Windows),
   `ffmpeg-LICENSE-GPLv3.txt` (macOS).

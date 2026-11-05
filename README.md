@@ -121,7 +121,7 @@ The desktop apps can set up a server for a folder on this computer, so one machi
   - `vipsthumbnail` (from libvips), for the HEIC, AVIF and some camera RAW photos the server cannot decode itself (macOS's `sips` stands in for most of them): `sudo apt install libvips-tools` (Debian/Ubuntu; other distributions name the package similarly), `brew install vips` on macOS, or on Windows the libvips build from github.com/libvips/build-win64-mxe/releases with its `bin` folder added to `PATH`.
   - `ffmpeg`, for photos' video thumbnails (music does not use it; it makes its offline copies itself): `sudo apt install ffmpeg`, `brew install ffmpeg`, or on Windows a build from ffmpeg.org/download.html with its `bin` folder added to `PATH`.
   - The Windows and macOS packages of the desktop app already include what the app uses (photos: ffmpeg on macOS, where the system's `sips` stands in for `vipsthumbnail`, and both on Windows; music: nothing).
-  - Or point `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` at the programs. Otherwise they are looked for beside the executable (where the packages put them), then on `PATH`, then in `/opt/homebrew/bin` and `/usr/local/bin` (macOS) or `/usr/local/bin` (Linux). "Check again" on the page looks for them again.
+  - Or point `ASTERIA_VIPSTHUMBNAIL` / `ASTERIA_FFMPEG` at the programs. Otherwise they are looked for where the packages put them (on Windows the `tools` and `vips\bin` folders beside the executable, on macOS the app's `Contents/Resources`), then on `PATH`, then in `/opt/homebrew/bin` and `/usr/local/bin` (macOS) or `/usr/local/bin` (Linux). "Check again" on the page looks for them again.
 
 ## Uploading from the photos client
 
