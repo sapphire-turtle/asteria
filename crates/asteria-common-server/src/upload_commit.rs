@@ -29,7 +29,7 @@ use grain_id::GrainId;
 
 use crate::cache::Cache;
 use crate::error::ServerError;
-use crate::fsutil::{move_no_clobber, stage, sync_dir};
+use crate::fsutil::{DirError, create_dirs_inside, move_no_clobber, stage, sync_dir};
 use crate::upload::{Committed, SealGuard, UploadError, UploadStore};
 
 /// Library-relative folder that every upload lands in.
@@ -64,21 +64,20 @@ struct Staging {
 }
 
 impl Staging {
-    fn new(dir: PathBuf, seals: Vec<SealGuard>) -> Result<Staging, UploadError> {
-        let created_from = dir
-            .ancestors()
-            .take_while(|d| !d.exists())
-            .last()
-            .map(Path::to_path_buf);
-        let staging = Staging {
-            dir,
+    /// Makes the library-relative folder `rel` below `root`, never through a link (#32).
+    fn new(root: &Path, rel: &str, seals: Vec<SealGuard>) -> Result<Staging, UploadError> {
+        let created_from = create_dirs_inside(root, rel).map_err(|e| match e {
+            DirError::Linked(dir) => UploadError::Invalid(format!(
+                "the folder {dir:?} is a link; uploads are not placed through links"
+            )),
+            DirError::Io(e) => e.into(),
+        })?;
+        Ok(Staging {
+            dir: rel.split('/').fold(root.to_path_buf(), |d, s| d.join(s)),
             created_from,
             files: Vec::new(),
             _seals: seals,
-        };
-        // On failure the drop removes what was made.
-        fs::create_dir_all(&staging.dir)?;
-        Ok(staging)
+        })
     }
 
     /// The group is in place: its folders stay.
@@ -275,11 +274,12 @@ pub fn prepare_sealed(
     }
 
     // Staged on the library's filesystem now, so that placing them is only a rename.
-    let dir = folder
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .fold(library.root().join(INBOX), |d, s| d.join(s));
-    let mut staging = Staging::new(dir, seals)?;
+    let rel = if folder.is_empty() {
+        INBOX.to_string()
+    } else {
+        format!("{INBOX}/{folder}")
+    };
+    let mut staging = Staging::new(library.root(), &rel, seals)?;
     let mut kept = Vec::with_capacity(keep.len());
     for (session, name, data, content) in keep {
         let staged = tmp_path_for(&staging.dir.join(&session));
@@ -865,6 +865,67 @@ mod tests {
         assert!(matches!(r, Err(UploadError::Io(_))), "{r:?}");
         assert!(store.completed(me, &heic).is_ok());
         assert!(!root.join("Inbox").exists());
+    }
+
+    /// `Inbox/`, or a folder below it, that is a link fails the commit before anything is
+    /// placed: the files would land outside the library (#32).
+    #[cfg(unix)]
+    #[test]
+    fn an_upload_never_goes_through_a_linked_folder() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        fs::create_dir(&root).unwrap();
+        let lib = Library::init(&root, "owner")
+            .unwrap()
+            .with_state_dir(dir.path().join("state"));
+        let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
+        let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
+        let me = lib.owner();
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let commit = |path: &str| {
+            let tmp = dir.path().join("hash-me");
+            fs::write(&tmp, path.as_bytes()).unwrap();
+            let s = store
+                .begin(me, path.len() as u64, file_hash(&tmp).unwrap())
+                .unwrap()
+                .session;
+            store.put_chunk(me, &s, 0, path.as_bytes()).unwrap();
+            let params = UploadCommitParams {
+                files: vec![UploadFile {
+                    session: s.clone(),
+                    path: path.into(),
+                }],
+                allow_duplicate: false,
+            };
+            (
+                commit_with(&lib, &cache, &store, me, params, &mut |_: &Path| {}),
+                s,
+            )
+        };
+
+        symlink(&outside, root.join("Inbox")).unwrap();
+        let (r, s) = commit("IMG_0001.JPG");
+        assert!(
+            matches!(&r, Err(UploadError::Invalid(m)) if m.contains("\"Inbox\"")),
+            "{r:?}"
+        );
+        assert!(store.completed(me, &s).is_ok());
+
+        fs::remove_file(root.join("Inbox")).unwrap();
+        fs::create_dir_all(root.join("Inbox/trip")).unwrap();
+        symlink(&outside, root.join("Inbox/trip/day1")).unwrap();
+        let (r, _) = commit("trip/day1/more/IMG_0002.JPG");
+        assert!(
+            matches!(&r, Err(UploadError::Invalid(m)) if m.contains("Inbox/trip/day1")),
+            "{r:?}"
+        );
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+
+        let (r, _) = commit("trip/day2/IMG_0003.JPG");
+        assert!(matches!(r, Ok(UploadCommitResult::Placed { .. })), "{r:?}");
+        assert!(root.join("Inbox/trip/day2/IMG_0003.JPG").is_file());
     }
 
     #[test]
