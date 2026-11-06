@@ -1,0 +1,116 @@
+# asteria's release (RELEASING.md): the apps and their crates share the workspace's one
+# version, and one `v{version}` tag and GitHub release. Nothing goes to crates.io, so every
+# package is versioned in git-only mode, from the `v{version}` tags. Merging the release PR
+# makes the tag and the release, and release-plz.yml then builds the packages onto it
+# (release.yml).
+[workspace]
+changelog_update = false
+dependencies_update = false
+publish = false
+git_only = true
+release = true
+git_release_enable = false
+git_tag_enable = false
+git_tag_name = "v{{ version }}"
+# A version with a `-` (0.2.0-rc.1) is a GitHub pre-release.
+git_release_type = "auto"
+# Release only when a release PR is merged, not on every push to main.
+release_always = false
+pr_branch_prefix = "release-plz/"
+pr_labels = ["release"]
+
+# The one changelog, at the root, the tag and the release (its notes are the version's
+# CHANGELOG section) are this crate's, with every other crate's commits in them.
+[[package]]
+name = "asteria-common-core"
+version_group = "asteria"
+changelog_update = true
+changelog_path = "./CHANGELOG.md"
+changelog_include = [
+  "asteria-common-server",
+  "asteria-common-client",
+  "asteria-common-desktop",
+  "asteria-photos-server",
+  "asteria-photos-gui",
+  "asteria-photos-desktop",
+  "asteria-photos-headless",
+  "asteria-photos-mobile",
+  "asteria-music-server",
+  "asteria-music-gui",
+  "asteria-music-desktop",
+  "asteria-music-headless",
+  "asteria-music-mobile",
+  "asteria-common-api",
+  "asteria-photos-api",
+  "asteria-music-api",
+  ]
+git_tag_enable = true
+git_release_enable = true
+git_release_name = "v{{ version }}"
+
+[[package]]
+name = "asteria-common-server"
+version_group = "asteria"
+
+[[package]]
+name = "asteria-common-client"
+version_group = "asteria"
+
+[[package]]
+name = "asteria-common-desktop"
+version_group = "asteria"
+
+[[package]]
+name = "asteria-photos-server"
+version_group = "asteria"
+
+[[package]]
+name = "asteria-photos-gui"
+version_group = "asteria"
+
+[[package]]
+name = "asteria-photos-desktop"
+version_group = "asteria"
+
+[[package]]
+name = "asteria-photos-headless"
+version_group = "asteria"
+
+[[package]]
+name = "asteria-photos-mobile"
+version_group = "asteria"
+
+[[package]]
+name = "asteria-music-server"
+version_group = "asteria"
+
+[[package]]
+name = "asteria-music-gui"
+version_group = "asteria"
+
+[[package]]
+name = "asteria-music-desktop"
+version_group = "asteria"
+
+[[package]]
+name = "asteria-music-headless"
+version_group = "asteria"
+
+[[package]]
+name = "asteria-music-mobile"
+version_group = "asteria"
+
+# The APIs' versions are the handshake's `app_api` (the major) and are bumped by hand when
+# the API changes, not by release-plz.
+
+[[package]]
+name = "asteria-common-api"
+release = false
+
+[[package]]
+name = "asteria-photos-api"
+release = false
+
+[[package]]
+name = "asteria-music-api"
+release = false

@@ -1,0 +1,35 @@
+name: Release-plz
+
+# asteria's releases (RELEASING.md): on every push to main, release-plz releases what a
+# merged release PR bumped (the `v{version}` tag and GitHub release, from
+# asteria-common-core in release-plz.toml), then opens or updates the next release PR. When
+# it released, release.yml builds the packages and the headless servers onto the release.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Keep the release command and the release PR from racing on the same branch.
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-plz:
+    permissions:
+      contents: write
+      pull-requests: write
+    # Nothing is built: every package is git-only and not published.
+    uses: sapphire-turtle/.github/.github/workflows/release-plz.yml@v1
+    secrets: inherit
+
+  build:
+    needs: release-plz
+    if: contains(fromJSON(needs.release-plz.outputs.packages), 'asteria-common-core')
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    secrets: inherit
+    with:
+      tag: ${{ fromJSON(needs.release-plz.outputs.tags)['asteria-common-core'] }}
