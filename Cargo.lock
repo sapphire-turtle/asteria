@@ -1408,9 +1408,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69e30c083394483d047107d08eaaff966ae4efe399d99a52f3b545c397764cd1"
+checksum = "249d610b47db8684df31f3222fe66eb3f439ab43ff7c5cb31d6c4cd971d31353"
 dependencies = [
  "corundum-framework-gui",
  "corundum-framework-keys",
@@ -1422,9 +1422,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-audio"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5f44ac47cdc09ca79e2ac9f14e576993c0c6a83bf1b005eae2743419c3c9d03"
+checksum = "d7b54fdcfd5b5b7094efc6e864059666b8c4b49a17fe019f7694659cf6f5b64d"
 dependencies = [
  "cpal",
  "ogg",
@@ -1437,19 +1437,20 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-build"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f57fe601340e4aaf8c00cc63cbb2cf998f071810a2f6af8f55489557a801d9fd"
+checksum = "ba9e06e0e717d9c9c9aea415a31d3431d1436ebb3db64290a37351d17212c97a"
 dependencies = [
  "corundum-framework-platform",
+ "png 0.18.1",
  "winresource",
 ]
 
 [[package]]
 name = "corundum-framework-gui"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4c473e23a320322d4b98b2b6bfd0319e85e917189950dda24f7cbe65eb0f92e"
+checksum = "a36105233473e01f5787137ef6187775587f9fcfe688707d3faddc3b5efbe266"
 dependencies = [
  "corundum-framework-keys",
  "corundum-framework-package",
@@ -1481,9 +1482,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-image"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3715247b2e0623433459aae5dd1daa219df960a8f140d6ae2a37360e34d986c8"
+checksum = "aa46803bf45cfd5618a182b3082aaa914c668e75172125e06026b679f4c294c6"
 dependencies = [
  "fast_image_resize",
  "image",
@@ -1496,9 +1497,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-keys"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b19d62107c04ec592ebf9dca93ca0645b5c642e97006500cf40fbff7e0848f35"
+checksum = "74b2dbe89e29e9a33fce4cf8b2b0b209fd2f280da8aef12e607d986262909fba"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -1515,9 +1516,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-package"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63e655b11575c76486e9f30f9c00f2a2c58a2a923cb2290be400bd9840437903"
+checksum = "df0e8d62dec030cd65fc4cdf1fc8664a70925e9db34181adf010d1dc7974fc2c"
 dependencies = [
  "cargo-packager-updater",
  "corundum-framework-platform",
@@ -1534,9 +1535,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-platform"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64d12a9c34ca016361b5d8bc45e987f2567c1b56ca241f4eb0a01d5e1e83fe36"
+checksum = "59a9c9ca7c31fe10e4dd3e72b7cf309a96d39f49c59e09ea8a1b63f347b42566"
 dependencies = [
  "dirs 7.0.0",
  "interprocess",
@@ -1544,6 +1545,7 @@ dependencies = [
  "ndk-context",
  "objc2-foundation 0.3.2",
  "resvg 0.49.0",
+ "rustix 1.1.5",
  "sys-locale",
  "tracing",
  "unic-langid",
@@ -1552,9 +1554,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-service"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff424b207f8d95af1565c1c2a1d7ceb067afbab1e25bb9ee1c441d7432f40740"
+checksum = "770430c18bae8e652d85a9eaf0e3c37c322e645d3646c17b83ec749a59d64b2c"
 dependencies = [
  "corundum-framework-platform",
  "libc",
@@ -1564,17 +1566,20 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-update"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "647c1262cbe762c92f3d39168f4a1327040a58ac8e59af264a60f4a0bf3c1c5d"
+checksum = "3e6ca384ad2c7066a6ab0a8c1d6ff74b8644a7b080ccbcfcbe688b5b45a5bae6"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "corundum-framework-platform",
+ "minisign-verify",
  "reqwest 0.13.5",
  "self-replace",
  "semver",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",

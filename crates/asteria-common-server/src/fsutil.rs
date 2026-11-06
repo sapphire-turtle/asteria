@@ -4,6 +4,8 @@ use std::fs::{self, File};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
+use corundum_framework::platform::fs::rename_no_replace;
+
 /// Whether a failed `hard_link` should be retried as check-then-rename: every error except
 /// `AlreadyExists`. Some filesystems (vfat, exFAT) report EPERM for hard links; if the
 /// problem is a real permission error the rename fails too and that error is reported.
@@ -13,10 +15,20 @@ fn should_fallback(e: &std::io::Error) -> bool {
 
 /// Moves `from` to `to` without ever replacing an existing `to`.
 ///
-/// Uses `hard_link` (fails if `to` exists, so a racing creator is never overwritten)
-/// followed by removing `from`. If `hard_link` fails for any other reason it falls back to check-then-`rename`, which is acceptable because all library
+/// One atomic rename that refuses to replace (corundum's `rename_no_replace`: `renameat2`,
+/// `renameatx_np` or `MoveFileExW`), so that a crash never leaves the file under both names
+/// (#36). Where the OS or the filesystem has none (`Unsupported`), it falls back on
+/// `hard_link` (fails if `to` exists, so a racing creator is never overwritten) followed by
+/// removing `from`; a crash between the two leaves both names. If `hard_link` fails for any
+/// other reason it falls back to check-then-`rename`, which is acceptable because all library
 /// writes go through the single write queue.
 pub(crate) fn move_no_clobber(from: &Path, to: &Path) -> std::io::Result<()> {
+    match rename_no_replace(from, to) {
+        Err(e) if e.kind() == ErrorKind::Unsupported => {
+            tracing::debug!(path = %to.display(), error = %e, "no atomic rename; linking instead");
+        }
+        r => return r,
+    }
     match std::fs::hard_link(from, to) {
         Ok(()) => {
             return std::fs::remove_file(from).inspect_err(|_| {
@@ -436,6 +448,23 @@ mod tests {
             create_dirs_inside(d.path(), "f/x"),
             Err(DirError::Io(_))
         ));
+    }
+
+    #[test]
+    fn a_move_never_replaces() {
+        let d = tempfile::tempdir().unwrap();
+        let (a, b, c) = (d.path().join("a"), d.path().join("b"), d.path().join("c"));
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let e = move_no_clobber(&a, &b).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            (std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap()),
+            (b"a".to_vec(), b"b".to_vec())
+        );
+        move_no_clobber(&a, &c).unwrap();
+        assert_eq!(names(d.path()), ["b", "c"]);
+        assert_eq!(std::fs::read(&c).unwrap(), b"a");
     }
 
     #[test]

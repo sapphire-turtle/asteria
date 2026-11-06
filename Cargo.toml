@@ -45,11 +45,11 @@ tracing = "0.1"
 getrandom = "0.4"
 base64 = "0.23"
 # The app's directories and, for the clients, the look shared with sapphire.
-corundum-framework = "0.9.1"
-corundum-framework-update = "0.9.1"
-corundum-framework-build = "0.9.1"
-corundum-framework-image = { version = "0.9.1", features = ["raw", "webp"] }
-corundum-framework-audio = "0.9.1"
+corundum-framework = "0.10.0"
+corundum-framework-update = "0.10.0"
+corundum-framework-build = "0.10.0"
+corundum-framework-image = { version = "0.10.0", features = ["raw", "webp"] }
+corundum-framework-audio = "0.10.0"
 walkdir = "2"
 same-file = "1"
 tokio = { version = "1", features = ["rt", "sync", "process", "time", "io-util", "macros"] }
