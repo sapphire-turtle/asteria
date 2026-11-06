@@ -10,7 +10,7 @@ desktop アプリは、ウィンドウ、サーバーのコマンドライン（
 
 - Windows：`asteria-photos-desktop_<version>_x64-setup.exe` は自分のユーザーだけに入れ（`%LocalAppData%\Asteria Photos`、スタートメニューの項目つき）、`asteria-photos` を `Path` に入れる。アンインストールは設定 › アプリから。
 - macOS：`asteria-photos-desktop_<version>_universal.dmg`。Apple シリコンと Intel の Mac に共通の1つのアプリで、アプリケーションフォルダーにドラッグする。設定 › 情報で `asteria-photos` を `PATH` に置ける。
-- Linux：`asteria-photos-desktop_<version>_x86_64.AppImage`。実行できるようにして（`chmod +x`）起動する。設定 › 情報で `asteria-photos` を `PATH` に置ける。
+- Linux：`asteria-photos-desktop_<version>_x86_64.AppImage`（64 ビットの Arm、Raspberry Pi などでは `_aarch64.AppImage`）。実行できるようにして（`chmod +x`）起動する。設定 › 情報で `asteria-photos` を `PATH` に置ける。
 
 インストールしたアプリは1日ごとに新しいリリースを探してバックグラウンドで落とし、署名を確かめて、利用者が選んだとき（設定 › 情報）か次の起動時に適用する（リリースの `.sig` と `asteria-<app>-latest.json` はアプリが読むもの。`.app.tar.gz` は macOS のアプリの更新用）。
 

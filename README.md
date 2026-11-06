@@ -10,7 +10,7 @@ The desktop app is the window, the server's command line (`asteria-photos` / `as
 
 - Windows: `asteria-photos-desktop_<version>_x64-setup.exe` installs it for you alone (in `%LocalAppData%\Asteria Photos`, with a Start menu entry) and puts `asteria-photos` on `Path`; uninstall it from Settings › Apps.
 - macOS: `asteria-photos-desktop_<version>_universal.dmg`, one app for Apple silicon and Intel Macs; drag it to Applications. Settings › About offers to put `asteria-photos` on `PATH`.
-- Linux: `asteria-photos-desktop_<version>_x86_64.AppImage`; make it executable (`chmod +x`) and run it. Settings › About offers to put `asteria-photos` on `PATH`.
+- Linux: `asteria-photos-desktop_<version>_x86_64.AppImage` (`_aarch64.AppImage` on 64-bit Arm, such as a Raspberry Pi); make it executable (`chmod +x`) and run it. Settings › About offers to put `asteria-photos` on `PATH`.
 
 An installed app looks for a new release once a day, downloads it in the background, checks its signature, and applies it when you choose to (Settings › About), or at its next start. (The `.sig` files and `asteria-<app>-latest.json` on a release are what it reads; the `.app.tar.gz` is the macOS app for its updates.)
 
