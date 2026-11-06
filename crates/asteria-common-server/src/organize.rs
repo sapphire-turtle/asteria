@@ -138,10 +138,15 @@ pub(crate) fn check(ctx: &OpCtx, op: &PlannedOp, sim: &Sim) -> Result<(), SkipRe
     if let Target::Path(to) = &op.to {
         let root = ctx.library.root();
         check_dirs_inside(root, folder_of(to)).map_err(|e| dir_skip(to, e))?;
+        let (from_abs, to_abs) = (root.join(&op.from), root.join(to));
+        let taken = |from: &Path, to: &Path| -> std::io::Result<bool> {
+            Ok(exists(to)? && !is_case_variant(from, to))
+        };
         let blocked = sim.taken.contains(to)
             || (!sim.freed.contains(to)
-                && (exists(&root.join(to)).map_err(|e| io_skip("cannot stat target", to, &e))?
-                    || exists(&sidecar_path_for(&root.join(to)))
+                && (taken(&from_abs, &to_abs)
+                    .map_err(|e| io_skip("cannot stat target", to, &e))?
+                    || taken(&sidecar_path_for(&from_abs), &sidecar_path_for(&to_abs))
                         .map_err(|e| io_skip("cannot stat target sidecar", to, &e))?));
         if blocked {
             return Err(SkipReason::TargetExists);
@@ -165,6 +170,41 @@ fn dir_skip(to: &str, e: DirError) -> SkipReason {
         }
         DirError::Io(e) => io_skip("cannot check target folder", to, &e),
     }
+}
+
+/// Whether `to` is `from` itself under a name that differs only in case: one file on a
+/// case-insensitive filesystem (#33). Such a rename goes through a temporary name.
+fn is_case_variant(from: &Path, to: &Path) -> bool {
+    let (Some(f), Some(t)) = (from.file_name(), to.file_name()) else {
+        return false;
+    };
+    f != t
+        && from.parent() == to.parent()
+        && f.to_string_lossy().to_lowercase() == t.to_string_lossy().to_lowercase()
+        && same_file::is_same_file(from, to).unwrap_or(false)
+}
+
+/// Moves `from` to `to` without replacing anything; through a temporary name beside `to`
+/// when `to` is `from` itself in another case, which a move straight there would find taken.
+/// The temporary name is visible, and keeps the extension, so that a file left there by a
+/// crash is found by the next scan.
+fn move_media(from: &Path, to: &Path, op_id: &OpId) -> std::io::Result<()> {
+    if !is_case_variant(from, to) {
+        return move_no_clobber(from, to);
+    }
+    let name = to.file_name().map(|n| n.to_string_lossy().into_owned());
+    let tmp = to.with_file_name(format!(
+        "asteria-rename-{}-{}",
+        op_id.0,
+        name.unwrap_or_default()
+    ));
+    move_no_clobber(from, &tmp)?;
+    move_no_clobber(&tmp, to).inspect_err(|_| {
+        if let Err(e) = move_no_clobber(&tmp, from) {
+            tracing::error!(from = %from.display(), tmp = %tmp.display(), error = %e,
+                "could not put a file back after a case-only rename failed");
+        }
+    })
 }
 
 fn exists(p: &Path) -> std::io::Result<bool> {
@@ -239,7 +279,7 @@ pub(crate) fn apply(ctx: &OpCtx, op: &PlannedOp) -> Result<Done, SkipReason> {
         DirError::Io(e) => io_skip("cannot create folder", &to, &e),
         linked => dir_skip(&to, linked),
     })?;
-    move_no_clobber(&from_abs, &to_abs).map_err(|e| match e.kind() {
+    move_media(&from_abs, &to_abs, &op_id).map_err(|e| match e.kind() {
         ErrorKind::AlreadyExists => SkipReason::TargetExists,
         ErrorKind::NotFound => SkipReason::Missing,
         _ => io_skip("cannot move media", &op.from, &e),
@@ -250,9 +290,9 @@ pub(crate) fn apply(ctx: &OpCtx, op: &PlannedOp) -> Result<Done, SkipReason> {
     if FAIL_AT.with(|f| f.get()) == Some(FailAt::PlantTargetSidecar) {
         std::fs::write(&to_sidecar, "foreign sidecar").unwrap();
     }
-    if has_sidecar && let Err(e) = move_no_clobber(&from_sidecar, &to_sidecar) {
+    if has_sidecar && let Err(e) = move_media(&from_sidecar, &to_sidecar, &op_id) {
         // Never leave the media moved with its sidecar behind.
-        if let Err(back) = move_no_clobber(&to_abs, &from_abs) {
+        if let Err(back) = move_media(&to_abs, &from_abs, &op_id) {
             tracing::error!(from = %op.from, %to, error = %back,
                 "could not put the media back after its sidecar failed to move");
         }
@@ -406,7 +446,7 @@ pub(crate) fn plan_apply(cache: &Cache, ops: &[OrganizeOp]) -> Result<Vec<Planne
         return Err(invalid(format!("at most {MAX_OPS} operations per batch")));
     }
     let mut seen_items = HashSet::new();
-    let mut seen_targets: std::collections::HashMap<&str, usize> = Default::default();
+    let mut seen_targets: HashMap<String, usize> = HashMap::new();
     let mut planned = Vec::with_capacity(ops.len());
     for (i, op) in ops.iter().enumerate() {
         if !seen_items.insert(op.item_id.0.as_str()) {
@@ -419,7 +459,9 @@ pub(crate) fn plan_apply(cache: &Cache, ops: &[OrganizeOp]) -> Result<Vec<Planne
         let target = match &op.action {
             OrganizeAction::Move { to } => {
                 validate_inbox_path(to).map_err(|m| rpc_error(codes::INVALID_PATH, m))?;
-                if let Some(j) = seen_targets.insert(to.as_str(), i) {
+                // Without regard to case: on a case-insensitive filesystem (macOS's and
+                // Windows's by default) such targets are one file (#33).
+                if let Some(j) = seen_targets.insert(to.to_lowercase(), i) {
                     return Err(invalid(format!(
                         "operations {j} and {i} have the same target"
                     )));
@@ -1048,6 +1090,44 @@ mod tests {
         assert_eq!(std::fs::read(e.path("a.jpg")).unwrap(), b"photo a");
         assert!(e.path("a.jpg.xmp").exists() && !e.path("c.jpg").exists());
         assert_eq!(e.journal_len(), 1); // only the sidecar update of setup
+    }
+
+    /// A rename that changes only the case goes ahead on a case-insensitive filesystem too,
+    /// where the target is the source itself (#33): the folder then holds the new names only.
+    #[test]
+    fn a_case_only_rename_goes_ahead() {
+        let e = Env::new();
+        let op = e.op("a.jpg", to("A.jpg"));
+        assert_eq!(check(&e.ctx(), &op, &Sim::default()), Ok(()));
+        let done = apply(&e.ctx(), &op).unwrap();
+        assert_eq!(done.to, "A.jpg");
+        assert_eq!(e.last().kind, OpKind::Rename);
+        let mut names: Vec<_> = std::fs::read_dir(e.lib.root())
+            .unwrap()
+            .map(|d| d.unwrap().file_name().into_string().unwrap())
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        names.sort();
+        assert_eq!(names, ["A.jpg", "A.jpg.xmp", "b.jpg"]);
+        assert!(e.cache.get_by_path("A.jpg").unwrap().is_some());
+        assert!(e.cache.get_by_path("a.jpg").unwrap().is_none());
+    }
+
+    /// A different file whose name differs only in case is still taken (a case-sensitive
+    /// filesystem holds both).
+    #[test]
+    fn a_case_variant_that_is_another_file_is_taken() {
+        let e = Env::new();
+        let other = e.path("B.jpg");
+        if std::fs::write(&other, "photo B").is_err()
+            || std::fs::read(e.path("b.jpg")).unwrap() == b"photo B"
+        {
+            return; // a case-insensitive filesystem: B.jpg is b.jpg
+        }
+        let r = apply(&e.ctx(), &e.op("b.jpg", to("B.jpg")));
+        assert_eq!(r.unwrap_err(), SkipReason::TargetExists);
+        assert_eq!(std::fs::read(&other).unwrap(), b"photo B");
+        assert_eq!(std::fs::read(e.path("b.jpg")).unwrap(), b"photo b");
     }
 
     #[test]

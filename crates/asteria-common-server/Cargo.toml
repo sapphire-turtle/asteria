@@ -21,6 +21,7 @@ tracing.workspace = true
 grain-id.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
+same-file.workspace = true
 chrono.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "signal", "net"] }
 clap.workspace = true

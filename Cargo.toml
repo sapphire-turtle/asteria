@@ -51,6 +51,7 @@ corundum-framework-build = "0.9.1"
 corundum-framework-image = { version = "0.9.1", features = ["raw", "webp"] }
 corundum-framework-audio = "0.9.1"
 walkdir = "2"
+same-file = "1"
 tokio = { version = "1", features = ["rt", "sync", "process", "time", "io-util", "macros"] }
 tokio-util = "0.7"
 notify = "8"

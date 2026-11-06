@@ -444,6 +444,7 @@ dependencies = [
  "redb",
  "rmcp",
  "rubato",
+ "same-file",
  "serde",
  "serde_json",
  "symphonia",
