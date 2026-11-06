@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-common-client"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-common-api",
  "asteria-common-core",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-common-core"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-common-api",
  "blake3",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-common-desktop"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-common-client",
  "asteria-common-core",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-common-server"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-common-api",
  "asteria-common-core",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-desktop"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-common-client",
  "asteria-common-desktop",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-gui"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-common-api",
  "asteria-common-client",
@@ -511,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-headless"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-common-server",
  "asteria-music-api",
@@ -527,14 +527,14 @@ dependencies = [
 
 [[package]]
 name = "asteria-music-mobile"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-music-gui",
 ]
 
 [[package]]
 name = "asteria-music-server"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-common-core",
  "asteria-common-server",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-desktop"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-common-client",
  "asteria-common-desktop",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-gui"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-common-api",
  "asteria-common-client",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-headless"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-common-core",
  "asteria-common-server",
@@ -606,14 +606,14 @@ dependencies = [
 
 [[package]]
 name = "asteria-photos-mobile"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-photos-gui",
 ]
 
 [[package]]
 name = "asteria-photos-server"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "asteria-common-api",
  "asteria-common-core",

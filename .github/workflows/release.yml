@@ -1,8 +1,10 @@
 name: Release
 
-# Publishes a release of asteria (spec §5.9): pushing a tag `v<version>`, where <version> is
-# the workspace version in Cargo.toml, creates its GitHub release (a pre-release when the
-# version has a `-`, such as 0.1.0-rc.1) and attaches
+# Builds a release of asteria (spec §5.9) onto its GitHub release `v<version>`, where
+# <version> is the workspace version in Cargo.toml. release-plz.yml calls it when a merged
+# release PR has made the tag and the release (RELEASING.md); run it by hand
+# (workflow_dispatch) to build an existing tag again, or one pushed by hand, whose release
+# it then creates (a pre-release when the version has a `-`, such as 0.1.0-rc.1). It attaches
 #
 # - each desktop app as cargo-packager packages (sapphire-turtle/.github's
 #   release-packager.yml): an AppImage for Linux, a DMG (and the `.app.tar.gz` its updates
@@ -21,8 +23,17 @@ name: Release
 # APPLE_API_KEY secrets. The Windows installer is not signed yet, so SmartScreen warns before
 # it runs.
 on:
-  push:
-    tags: ['v*']
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and attach the packages to (e.g. v0.1.0).'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -38,25 +49,35 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Check the tag against the workspace version
+        env:
+          TAG: ${{ inputs.tag }}
         run: |
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
-          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
-            echo "::error::The tag $GITHUB_REF_NAME is not v$version, the workspace version in Cargo.toml"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::The tag $TAG is not v$version, the workspace version in Cargo.toml"
             exit 1
           fi
 
-      # Before the other jobs, which only add files to it.
-      - name: Create the release
+      # Before the other jobs, which only add files to it. release-plz has made it already;
+      # a tag pushed by hand has none yet.
+      - name: Create the release if there is none
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
         run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "The release $TAG exists"
+            exit 0
+          fi
           prerelease=()
-          case $GITHUB_REF_NAME in
+          case $TAG in
             *-*) prerelease=(--prerelease) ;;
           esac
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --generate-notes \
@@ -75,7 +96,7 @@ jobs:
     # The signing key, and the macOS signing secrets.
     secrets: inherit
     with:
-      tag: ${{ github.ref_name }}
+      tag: ${{ inputs.tag }}
       package: asteria-photos-desktop
       app-name: asteria-photos
       console-bin: asteria-photos-console
@@ -110,7 +131,7 @@ jobs:
     uses: sapphire-turtle/.github/.github/workflows/release-packager.yml@v1
     secrets: inherit
     with:
-      tag: ${{ github.ref_name }}
+      tag: ${{ inputs.tag }}
       package: asteria-music-desktop
       app-name: asteria-music
       console-bin: asteria-music-console
@@ -133,7 +154,7 @@ jobs:
       contents: write
     uses: sapphire-turtle/.github/.github/workflows/release-binary.yml@v1
     with:
-      tag: ${{ github.ref_name }}
+      tag: ${{ inputs.tag }}
       package: asteria-photos-headless
       binary: asteria-photos
       asset: asteria-photos-headless
@@ -144,7 +165,7 @@ jobs:
       contents: write
     uses: sapphire-turtle/.github/.github/workflows/release-binary.yml@v1
     with:
-      tag: ${{ github.ref_name }}
+      tag: ${{ inputs.tag }}
       package: asteria-music-headless
       binary: asteria-music
       asset: asteria-music-headless

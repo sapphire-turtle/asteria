@@ -59,7 +59,7 @@ asteria/
 ```
 
 - `photos/` と `music/` の中は、sapphire の各アプリのリポジトリと同じ形（`crates/`、`headless/`、`desktop/`、`mobile/`）にする。framework の API が落ち着いたら、`git subtree split` などで `crates/`（framework）、`photos/`、`music/` を別のリポジトリに切り出せるようにするため。それまではワークスペースを1つにし、アプリから framework へはパスで依存する（2026-10-31 決定）。
-- リリースはアプリごとにタグを分ける（`photos-v*`、`music-v*`）。headless と desktop は同じタグで一緒に出す。
+- リリースは photos と music を1つのバージョンで一緒に出す。タグと GitHub リリースは `v<バージョン>` の1つで、headless と desktop をどちらもそこに載せる。リリースは release-plz のリリース PR をマージして行う（RELEASING.md。2026-11-06 改訂。以前はアプリごとのタグ `photos-v*`、`music-v*` の予定だった）。
 
 ### 配布形態（2026-10-31 決定）
 
