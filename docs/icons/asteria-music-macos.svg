@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- The macOS app icon: the mark on a tile in the brand's light grey (#F1F4F7, as the
+       sapphire-turtle avatar), on the macOS icon grid: an 824-unit rounded square in a
+       1024 canvas, the mark three quarters of the tile. Generated from asteria-music.svg. -->
+  <rect x="100" y="100" width="824" height="824" rx="185.4" fill="#F1F4F7"/>
+  <g transform="translate(203 203) scale(25.75)" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <mask id="glyph">
+      <circle cx="12" cy="12" r="9.5" fill="#fff" stroke="#fff"/>
+      <g stroke="#000">
+        <path d="M16.25 5C16.25 7.34 16.61 7.54 18.63 6.38C16.61 7.54 16.61 7.96 18.63 9.12C16.61 7.96 16.25 8.16 16.25 10.5C16.25 8.16 15.89 7.96 13.87 9.12C15.89 7.96 15.89 7.54 13.87 6.38C15.89 7.54 16.25 7.34 16.25 5Z" fill="#000" stroke-width="1"/><circle cx="12" cy="12" r="1.75" fill="#000"/><path d="M7.4 15.6a6.5 6.5 0 0 1-1.6-3"/>
+      </g>
+    </mask>
+    <defs>
+      <linearGradient id="shade" x1="0" y1="0" x2="0" y2="24" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#fff" stop-opacity=".22"/>
+        <stop offset="1" stop-color="#000" stop-opacity=".22"/>
+      </linearGradient>
+    </defs>
+    <g mask="url(#glyph)">
+      <path d="M12 12 12.00 -8.00 29.32 2.00Z" fill="#7197E0" stroke="#7197E0" stroke-width=".12"/>
+      <path d="M12 12 29.32 2.00 29.32 22.00Z" fill="#92B0E7" stroke="#92B0E7" stroke-width=".12"/>
+      <path d="M12 12 29.32 22.00 12.00 32.00Z" fill="#4F7FD9" stroke="#4F7FD9" stroke-width=".12"/>
+      <path d="M12 12 12.00 32.00 -5.32 22.00Z" fill="#2D67D2" stroke="#2D67D2" stroke-width=".12"/>
+      <path d="M12 12 -5.32 22.00 -5.32 2.00Z" fill="#2656B0" stroke="#2656B0" stroke-width=".12"/>
+      <path d="M12 12 -5.32 2.00 12.00 -8.00Z" fill="#2D67D2" stroke="#2D67D2" stroke-width=".12"/>
+      <rect width="24" height="24" fill="url(#shade)"/>
+    </g>
+  </g>
+</svg>
