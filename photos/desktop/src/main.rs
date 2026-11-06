@@ -222,7 +222,7 @@ fn app(paths: &AppPaths, ctx: &egui::Context) -> Box<PhotosApp> {
             CliSpec {
                 command: "asteria-photos",
             },
-            LAUNCHER,
+            ctx,
             LOCAL.tools,
         )),
     ]))

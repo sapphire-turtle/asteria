@@ -190,7 +190,7 @@ fn app(paths: &AppPaths, ctx: &egui::Context, spawn_player: &SpawnPlayer) -> Box
                 CliSpec {
                     command: "asteria-music",
                 },
-                LAUNCHER,
+                ctx,
                 LOCAL.tools,
             )),
         ]),
