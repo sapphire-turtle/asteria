@@ -51,7 +51,13 @@ const SRGB_PROFILE: &str = "/System/Library/ColorSync/Profiles/sRGB Profile.icc"
 /// The image tool to use: `vipsthumbnail` where [`find_tool`] finds it, else on macOS the
 /// built-in `sips`. `None` when neither is there.
 pub fn find_image_tool() -> Option<ImageTool> {
-    if let Some(vips) = find_tool(Tool::Vipsthumbnail) {
+    image_tool_with(find_tool(Tool::Vipsthumbnail))
+}
+
+/// [`find_image_tool`] for `vips`, where [`find_tool`] already found `vipsthumbnail` (if
+/// anywhere).
+pub fn image_tool_with(vips: Option<PathBuf>) -> Option<ImageTool> {
+    if let Some(vips) = vips {
         return Some(ImageTool::Vips(vips.into_os_string()));
     }
     (cfg!(target_os = "macos") && is_file(Path::new(SIPS_PATH)))
@@ -145,7 +151,7 @@ fn find_program(
     program: &OsStr,
     before: &[PathBuf],
     path_var: Option<&OsStr>,
-    extra: &[PathBuf],
+    after: &[PathBuf],
 ) -> Option<PathBuf> {
     let has_dir = Path::new(program).components().count() > 1
         || program
@@ -157,7 +163,7 @@ fn find_program(
     let path_dirs = path_var
         .map(|p| std::env::split_paths(p).collect::<Vec<_>>())
         .unwrap_or_default();
-    for dir in before.iter().chain(&path_dirs).chain(extra) {
+    for dir in before.iter().chain(&path_dirs).chain(after) {
         for candidate in candidates(dir, program) {
             if is_file(&candidate) {
                 return Some(candidate);
@@ -184,9 +190,9 @@ fn resolve_program(
     program: OsString,
     before: &[PathBuf],
     path_var: Option<&OsStr>,
-    extra: &[PathBuf],
+    after: &[PathBuf],
 ) -> OsString {
-    find_program(&program, before, path_var, extra)
+    find_program(&program, before, path_var, after)
         .map(PathBuf::into_os_string)
         .unwrap_or(program)
 }
@@ -922,7 +928,7 @@ impl Inner {
     }
 
     /// Scales with `sips` to a JPEG (never enlarging), then finishes in Rust: the EXIF
-    /// orientation and lossy WebP. Both `sips` runs share one timeout budget.
+    /// orientation and lossy WebP. Both `sips` runs and the finishing share one timeout budget.
     async fn run_sips(
         &self,
         sips: &OsStr,
@@ -957,8 +963,13 @@ impl Inner {
         let bytes = tokio::fs::read(&jpeg)
             .await
             .map_err(|e| ProcessError::Io(e.to_string()))?;
-        let webp = tokio::task::spawn_blocking(move || sips::finish(&bytes, 80.0))
+        // Within the budget too; past it the decode is left to end on its own (it is bounded by
+        // `-Z`), as a blocking task cannot be stopped.
+        let left = deadline.saturating_duration_since(Instant::now());
+        let finishing = tokio::task::spawn_blocking(move || sips::finish(&bytes, 80.0));
+        let webp = tokio::time::timeout(left, finishing)
             .await
+            .map_err(|_| ProcessError::Unprocessable("timeout".into()))?
             .map_err(|e| ProcessError::Io(format!("finishing the image: {e}")))?
             .map_err(|e| ProcessError::Unprocessable(format!("cannot finish the image: {e}")))?;
         tokio::fs::write(tmp, webp)
@@ -1120,7 +1131,18 @@ async fn run_child(
             all
         })
     });
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
+    // One deadline for the run and for reading its output to the end: a child the tool left
+    // behind can hold the pipes open after the tool exits.
+    let deadline = tokio::time::Instant::now() + timeout;
+    let timed_out = |reader: &tokio::task::JoinHandle<String>,
+                     out_reader: &Option<tokio::task::JoinHandle<Vec<u8>>>| {
+        reader.abort();
+        if let Some(r) = out_reader {
+            r.abort();
+        }
+        ProcessError::Unprocessable("timeout".into())
+    };
+    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
         Ok(Ok(status)) => status,
         Ok(Err(e)) => {
             reader.abort();
@@ -1131,14 +1153,14 @@ async fn run_child(
         }
         Err(_) => {
             let _ = child.kill().await;
-            reader.abort();
-            if let Some(r) = &out_reader {
-                r.abort();
-            }
-            return Err(ProcessError::Unprocessable("timeout".into()));
+            return Err(timed_out(&reader, &out_reader));
         }
     };
-    let stderr = reader.await.unwrap_or_default();
+    let mut reader = reader;
+    let stderr = match tokio::time::timeout_at(deadline, &mut reader).await {
+        Ok(r) => r.unwrap_or_default(),
+        Err(_) => return Err(timed_out(&reader, &out_reader)),
+    };
     if !status.success() {
         if let Some(r) = &out_reader {
             r.abort();
@@ -1158,7 +1180,13 @@ async fn run_child(
         )));
     }
     match out_reader {
-        Some(r) => Ok(r.await.unwrap_or_default()),
+        Some(mut r) => match tokio::time::timeout_at(deadline, &mut r).await {
+            Ok(out) => Ok(out.unwrap_or_default()),
+            Err(_) => {
+                r.abort();
+                Err(ProcessError::Unprocessable("timeout".into()))
+            }
+        },
         None => Ok(Vec::new()),
     }
 }
@@ -1283,17 +1311,18 @@ mod tool_tests {
     #[test]
     fn a_path_in_the_variable_is_used_as_it_is() {
         let (_root, exe_dir) = tempdir_with_space();
-        let bundled = program(&tools_dir(&exe_dir), &exe_name("ffmpeg"));
+        program(&tools_dir(&exe_dir), &exe_name("ffmpeg"));
         let elsewhere = tempfile::tempdir().unwrap();
         let chosen = program(elsewhere.path(), "my-ffmpeg");
-        let missing = elsewhere.path().join("nothing-here");
         let before = bundled_dirs(&exe_dir);
         assert_eq!(
             find_program(chosen.as_os_str(), &before, None, &[]),
             Some(chosen)
         );
+        // A name with a folder that has nothing there is not looked for in the bundled
+        // folder, even though a program of that name is there.
+        let missing = elsewhere.path().join(exe_name("ffmpeg"));
         assert_eq!(find_program(missing.as_os_str(), &before, None, &[]), None);
-        assert!(bundled.is_file());
     }
 
     #[test]
@@ -1335,40 +1364,40 @@ mod tool_tests {
     #[test]
     fn a_program_only_in_a_well_known_dir_is_found_after_the_path() {
         let path_dir = tempfile::tempdir().unwrap();
-        let extra = tempfile::tempdir().unwrap();
+        let after_dir = tempfile::tempdir().unwrap();
         let name = if cfg!(windows) { "vipsx.exe" } else { "vipsx" };
-        let tool = program(extra.path(), name);
+        let tool = program(after_dir.path(), name);
         let path = std::env::join_paths([path_dir.path()]).unwrap();
-        let extras = [extra.path().to_path_buf()];
+        let after = [after_dir.path().to_path_buf()];
         assert_eq!(
-            find_program(OsStr::new("vipsx"), &[], Some(&path), &extras),
+            find_program(OsStr::new("vipsx"), &[], Some(&path), &after),
             Some(tool.clone())
         );
         // Without a PATH at all too.
         assert_eq!(
-            find_program(OsStr::new("vipsx"), &[], None, &extras),
+            find_program(OsStr::new("vipsx"), &[], None, &after),
             Some(tool.clone())
         );
         // PATH comes first.
         let on_path = program(path_dir.path(), name);
         assert_eq!(
-            find_program(OsStr::new("vipsx"), &[], Some(&path), &extras),
+            find_program(OsStr::new("vipsx"), &[], Some(&path), &after),
             Some(on_path)
         );
     }
 
     #[test]
     fn the_processor_runs_the_resolved_path_or_else_the_bare_name() {
-        let extra = tempfile::tempdir().unwrap();
+        let after_dir = tempfile::tempdir().unwrap();
         let name = if cfg!(windows) { "vipsx.exe" } else { "vipsx" };
-        let tool = program(extra.path(), name);
-        let extras = [extra.path().to_path_buf()];
+        let tool = program(after_dir.path(), name);
+        let after = [after_dir.path().to_path_buf()];
         assert_eq!(
-            resolve_program(OsString::from("vipsx"), &[], None, &extras),
+            resolve_program(OsString::from("vipsx"), &[], None, &after),
             tool.into_os_string()
         );
         assert_eq!(
-            resolve_program(OsString::from("not-there"), &[], None, &extras),
+            resolve_program(OsString::from("not-there"), &[], None, &after),
             OsString::from("not-there")
         );
     }
@@ -1415,6 +1444,25 @@ mod sips_tests {
         let slow = script(dir.path(), "slow.sh", "sleep 30");
         let err = run_tool_stdout(Command::new(&slow), "sips", Duration::from_millis(200)).await;
         assert_eq!(err, Err(ProcessError::Unprocessable("timeout".into())));
+    }
+
+    /// A tool that exits but leaves a child holding its output open is not waited for past
+    /// the timeout (#53).
+    #[tokio::test]
+    async fn a_grandchild_holding_the_pipes_is_not_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let holds = script(dir.path(), "holds.sh", "echo hello; sleep 5 &");
+        let err = run_tool_stdout(Command::new(&holds), "sips", Duration::from_millis(500)).await;
+        assert_eq!(err, Err(ProcessError::Unprocessable("timeout".into())));
+        let failing = script(dir.path(), "failing.sh", "sleep 5 & exit 3");
+        let err = run_tool_stdout(Command::new(&failing), "sips", Duration::from_millis(500)).await;
+        assert_eq!(err, Err(ProcessError::Unprocessable("timeout".into())));
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     /// A stand-in for `sips`: answers `-g` with a size, and for a conversion writes `jpeg`

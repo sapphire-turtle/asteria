@@ -1,4 +1,4 @@
-#![cfg_attr(windows, windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 //! `asteria-photos-desktop`: with no arguments it opens the window; with any, it is the
 //! server's command line, the same as `asteria-photos` (headless). It also takes the files
 //! dropped on the window to the app, and offers the server on this computer: the first run
@@ -46,10 +46,13 @@ static PACKAGE: PackageSpec = PackageSpec {
     on_installed: None,
     on_uninstalling: None,
     before_apply: None,
-    cli: Some(CliSpec {
-        command: "asteria-photos",
-    }),
+    cli: Some(CLI),
     services: Services::new(&[service]),
+};
+
+/// The command the package puts on `PATH`, which Settings › About shows.
+const CLI: CliSpec = CliSpec {
+    command: "asteria-photos",
 };
 
 /// The app's entry in the app menu.
@@ -212,7 +215,7 @@ impl DesktopApp {
 /// A new first run, which registers a server it sets up in `paths.servers`.
 fn first_run(paths: &AppPaths) -> FirstRun {
     FirstRun::new(
-        "Asteria Photos",
+        LAUNCHER.name,
         first_run_pages(&LOCAL, paths.servers.clone()),
     )
 }
@@ -221,14 +224,7 @@ fn first_run(paths: &AppPaths) -> FirstRun {
 fn app(paths: &AppPaths, ctx: &egui::Context) -> Box<PhotosApp> {
     Box::new(PhotosApp::new(paths.clone(), ctx).with_extra_settings(vec![
         Box::new(LocalServerPage::new(&LOCAL)),
-        Box::new(AboutPage::new(
-            "Asteria Photos",
-            CliSpec {
-                command: "asteria-photos",
-            },
-            ctx,
-            LOCAL.tools,
-        )),
+        Box::new(AboutPage::new(LAUNCHER.name, CLI, ctx, LOCAL.tools)),
     ]))
 }
 

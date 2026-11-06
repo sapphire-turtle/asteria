@@ -43,7 +43,8 @@ pub use ext::{AppExtension, ExtContext, McpTool, Rewrite, ThumbSource};
 pub use hashing::{RelinkReport, hash_pending, relink_orphans};
 pub use local::{LocalServer, setup_local, setup_local_at};
 pub use process::{
-    ImageTool, Preset, ProcessError, Processor, Tool, find_image_tool, find_tool, tool_program,
+    ImageTool, Preset, ProcessError, Processor, Tool, find_image_tool, find_tool, image_tool_with,
+    tool_program,
 };
 pub use rpc::{media_item, rpc_error};
 pub use scan::{ScanReport, scan, scan_cancellable};

@@ -124,6 +124,10 @@ mod tests {
         ctx
     }
 
+    /// Messages that are rightly the same in English and Japanese (a name, say), which the
+    /// check for a missing translation passes over.
+    const SAME_IN_EN_AND_JA: &[&str] = &[];
+
     #[test]
     fn every_id_resolves_in_english_and_japanese() {
         let en = ctx_in("en");
@@ -134,7 +138,9 @@ mod tests {
             let in_ja = i18n::tr_args(&ja, id, &args);
             assert_ne!(in_en, id, "{id} has no English");
             assert_ne!(in_ja, id, "{id} has no Japanese");
-            assert_ne!(in_en, in_ja, "{id} is not translated");
+            if !SAME_IN_EN_AND_JA.contains(&id) {
+                assert_ne!(in_en, in_ja, "{id} is not translated");
+            }
         }
         assert!(
             i18n::tr_args(&en, IDS[1], &[("version", i18n::Arg::from("0.1.0"))]).contains("0.1.0")

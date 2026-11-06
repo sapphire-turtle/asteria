@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use asteria_common_server::{ImageTool, Tool, find_image_tool, find_tool};
+use asteria_common_server::{ImageTool, Tool, find_tool, image_tool_with};
 use corundum_framework::egui;
 use corundum_framework::gui::tr;
 
@@ -21,9 +21,15 @@ fn found_id(tools: &[Tool]) -> egui::Id {
 }
 
 fn look_up(tools: &[Tool]) -> Found {
+    let paths: Vec<_> = tools.iter().map(|&tool| find_tool(tool)).collect();
+    // vipsthumbnail is looked for once, when it is among `tools`.
+    let vips = match tools.iter().position(|&t| t == Tool::Vipsthumbnail) {
+        Some(i) => paths[i].clone(),
+        None => find_tool(Tool::Vipsthumbnail),
+    };
     Found {
-        paths: tools.iter().map(|&tool| find_tool(tool)).collect(),
-        sips: matches!(find_image_tool(), Some(ImageTool::Sips(_))),
+        sips: matches!(image_tool_with(vips), Some(ImageTool::Sips(_))),
+        paths,
     }
 }
 
