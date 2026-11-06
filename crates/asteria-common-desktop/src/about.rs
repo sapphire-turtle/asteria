@@ -4,49 +4,46 @@
 use asteria_common_client::settings::ExtraSettingsPage;
 use asteria_common_server::Tool;
 use corundum_framework::egui;
-use corundum_framework::gui::settings::LauncherRow;
+use corundum_framework::gui::settings::AboutRows;
 use corundum_framework::gui::tr;
 use corundum_framework::gui::update::{AfterUpdate, Target, UpdateTarget, UpdatesPanel, semver};
 use corundum_framework::package::CliSpec;
-use corundum_framework::platform::launcher::LauncherSpec;
 use corundum_framework::update::ReleaseSource;
 
-/// The About page of a desktop app. Its update row is made when the page is first drawn,
-/// so nothing looks for a release before the page is opened.
+/// The About page of a desktop app: corundum's [`AboutRows`] (its update row is made when
+/// the page is first drawn, so nothing looks for a release before the page is opened)
+/// between the app's name and version and its licences.
 pub struct AboutPage {
     /// What the page and the update row call the app: `Asteria Photos`.
     label: &'static str,
-    /// The command line's row. Not on Windows, where the install hook puts the command on
-    /// `PATH`.
-    #[cfg(not(windows))]
-    cli: corundum_framework::gui::settings::CliRow,
-    launcher: LauncherRow,
+    /// The update row, the command line's (not on Windows, where the install hook puts the
+    /// command on `PATH`) and the app menu's.
+    rows: AboutRows,
     /// The licence line: which tools the app's packages carry.
     licence: &'static str,
-    /// Made on the first `ui`.
-    updates: Option<UpdatesPanel>,
 }
 
 impl AboutPage {
-    /// The page for the app called `label`, whose package puts `cli` on `PATH` and lists it
-    /// in the app menu as `launcher`. `tools` are the external tools its server uses (its
+    /// The page for the app called `label`, whose package puts `cli` on `PATH`, in the window
+    /// `ctx` belongs to: its app-menu row is the spec the window was given
+    /// (`WindowOptions::launcher`). `tools` are the external tools its server uses (its
     /// [`LocalServerSpec::tools`](crate::LocalServerSpec)), which name what the licence line
     /// says its packages carry.
     pub fn new(
         label: &'static str,
         cli: CliSpec,
-        launcher: LauncherSpec,
+        ctx: &egui::Context,
         tools: &[Tool],
     ) -> AboutPage {
+        let rows = AboutRows::for_window(ctx).updates_later(move || AboutPage::updates(label));
         #[cfg(windows)]
         let _ = cli;
+        #[cfg(not(windows))]
+        let rows = rows.cli(cli);
         AboutPage {
             label,
-            #[cfg(not(windows))]
-            cli: corundum_framework::gui::settings::CliRow::new(cli),
-            launcher: LauncherRow::new(launcher),
+            rows,
             licence: licence_id(tools),
-            updates: None,
         }
     }
 
@@ -80,14 +77,7 @@ impl ExtraSettingsPage for AboutPage {
             version = env!("CARGO_PKG_VERSION")
         ));
         ui.add_space(8.0);
-        let label = self.label;
-        self.updates
-            .get_or_insert_with(|| AboutPage::updates(label))
-            .ui(ui);
-        ui.add_space(8.0);
-        #[cfg(not(windows))]
-        self.cli.ui(ui);
-        self.launcher.ui(ui);
+        self.rows.ui(ui);
         ui.add_space(16.0);
         ui.label(egui::RichText::new(tr!(ui, self.licence)).weak());
     }
