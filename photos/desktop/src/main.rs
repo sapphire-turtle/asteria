@@ -59,6 +59,10 @@ const LAUNCHER: LauncherSpec = LauncherSpec {
     description: "Your photo library, served from your own computer",
     category: "Graphics",
     icon_svg: include_bytes!("../../../docs/icons/asteria-photos.svg"),
+    // The mark on the brand's tile, on the macOS icon grid, as the package's icns.
+    macos_icon_svg: Some(include_bytes!(
+        "../../../docs/icons/asteria-photos-macos.svg"
+    )),
     bundle_prefix: "org.sapphire-turtle",
 };
 
