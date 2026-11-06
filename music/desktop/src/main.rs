@@ -1,4 +1,4 @@
-#![cfg_attr(windows, windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 //! `asteria-music-desktop`: with no arguments it opens the window; with any, it is the
 //! server's command line, the same as `asteria-music` (headless). It offers the server on
 //! this computer: the first run when no server is registered, and Settings → Local server
@@ -45,10 +45,13 @@ static PACKAGE: PackageSpec = PackageSpec {
     on_installed: None,
     on_uninstalling: None,
     before_apply: None,
-    cli: Some(CliSpec {
-        command: "asteria-music",
-    }),
+    cli: Some(CLI),
     services: Services::new(&[service]),
+};
+
+/// The command the package puts on `PATH`, which Settings › About shows.
+const CLI: CliSpec = CliSpec {
+    command: "asteria-music",
 };
 
 /// The app's entry in the app menu.
@@ -178,7 +181,7 @@ impl DesktopApp {
 /// A new first run, which registers a server it sets up in `paths.servers`.
 fn first_run(paths: &AppPaths) -> FirstRun {
     FirstRun::new(
-        "Asteria Music",
+        LAUNCHER.name,
         first_run_pages(&LOCAL, paths.servers.clone()),
     )
 }
@@ -189,14 +192,7 @@ fn app(paths: &AppPaths, ctx: &egui::Context, spawn_player: &SpawnPlayer) -> Box
     Box::new(
         MusicApp::new(paths.clone(), ctx, player, settings).with_extra_settings(vec![
             Box::new(LocalServerPage::new(&LOCAL)),
-            Box::new(AboutPage::new(
-                "Asteria Music",
-                CliSpec {
-                    command: "asteria-music",
-                },
-                ctx,
-                LOCAL.tools,
-            )),
+            Box::new(AboutPage::new(LAUNCHER.name, CLI, ctx, LOCAL.tools)),
         ]),
     )
 }
