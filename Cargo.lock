@@ -1408,9 +1408,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "249d610b47db8684df31f3222fe66eb3f439ab43ff7c5cb31d6c4cd971d31353"
+checksum = "fbf3b8c5d96ad3ed4cefaafcb492d48394a42107cd4099de132072da74b4c7b6"
 dependencies = [
  "corundum-framework-gui",
  "corundum-framework-keys",
@@ -1422,9 +1422,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-audio"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7b54fdcfd5b5b7094efc6e864059666b8c4b49a17fe019f7694659cf6f5b64d"
+checksum = "d8e7c57ae324c2a7efc25abc56784c2b6357cab495d4909e1b786748addcb59a"
 dependencies = [
  "cpal",
  "ogg",
@@ -1437,9 +1437,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-build"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba9e06e0e717d9c9c9aea415a31d3431d1436ebb3db64290a37351d17212c97a"
+checksum = "b50885bb6d8525e88d9efaa98f0b234cf27121fb18bd6b4115429bb08ecbb5ba"
 dependencies = [
  "corundum-framework-platform",
  "png 0.18.1",
@@ -1448,9 +1448,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-gui"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a36105233473e01f5787137ef6187775587f9fcfe688707d3faddc3b5efbe266"
+checksum = "24d8d56ff2f93ecb61faf5b116a2a40e0f19b4363e8cdc343b35e3f6a384fb7b"
 dependencies = [
  "corundum-framework-keys",
  "corundum-framework-package",
@@ -1482,9 +1482,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-image"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa46803bf45cfd5618a182b3082aaa914c668e75172125e06026b679f4c294c6"
+checksum = "e28f93e93df65195c06dff7403ef06cc92ee916ce6cfddf35495f45b8b4d6aad"
 dependencies = [
  "fast_image_resize",
  "image",
@@ -1497,9 +1497,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-keys"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74b2dbe89e29e9a33fce4cf8b2b0b209fd2f280da8aef12e607d986262909fba"
+checksum = "4f0fc1b840b6cac8a0d8fb6023eb2aee1037a9e67d49a600ad8aec9a334224de"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -1516,9 +1516,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-package"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df0e8d62dec030cd65fc4cdf1fc8664a70925e9db34181adf010d1dc7974fc2c"
+checksum = "a77b3025fc7d4007219227e23cb3fe30853e89b8d904eb26f2e25b3cb6caa2f3"
 dependencies = [
  "cargo-packager-updater",
  "corundum-framework-platform",
@@ -1535,13 +1535,14 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-platform"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59a9c9ca7c31fe10e4dd3e72b7cf309a96d39f49c59e09ea8a1b63f347b42566"
+checksum = "67e2eaeaec01723c010ef43b7d2ee153380cea07cb7652ef446cfed8ebb16d73"
 dependencies = [
  "dirs 7.0.0",
  "interprocess",
  "jni",
+ "libc",
  "ndk-context",
  "objc2-foundation 0.3.2",
  "resvg 0.49.0",
@@ -1554,9 +1555,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-service"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "770430c18bae8e652d85a9eaf0e3c37c322e645d3646c17b83ec749a59d64b2c"
+checksum = "fd3db97f959d221bb8f78e39b0192aefce62bdf278eb0ef16d5c106a7b12b2e6"
 dependencies = [
  "corundum-framework-platform",
  "libc",
@@ -1566,9 +1567,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-update"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e6ca384ad2c7066a6ab0a8c1d6ff74b8644a7b080ccbcfcbe688b5b45a5bae6"
+checksum = "839ed51902952b1cb65e08f03a5fa6f479b05af77ae61151024b94e24d9e187a"
 dependencies = [
  "base64 0.22.1",
  "clap",
