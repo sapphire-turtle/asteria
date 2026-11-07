@@ -777,7 +777,7 @@ desktop だけで、手元のフォルダをライブラリにしたサーバー
 |---|---|---|---|
 | music の曲 | 原本をストリーム | 保存した `offline-audio`、無ければサーバーの `offline-audio` | 保存した `offline-audio` |
 | photos の表示 | サーバーの `preview` | 保存した `offline-image`、無ければサーバーの `offline-image` | 保存した `offline-image` |
-| サムネイル（`thumb`） | 保存したもの → 一時キャッシュ → サーバー | 同じ | 保存したもの → 一時キャッシュ |
+| サムネイル（`thumb`）と music のジャケットの `preview` | 保存したもの → 一時キャッシュ → サーバー | 同じ | 保存したもの → 一時キャッシュ |
 
 - photos の設定に「低画質で表示する」を足す（アプリの設定ディレクトリの `display.toml`。music の「低音質で再生する」と同じく、アプリ全体で1つ）。
 - music は `HttpOpener` が、photos は `ImageLoader` がこの表で選ぶ。
