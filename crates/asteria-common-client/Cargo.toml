@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 asteria-common-core = { path = "../asteria-common-core" }
 asteria-common-api = { path = "../asteria-common-api", version = "2.3.0" }
+blake3.workspace = true
 bytes.workspace = true
 # egui only: no eframe, so the crate also builds for iOS and Android.
 corundum-framework = { workspace = true, features = ["gui", "serde"] }

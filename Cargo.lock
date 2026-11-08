@@ -371,6 +371,7 @@ dependencies = [
  "asteria-music-api",
  "asteria-photos-api",
  "axum",
+ "blake3",
  "bytes",
  "corundum-framework",
  "grain-id",

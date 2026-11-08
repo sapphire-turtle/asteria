@@ -24,7 +24,7 @@ pub const DEFAULT_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 pub const TRIM_EVERY_PUTS: usize = 100;
 
 const HASH_PREFIX: &str = "blake3:";
-const TMP_SUFFIX: &str = ".asteria-tmp";
+pub(crate) const TMP_SUFFIX: &str = ".asteria-tmp";
 /// A temporary file this old is the leftover of a crashed write, not one in progress.
 const STALE_TMP: Duration = Duration::from_secs(3600);
 
@@ -95,7 +95,7 @@ impl MediaCache {
             return Ok(None);
         };
         let path = self.path(file_hash, preset)?;
-        write_atomic(&path, bytes)?;
+        write_atomic(&path, bytes, false)?;
         if (self.puts.fetch_add(1, Ordering::Relaxed) + 1).is_multiple_of(TRIM_EVERY_PUTS) {
             self.trim();
         }
@@ -163,9 +163,7 @@ impl MediaCache {
         if !safe_component(preset) {
             return Err(invalid("unsafe cache preset"));
         }
-        let hex = file_hash
-            .strip_prefix(HASH_PREFIX)
-            .filter(|h| h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        let hex = hash_hex(file_hash)
             .ok_or_else(|| invalid("file hash is not blake3:<64 lowercase hex>"))?;
         Ok(self
             .root
@@ -173,6 +171,13 @@ impl MediaCache {
             .join(&hex[..2])
             .join(format!("{hex}.webp")))
     }
+}
+
+/// The 64 lowercase hex digits of a `blake3:<hex>` hash, or `None` if it is anything else.
+pub(crate) fn hash_hex(file_hash: &str) -> Option<&str> {
+    file_hash
+        .strip_prefix(HASH_PREFIX)
+        .filter(|h| h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
 }
 
 /// A name that is one ordinary path component on every platform: only `[A-Za-z0-9._-]`, not
@@ -205,9 +210,10 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Writes `bytes` to a hidden file beside `path`, then renames it into place, so a reader never
-/// sees half a file. (Unlike the profile store's writer there is no private mode and no fsync:
-/// the cache holds nothing secret and a lost file is just fetched again.)
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// sees half a file. (Unlike the profile store's writer there is no private mode: the cache holds
+/// nothing secret. With `durable` the data is `sync_all`ed before the rename, for files that
+/// cannot be fetched again; otherwise a lost file is just fetched again.)
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8], durable: bool) -> io::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no directory"))?;
@@ -224,6 +230,9 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
             .create_new(true)
             .open(&tmp)?;
         f.write_all(bytes)?;
+        if durable {
+            f.sync_all()?;
+        }
         drop(f);
         fs::rename(&tmp, path)
     })();
