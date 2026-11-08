@@ -10,9 +10,6 @@ use std::path::PathBuf;
 
 use corundum_framework_image::{Error, Limits, Source, encode_webp, thumbnail};
 
-/// The WebP quality of every thumbnail, as with the external tools.
-const QUALITY: f32 = 80.0;
-
 /// The most pixels the server decodes in its own process. A decode holds the whole picture
 /// (several bytes a pixel, plus the shrinking), and two run at once, so the crate's default of
 /// 200 megapixels could take 2-3 GB each and get the server killed on a 2-4 GB NAS or
@@ -32,8 +29,8 @@ pub(crate) enum InSource {
 }
 
 /// The image shrunk so its longest side is at most `longest` pixels (never enlarged), with
-/// its EXIF orientation applied, as lossy WebP of quality 80 without metadata.
-pub(crate) fn render(src: InSource, longest: u32) -> Result<Vec<u8>, Error> {
+/// its EXIF orientation applied, as lossy WebP of the given quality without metadata.
+pub(crate) fn render(src: InSource, longest: u32, quality: f32) -> Result<Vec<u8>, Error> {
     let limits = LIMITS;
     let image = match &src {
         InSource::Path(path) => thumbnail(Source::Path(path), longest, &limits)?,
@@ -46,5 +43,5 @@ pub(crate) fn render(src: InSource, longest: u32) -> Result<Vec<u8>, Error> {
             &limits,
         )?,
     };
-    encode_webp(&image, QUALITY)
+    encode_webp(&image, quality)
 }

@@ -145,8 +145,8 @@ impl From<StatusCode> for ThumbError {
     }
 }
 
-/// The rendered file of item `id` for `preset` (`Thumb` or `Preview`), rendering it if need
-/// be; what `GET /media/{id}/{thumb|preview}` serves. A record older than its file asks for
+/// The rendered file of item `id` for `preset` (`Thumb`, `Preview` or `OfflineImage`), rendering it if need
+/// be; what `GET /media/{id}/{thumb|preview|offline-image}` serves. A record older than its file asks for
 /// a rescan and is `NotReady`.
 pub(crate) async fn thumb_file(
     state: &AppState,
@@ -154,7 +154,10 @@ pub(crate) async fn thumb_file(
     id: ItemId,
     preset: Preset,
 ) -> Result<PathBuf, ThumbError> {
-    debug_assert!(matches!(preset, Preset::Thumb | Preset::Preview));
+    debug_assert!(matches!(
+        preset,
+        Preset::Thumb | Preset::Preview | Preset::OfflineImage
+    ));
     render_for(state, user, id, preset).await
 }
 
