@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use asteria_common_api::{ItemId, LibraryInfo, codes};
@@ -102,6 +102,29 @@ pub enum SetAnswer {
     NotFound,
     /// The connection is closed without an answer.
     HangUp,
+    /// The set, with these item ids, once the hold is released.
+    Held(Vec<String>, Hold),
+}
+
+/// Keeps a [`SetAnswer::Held`] answer back until [`release`](Self::release)d.
+#[derive(Clone, Debug, Default)]
+pub struct Hold(Arc<(Mutex<bool>, Condvar)>);
+
+impl Hold {
+    pub fn release(&self) {
+        *self.0.0.lock().unwrap() = true;
+        self.0.1.notify_all();
+    }
+
+    fn wait(&self) {
+        let released = self.0.0.lock().unwrap();
+        let (released, _) = self
+            .0
+            .1
+            .wait_timeout_while(released, DEADLINE, |r| !*r)
+            .unwrap();
+        assert!(*released, "the held answer was never released");
+    }
 }
 
 #[derive(Default)]
@@ -180,14 +203,15 @@ fn answer(fake: &Mutex<Fake>, req: &StubRequest) -> StubResponse {
                     .unwrap_or_default()
                     .to_string();
                 fake.log.push(format!("set.get {set}"));
-                match fake.sets.get(&set).cloned().unwrap_or(SetAnswer::NotFound) {
-                    SetAnswer::Items(items) => {
-                        let items: Vec<Value> = items
-                            .iter()
-                            .map(|i| json!({"id": i, "file_hash": file_hash(i)}))
-                            .collect();
-                        StubResponse::rpc_result(id, json!({ "items": items }))
+                let answer = fake.sets.get(&set).cloned().unwrap_or(SetAnswer::NotFound);
+                // Not under the lock: a held answer must not block the other requests.
+                drop(fake);
+                match answer {
+                    SetAnswer::Held(items, hold) => {
+                        hold.wait();
+                        StubResponse::rpc_result(id, set_result(&items))
                     }
+                    SetAnswer::Items(items) => StubResponse::rpc_result(id, set_result(&items)),
                     SetAnswer::NotFound => {
                         StubResponse::rpc_error(id, codes::NOT_FOUND, "no such set")
                     }
@@ -207,6 +231,14 @@ fn answer(fake: &Mutex<Fake>, req: &StubRequest) -> StubResponse {
         200 => StubResponse::new(200, MEDIA_BYTES.to_vec()).header("content-type", "image/webp"),
         status => StubResponse::new(status, Vec::new()),
     }
+}
+
+fn set_result(items: &[String]) -> Value {
+    let items: Vec<Value> = items
+        .iter()
+        .map(|i| json!({"id": i, "file_hash": file_hash(i)}))
+        .collect();
+    json!({ "items": items })
 }
 
 /// Polls `done` until it holds; fails the test after [`DEADLINE`].

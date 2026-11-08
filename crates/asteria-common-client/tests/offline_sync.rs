@@ -15,7 +15,7 @@ use asteria_common_client::profiles::Token;
 use corundum_framework::egui;
 
 use common::offline::{
-    ESTIMATE, FakeCatalog, FakeServer, SetAnswer, file_hash, library, set_pin, wait_for,
+    ESTIMATE, FakeCatalog, FakeServer, Hold, SetAnswer, file_hash, library, set_pin, wait_for,
 };
 
 /// A temporary data directory and a stub server.
@@ -258,4 +258,53 @@ fn pins_survive_a_new_handle() {
     h.unpin("set", "s1");
     wait_for("a removed", || !has(&h, "a"));
     assert!(h.docs().get("set", "s1").is_none());
+}
+
+#[test]
+fn pins_left_after_clear_all_are_synced_again() {
+    let f = Fixture::new();
+    let hold = Hold::default();
+    f.server
+        .answer("s1", SetAnswer::Held(vec!["a".into()], hold.clone()));
+    f.server.set("s2", &["b"]);
+    let h = f.handle();
+    h.set_online(Some(&library(1)));
+    h.pin(set_pin("s1"));
+    wait_for("s1 asked for", || f.server.requests("set.get s1") == 1);
+    // While that sync waits: another sync is queued, then everything is cleared, then s2 is
+    // pinned. The queued sync runs (and saves s2) before the clear wipes the store.
+    h.sync_now();
+    h.clear_all();
+    h.pin(set_pin("s2"));
+    hold.release();
+    wait_for("s2 saved again after the clear", || {
+        f.server.requests("set.get s2") == 2 && saved(&h, "s2") && idle(&h) && has(&h, "b")
+    });
+    assert!(h.docs().get("set", "s2").is_some());
+    assert_eq!(h.status("set", "s1"), None);
+}
+
+#[test]
+fn a_stopped_sync_writes_nothing() {
+    let f = Fixture::new();
+    let hold = Hold::default();
+    f.server
+        .answer("s1", SetAnswer::Held(vec!["a".into()], hold.clone()));
+    let store = || OfflineStore::open(f.dir.path(), "lib1").unwrap();
+    let h = f.handle();
+    h.set_online(Some(&library(1)));
+    h.pin(set_pin("s1"));
+    wait_for("s1 asked for", || f.server.requests("set.get s1") == 1);
+    h.stop();
+    // Another handle on the same library takes over and unpins.
+    let next = f.handle();
+    next.unpin("set", "s1");
+    wait_for("pins saved by the new handle", || {
+        store().load_pins().is_empty()
+    });
+    hold.release();
+    settle();
+    assert!(store().load_pins().is_empty());
+    assert!(store().read_docs().is_empty());
+    assert!(!has(&next, "a"));
 }

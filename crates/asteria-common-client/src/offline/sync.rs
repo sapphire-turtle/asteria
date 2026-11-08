@@ -463,7 +463,7 @@ fn write_limit(path: &Path, limit_bytes: u64) -> Result<(), String> {
 fn control(shared: &Shared, commands: &mpsc::Receiver<Command>) {
     shared.load();
     while let Ok(command) = commands.recv() {
-        if shared.stopped.load(Ordering::Acquire) {
+        if shared.is_stopped() {
             return;
         }
         match command {
@@ -507,8 +507,12 @@ impl Shared {
         self.update(|s| s.phase = SyncPhase::Failed(reason));
     }
 
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+
     fn cancelled(&self) -> bool {
-        self.stopped.load(Ordering::Acquire) || self.interrupt.load(Ordering::Acquire)
+        self.is_stopped() || self.interrupt.load(Ordering::Acquire)
     }
 
     /// Sleeps for `wait` unless the sync is stopped first; `false` if it was.
@@ -662,7 +666,8 @@ impl Shared {
 
     fn clear(&self) {
         let result = self.store.clear();
-        // A sync that ran while the handle cleared its state may have refilled it.
+        // A sync queued before `clear_all` may have run since, refilling the state (and the
+        // mark) from what is now deleted.
         let pins = self.update(|s| {
             s.pin_docs.clear();
             s.docs = Arc::default();
@@ -670,19 +675,26 @@ impl Shared {
             s.used_bytes = 0;
             s.unsavable = 0;
             s.phase = SyncPhase::Idle;
+            s.mark = SyncMark::default();
+            s.pending = None;
+            for pin in &mut s.pins {
+                pin.status = PinStatus::Pending;
+            }
             s.pins.clone()
         });
-        // Pins added since `clear_all` survive it.
-        let result = result.and_then(|()| {
-            if pins.is_empty() {
-                Ok(())
-            } else {
-                self.store.save_pins(&pins)
+        if pins.is_empty() {
+            if let Err(e) = result {
+                self.fail(disk_error(e));
             }
-        });
-        if let Err(e) = result {
-            self.fail(disk_error(e));
+            return;
         }
+        // Pins added since `clear_all` survive it, and are copied again.
+        if let Err(e) = result.and_then(|()| self.store.save_pins(&pins)) {
+            self.fail(disk_error(e));
+            return;
+        }
+        self.lock().requested = true;
+        self.sync();
     }
 
     fn sync(&self) {
@@ -709,6 +721,9 @@ impl Shared {
         };
         self.ctx.request_repaint();
         let mut end = self.run(&pins);
+        if self.is_stopped() {
+            end = End::Interrupted;
+        }
         if matches!(end, End::Done)
             && let Err(e) = self.store.save_mark(&mark)
         {
@@ -787,6 +802,10 @@ impl Shared {
                     problem.get_or_insert(e.to_string());
                 }
             }
+        }
+        // A stopped handle's files may already belong to a new one.
+        if self.is_stopped() {
+            return End::Interrupted;
         }
         let (saved_pins, pin_docs) = {
             let s = self.lock();
@@ -918,13 +937,15 @@ impl Shared {
                 jobs.next.pop_front().expect("checked above")
             };
             let fetched = self.fetch_media(downloads, &media);
+            if self.cancelled() {
+                return;
+            }
             let saved = match fetched {
                 Ok(bytes) => self
                     .store
                     .put_media(&media.file_hash, &media.preset, &bytes)
                     .map(|_| bytes.len() as u64)
                     .map_err(|e| Fatal(disk_error(e))),
-                Err(_) if self.cancelled() => return,
                 Err(e) if is_gone(&e) || e == ClientError::Unprocessable => {
                     self.update(|s| s.unsavable += 1);
                     Ok(0)
