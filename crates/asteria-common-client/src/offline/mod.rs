@@ -4,6 +4,7 @@
 
 mod catalog;
 mod known;
+mod page;
 mod store;
 mod sync;
 
@@ -11,6 +12,7 @@ use std::time::Duration;
 
 pub use catalog::{Docs, Fetch, OfflineCatalog};
 pub use known::KnownLibraries;
+pub use page::OfflinePage;
 pub use store::{Doc, MediaKey, OfflineStore, Pin, PinStatus, PinTarget, SyncMark};
 pub use sync::{OfflineHandle, PinInfo, SyncPhase, SyncProgress};
 
@@ -18,6 +20,8 @@ pub use sync::{OfflineHandle, PinInfo, SyncPhase, SyncProgress};
 pub const DOC_SCHEMA: u32 = 1;
 /// The space the offline media may take unless the user chose another limit (8 GiB).
 pub const DEFAULT_LIMIT_BYTES: u64 = 8 << 30;
+/// The size limits the Offline page offers, in GiB.
+pub const LIMIT_CHOICES_GIB: [u64; 6] = [1, 2, 4, 8, 16, 32];
 /// How many media files a sync downloads at the same time.
 pub const DOWNLOADS_AT_ONCE: usize = 2;
 /// How long one `offline-audio` download may take: the server may transcode first.
