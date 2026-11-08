@@ -9,6 +9,7 @@ pub mod cover_grid;
 pub mod i18n;
 pub mod library;
 pub(crate) mod now_playing;
+pub mod offline;
 pub mod player;
 pub(crate) mod queue;
 pub mod settings;
