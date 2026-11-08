@@ -16,6 +16,8 @@ use grain_id::GrainId;
 use serde_json::{Value, json};
 use url::Url;
 
+pub mod offline;
+
 /// How long a test waits for something that should happen promptly.
 pub const DEADLINE: Duration = Duration::from_secs(20);
 
@@ -102,6 +104,16 @@ impl StubResponse {
     /// A JSON-RPC success answer.
     pub fn rpc_result(id: u64, result: Value) -> StubResponse {
         let body = json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string();
+        let mut resp = StubResponse::new(200, body.into_bytes());
+        resp.headers
+            .push(("content-type".into(), "application/json".into()));
+        resp
+    }
+
+    /// A JSON-RPC error answer.
+    pub fn rpc_error(id: u64, code: i32, message: &str) -> StubResponse {
+        let body = json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+            .to_string();
         let mut resp = StubResponse::new(200, body.into_bytes());
         resp.headers
             .push(("content-type".into(), "application/json".into()));

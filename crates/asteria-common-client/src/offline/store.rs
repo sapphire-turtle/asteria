@@ -1,17 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use asteria_common_api::ItemId;
 use serde::{Deserialize, Serialize};
 
-use super::DOC_SCHEMA;
+use super::{DOC_SCHEMA, STALE_TMP};
 use crate::media_cache::{TMP_SUFFIX, hash_hex, safe_component, write_atomic};
-
-/// A temporary file this old is the leftover of a crashed write, not one in progress.
-const STALE_TMP: Duration = Duration::from_secs(24 * 3600);
 
 /// What the user asked to keep offline: an album, a playlist, and so on.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -64,6 +61,9 @@ pub struct SyncMark {
     pub pins_digest: String,
 }
 
+/// A stored answer copy, by what was asked: `(kind, id)`.
+pub(crate) type DocKey = (String, String);
+
 /// The on-disk form of a [`Doc`].
 #[derive(Serialize, Deserialize)]
 struct DocFile {
@@ -74,6 +74,7 @@ struct DocFile {
 }
 
 /// The offline copy of one library, at `<data>/offline/<library id>`: `pins.json`, `state.json`,
+/// `pin_docs.json` (which copies each pin needs),
 /// `docs/<kind>/<hex of blake3(id)>.json` and `media/<preset>/<hex[..2]>/<hex>.<ext>`.
 ///
 /// Every method does blocking disk I/O: call them from a worker thread, never the UI thread.
@@ -161,6 +162,22 @@ impl OfflineStore {
 
     pub fn save_pins(&self, pins: &[Pin]) -> io::Result<()> {
         self.save_json("pins.json", &pins)
+    }
+
+    /// Which answer copies each pin (by `(kind, id)`) needed when it was last fetched.
+    pub(crate) fn load_pin_docs(&self) -> HashMap<DocKey, Vec<DocKey>> {
+        self.load_json::<Vec<(DocKey, Vec<DocKey>)>>("pin_docs.json")
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    }
+
+    /// Kept like the pins: without it, a sync could not tell which copies a pin that is gone
+    /// from the server still needs.
+    pub(crate) fn save_pin_docs(&self, pin_docs: &HashMap<DocKey, Vec<DocKey>>) -> io::Result<()> {
+        let mut list: Vec<_> = pin_docs.iter().collect();
+        list.sort();
+        self.save_json("pin_docs.json", &list)
     }
 
     pub fn load_mark(&self) -> SyncMark {
@@ -300,6 +317,7 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use std::fs::File;
+    use std::time::Duration;
 
     const HASH_A: &str = "blake3:abababababababababababababababababababababababababababababababab";
     const HASH_B: &str = "blake3:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
