@@ -42,6 +42,8 @@ asteria-common-client-servers-error-library-changed = サーバーのライブ�
 asteria-common-client-servers-error-server = サーバーがエラーを返しました
 asteria-common-client-servers-error-protocol = サーバーの応答を読み取れません
 asteria-common-client-servers-error-local = この端末で問題が起きました
+asteria-common-client-servers-error-not-saved = オフライン用に保存していません
+asteria-common-client-servers-error-offline = オフラインでは編集できません
 
 # The server switcher in the status bar.
 asteria-common-client-status-none = サーバーなし
@@ -49,5 +51,7 @@ asteria-common-client-status-connected = 接続済み
 asteria-common-client-status-connecting = 接続中
 asteria-common-client-status-failed = 接続できません：{ $reason }
 asteria-common-client-status-degraded = 応答がありません：{ $reason }
+asteria-common-client-status-offline = オフライン（保存したものを表示中）
 asteria-common-client-status-manage = サーバーを管理…
+asteria-common-client-status-reconnect = 再接続
 asteria-common-client-status-hover = { $name }：{ $status }

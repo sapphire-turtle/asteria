@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use asteria_common_api::{ItemId, LibraryInfo, codes};
 use asteria_common_client::offline::{Doc, Docs, Fetch, MediaKey, OfflineCatalog, PinTarget};
@@ -13,7 +13,9 @@ use asteria_common_client::session::{Request, Response};
 use serde_json::{Value, json};
 use url::Url;
 
-use super::{DEADLINE, StubRequest, StubResponse, library_info, photos_server_info, serve};
+use super::{
+    DEADLINE, StubRequest, StubResponse, library_info, photos_server_info, serve, serve_at,
+};
 
 /// The body of every media file the fake server sends: as long as [`ESTIMATE`].
 pub const MEDIA_BYTES: &[u8] = b"img";
@@ -76,9 +78,13 @@ pub fn set_pin(id: &str) -> PinTarget {
     }
 }
 
-/// The content hash the fake server gives `item`.
+/// The content hash the fake server gives `item`: shaped like a blake3 hash, made with std
+/// only (the app crates include these helpers without depending on blake3).
 pub fn file_hash(item: &str) -> String {
-    format!("blake3:{}", blake3::hash(item.as_bytes()).to_hex())
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    item.hash(&mut hasher);
+    format!("blake3:{:064x}", hasher.finish())
 }
 
 /// The library the fake server serves, at `revision`.
@@ -132,6 +138,12 @@ struct Fake {
     sets: HashMap<String, SetAnswer>,
     /// The HTTP status of an item's media; 200 when absent.
     media_status: HashMap<String, u16>,
+    /// The body of every media file; [`MEDIA_BYTES`] when `None`.
+    media_bytes: Option<Vec<u8>>,
+    /// How long each media answer is held back.
+    media_delay: Duration,
+    /// Every connection is closed without an answer, as a server that went away.
+    gone: bool,
     /// Every request: `set.get <id>`, `<method>` for other calls, or `GET <path>`.
     log: Vec<String>,
 }
@@ -146,9 +158,20 @@ pub struct FakeServer {
 
 impl FakeServer {
     pub fn start() -> FakeServer {
+        Self::start_with(|handler| serve(handler))
+    }
+
+    /// Like [`start`](Self::start), on `addr`.
+    pub fn start_at(addr: SocketAddr) -> FakeServer {
+        Self::start_with(|handler| serve_at(addr, handler))
+    }
+
+    fn start_with(
+        serve: impl FnOnce(Box<dyn Fn(&StubRequest) -> StubResponse + Send + Sync>) -> SocketAddr,
+    ) -> FakeServer {
         let fake = Arc::new(Mutex::new(Fake::default()));
         let shared = fake.clone();
-        let addr = serve(move |req: &StubRequest| answer(&shared, req));
+        let addr = serve(Box::new(move |req: &StubRequest| answer(&shared, req)));
         FakeServer { addr, fake }
     }
 
@@ -177,6 +200,21 @@ impl FakeServer {
             .insert(item.into(), status);
     }
 
+    /// Sends `bytes` as every media file (instead of [`MEDIA_BYTES`]).
+    pub fn media_bytes(&self, bytes: Vec<u8>) {
+        self.fake.lock().unwrap().media_bytes = Some(bytes);
+    }
+
+    /// Holds back each media answer for `delay`.
+    pub fn media_delay(&self, delay: Duration) {
+        self.fake.lock().unwrap().media_delay = delay;
+    }
+
+    /// While `gone`, every connection is closed without an answer (nothing is logged).
+    pub fn gone(&self, gone: bool) {
+        self.fake.lock().unwrap().gone = gone;
+    }
+
     /// How many requests were logged starting with `prefix` (`"set.get"`, `"GET /media/a/"`).
     pub fn requests(&self, prefix: &str) -> usize {
         let fake = self.fake.lock().unwrap();
@@ -186,6 +224,9 @@ impl FakeServer {
 
 fn answer(fake: &Mutex<Fake>, req: &StubRequest) -> StubResponse {
     let mut fake = fake.lock().unwrap();
+    if fake.gone {
+        return StubResponse::hang_up();
+    }
     if let Some((id, method)) = req.rpc() {
         let body: Value = serde_json::from_slice(&req.body).unwrap();
         return match method.as_str() {
@@ -227,10 +268,18 @@ fn answer(fake: &Mutex<Fake>, req: &StubRequest) -> StubResponse {
         .strip_prefix("/media/")
         .and_then(|rest| rest.split('/').next())
         .unwrap_or_default();
-    match fake.media_status.get(item).copied().unwrap_or(200) {
-        200 => StubResponse::new(200, MEDIA_BYTES.to_vec()).header("content-type", "image/webp"),
+    let response = match fake.media_status.get(item).copied().unwrap_or(200) {
+        200 => {
+            let body = fake.media_bytes.clone().unwrap_or(MEDIA_BYTES.to_vec());
+            StubResponse::new(200, body).header("content-type", "image/webp")
+        }
         status => StubResponse::new(status, Vec::new()),
-    }
+    };
+    let delay = fake.media_delay;
+    // Not under the lock: the other requests go on meanwhile.
+    drop(fake);
+    std::thread::sleep(delay);
+    response
 }
 
 fn set_result(items: &[String]) -> Value {

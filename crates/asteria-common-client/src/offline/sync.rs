@@ -105,6 +105,8 @@ struct State {
     requested: bool,
     /// A sync was asked for while offline (a pin, "sync now"): run it once online.
     forced: bool,
+    /// The control thread has read the copies (or could not start).
+    loaded: bool,
 }
 
 /// What the handle and its control thread share.
@@ -115,7 +117,8 @@ struct Shared {
     token: Token,
     ctx: egui::Context,
     state: Mutex<State>,
-    /// Wakes a retry's wait when the sync is stopped. Paired with `state`.
+    /// Wakes a retry's wait when the sync is stopped, and [`OfflineHandle::wait_loaded`] once
+    /// the copies are read. Paired with `state`.
     wake: Condvar,
     /// Set for good once the handle stops.
     stopped: AtomicBool,
@@ -164,6 +167,7 @@ impl OfflineHandle {
             pending: None,
             requested: false,
             forced: false,
+            loaded: false,
         };
         let shared = Arc::new(Shared {
             store,
@@ -183,7 +187,10 @@ impl OfflineHandle {
             .spawn(move || control(&thread_shared, &rx));
         if let Err(e) = spawned {
             tracing::warn!("cannot start the offline sync: {e}");
-            shared.update(|s| s.phase = SyncPhase::Failed(e.to_string()));
+            shared.update(|s| {
+                s.phase = SyncPhase::Failed(e.to_string());
+                s.loaded = true;
+            });
         }
         let saver = Saver::spawn("asteria-offline-settings", ctx, move |bytes: &u64| {
             write_limit(&settings, *bytes)
@@ -309,6 +316,17 @@ impl OfflineHandle {
     /// The saved answer copies, as of the latest change.
     pub fn docs(&self) -> Arc<Docs> {
         self.shared().lock().docs.clone()
+    }
+
+    /// Waits until the control thread has read the saved copies, which it does first, so
+    /// [`docs`](Self::docs) has them; returns at once if the handle is stopped. Blocks: only
+    /// on worker threads.
+    pub(crate) fn wait_loaded(&self) {
+        let shared = self.shared();
+        let mut s = shared.lock();
+        while !s.loaded && !shared.is_stopped() {
+            s = shared.wake.wait(s).unwrap_or_else(|e| e.into_inner());
+        }
     }
 
     /// The stored file for `(file_hash, preset)`, if there is one.
@@ -625,7 +643,9 @@ impl Shared {
             s.stored = stored;
             s.pin_docs = pin_docs;
             s.used_bytes = used;
+            s.loaded = true;
         });
+        self.wake.notify_all();
     }
 
     /// Deletes the copies only the unpinned `key` needed, then every media file no copy

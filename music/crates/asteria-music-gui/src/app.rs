@@ -582,7 +582,8 @@ impl State {
                     });
                 });
             }
-            SessionState::Ready { .. } => {
+            // Offline, the saved copies answer the same requests.
+            SessionState::Ready { .. } | SessionState::Offline { .. } => {
                 let mut command = None;
                 egui::CentralPanel::default().show(ui, |ui| {
                     command = match screen {
@@ -731,6 +732,11 @@ impl State {
         match action {
             Some(SwitcherAction::Switch(id)) => self.switch_to(id),
             Some(SwitcherAction::Manage) => self.open_servers_settings(),
+            Some(SwitcherAction::Reconnect) => {
+                if let Some(c) = &mut self.connection {
+                    c.session.reconnect();
+                }
+            }
             None => {}
         }
     }

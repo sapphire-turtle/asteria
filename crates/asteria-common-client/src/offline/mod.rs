@@ -25,5 +25,7 @@ pub const AUDIO_TIMEOUT: Duration = Duration::from_secs(600);
 /// How many times a sync retries a request the server answered with 503; after that it gives
 /// up on it for this sync (without counting it as unsavable).
 pub const RETRY_ATTEMPTS: u32 = 20;
+/// How long an offline session waits after a handshake before it tries the server again.
+pub const RECONNECT_EVERY: Duration = Duration::from_secs(30);
 /// A temporary file this old is the leftover of a crashed write, not one in progress.
 pub const STALE_TMP: Duration = Duration::from_secs(24 * 3600);

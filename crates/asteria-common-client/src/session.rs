@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::Instant;
 
 use asteria_common_api::{
     ClientInfo, FOLDER_LIST, FolderListParams, FolderListing, LIBRARY_INFO, LIBRARY_RESCAN,
@@ -14,10 +15,14 @@ use asteria_common_api::{
 use corundum_framework::egui;
 use serde::Serialize;
 use serde::de::IgnoredAny;
+use url::Url;
 
 use crate::images::ImageLoader;
 use crate::media_cache::MediaCache;
-use crate::profiles::{ProfileId, ServerProfile};
+use crate::offline::{
+    KnownLibraries, OfflineCatalog, OfflineHandle, OfflineStore, RECONNECT_EVERY,
+};
+use crate::profiles::{ProfileId, ServerProfile, Token};
 use crate::rpc::{ClientError, RpcClient};
 use crate::upload::queue::queue_path;
 use crate::upload::{EngineConfig, Uploads};
@@ -33,6 +38,10 @@ pub enum SessionState {
     Connecting,
     /// Connected. `library` is the latest `library.info` answer.
     Ready { library: LibraryInfo },
+    /// The server could not be reached, and the profile has been connected to `library` before
+    /// (as recorded then): requests are answered from the saved copies, and the handshake is
+    /// tried again every [`RECONNECT_EVERY`] (or at once, see [`Session::reconnect`]).
+    Offline { library: LibraryInfo },
     /// The handshake failed, or the server switched to another library
     /// ([`ClientError::LibraryChanged`]); the session will not recover. Open a new one to retry.
     Failed(ClientError),
@@ -89,6 +98,8 @@ pub struct Reply {
 /// What a job reports back to its session.
 enum Event {
     Connected(Result<LibraryInfo, ClientError>),
+    /// The server could not be reached; the profile last saw this library.
+    Offline(LibraryInfo),
     Reply(Reply),
 }
 
@@ -107,6 +118,9 @@ pub(crate) enum Gate {
     Pending,
     /// The handshake succeeded with this library.
     Open { library_id: String },
+    /// The server could not be reached: requests are answered from the saved copies of
+    /// `library` (as recorded when the profile last connected), and nothing goes to the server.
+    Offline { library: LibraryInfo },
     /// No more requests go to the server; each gets this error instead.
     Closed(ClientError),
 }
@@ -136,7 +150,8 @@ pub(crate) fn note_health<T>(health: &Mutex<Option<ClientError>>, result: &Resul
 pub struct SessionDirs {
     /// Root of the thumbnail caches ([`MediaCache`], one per library).
     pub cache: Option<PathBuf>,
-    /// Root of the app's data; the upload queues live in its `uploads/` directory.
+    /// Root of the app's data; the upload queues live in its `uploads/` directory, the offline
+    /// copies in `offline/`.
     pub data: Option<PathBuf>,
 }
 
@@ -176,6 +191,17 @@ pub struct Session {
     cache: Arc<OnceLock<Arc<MediaCache>>>,
     /// Filled by the handshake job once the library id is known, if a data root was given.
     uploads: Arc<OnceLock<Uploads>>,
+    /// Filled by the handshake job once the library id is known (online or offline), if a data
+    /// root and a catalog were given.
+    offline: Arc<OnceLock<OfflineHandle>>,
+    /// What the handshake job needs, to run it again; `None` if the worker could not start.
+    handshake: Option<Arc<Handshake>>,
+    /// When the latest handshake ended (or the session opened).
+    last_handshake: Instant,
+    /// A handshake from [`reconnect`](Self::reconnect) is queued or running.
+    reconnecting: bool,
+    /// Whether the offline sync was last told the server answers.
+    sync_online: bool,
     images: ImageLoader,
 }
 
@@ -213,11 +239,33 @@ impl Session {
         ctx: egui::Context,
         dirs: SessionDirs,
     ) -> Session {
+        Self::open_with(profile, client, ctx, dirs, None)
+    }
+
+    /// Like [`open_with_dirs`](Self::open_with_dirs), and with `dirs.data` and a `catalog`,
+    /// the session also works offline:
+    /// - each successful handshake records the library for the profile
+    ///   ([`KnownLibraries`]);
+    /// - once the library id is known, the library's [`OfflineHandle`] starts
+    ///   ([`offline`](Self::offline)); it syncs while the server answers;
+    /// - a handshake that cannot reach the server, for a profile with a recorded library,
+    ///   ends in [`SessionState::Offline`] instead of `Failed`;
+    /// - a request the server does not answer is answered from the saved copies when the
+    ///   catalog can (see [`request`](Self::request)), and images come from the saved copies
+    ///   first.
+    pub fn open_with(
+        profile: &ServerProfile,
+        client: ClientInfo,
+        ctx: egui::Context,
+        dirs: SessionDirs,
+        catalog: Option<Arc<dyn OfflineCatalog>>,
+    ) -> Session {
         let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         let (events_tx, events) = mpsc::channel();
         let gate = Arc::new(Mutex::new(Gate::Pending));
         let cache = Arc::new(OnceLock::new());
         let uploads = Arc::new(OnceLock::new());
+        let offline = Arc::new(OnceLock::new());
         let health: Health = Arc::new(Mutex::new(None));
         let images = ImageLoader::new(
             ctx.clone(),
@@ -225,6 +273,7 @@ impl Session {
             profile.token.clone(),
             gate.clone(),
             cache.clone(),
+            offline.clone(),
             health.clone(),
         );
         let mut session = Session {
@@ -242,6 +291,11 @@ impl Session {
             degraded: None,
             cache,
             uploads,
+            offline,
+            handshake: None,
+            last_handshake: Instant::now(),
+            reconnecting: false,
+            sync_online: false,
             images,
         };
         let (url, token) = (profile.url.clone(), profile.token.clone());
@@ -250,51 +304,24 @@ impl Session {
             RpcClient::new(&url, token.clone())
         }) {
             Ok(worker) => {
-                let cancelled = worker.cancelled();
-                session.worker = Some(worker);
-                let gate = session.gate.clone();
-                let cache = session.cache.clone();
-                let uploads = session.uploads.clone();
-                let engine = EngineConfig {
+                let handshake = Arc::new(Handshake {
+                    profile: profile.id,
                     url: profile.url.clone(),
                     token: profile.token.clone(),
-                    app: client.app.clone(),
+                    client,
+                    dirs,
+                    catalog,
                     ctx: session.ctx.clone(),
                     gate: session.gate.clone(),
                     health: session.health.clone(),
-                    cancelled: cancelled.clone(),
-                    path: PathBuf::new(),
-                };
-                let profile_id = profile.id;
-                session.submit(move |rpc| {
-                    let result = rpc.and_then(|rpc| handshake(rpc, &client));
-                    if let (Ok(library), Some(root)) = (&result, &dirs.cache) {
-                        match MediaCache::open(root, &library.library_id) {
-                            Some(opened) => {
-                                let opened = Arc::new(opened);
-                                let _ = cache.set(opened.clone());
-                                trim_in_background(opened, cancelled);
-                            }
-                            None => tracing::warn!("library id is not a safe cache directory name"),
-                        }
-                    }
-                    if let (Ok(library), Some(root)) = (&result, &dirs.data) {
-                        match queue_path(root, &library.library_id, &profile_id.to_string()) {
-                            Some(path) => {
-                                let _ =
-                                    uploads.set(Uploads::start(EngineConfig { path, ..engine }));
-                            }
-                            None => tracing::warn!("library or profile id is not a safe file name"),
-                        }
-                    }
-                    *lock_gate(&gate) = match &result {
-                        Ok(library) => Gate::Open {
-                            library_id: library.library_id.clone(),
-                        },
-                        Err(e) => Gate::Closed(e.clone()),
-                    };
-                    Event::Connected(result)
+                    cancelled: worker.cancelled(),
+                    cache: session.cache.clone(),
+                    uploads: session.uploads.clone(),
+                    offline: session.offline.clone(),
                 });
+                session.worker = Some(worker);
+                session.handshake = Some(handshake.clone());
+                session.submit(move |rpc| handshake.run(rpc));
             }
             Err(e) => {
                 let e = ClientError::Io(e.to_string());
@@ -315,9 +342,10 @@ impl Session {
         self.profile
     }
 
-    /// This library's thumbnail cache, once the handshake has succeeded and a cache root was
-    /// given to [`open_with_dirs`](Self::open_with_dirs). Hand the `Arc` to jobs that run on
-    /// worker threads: its methods do disk I/O, so not the UI thread.
+    /// This library's thumbnail cache, once the handshake has succeeded (or the session is
+    /// offline) and a cache root was given to [`open_with_dirs`](Self::open_with_dirs). Hand
+    /// the `Arc` to jobs that run on worker threads: its methods do disk I/O, so not the UI
+    /// thread.
     pub fn media_cache(&self) -> Option<Arc<MediaCache>> {
         self.cache.get().cloned()
     }
@@ -328,6 +356,42 @@ impl Session {
     /// pauses this one until a session for this library opens again.
     pub fn uploads(&self) -> Option<&Uploads> {
         self.uploads.get()
+    }
+
+    /// This library's offline copies and their sync, once the library id is known (from the
+    /// handshake, or from the record when offline), if a data root and a catalog were given to
+    /// [`open_with`](Self::open_with). The same handle online and offline; it stops when the
+    /// session is dropped.
+    pub fn offline(&self) -> Option<&OfflineHandle> {
+        self.offline.get()
+    }
+
+    /// Whether what is on screen comes from the saved copies: the session is
+    /// [`SessionState::Offline`], or connected but the server no longer answers
+    /// ([`degraded`](Self::degraded) is [`ClientError::Unreachable`]).
+    pub fn is_offline(&self) -> bool {
+        match self.state {
+            SessionState::Offline { .. } => true,
+            SessionState::Ready { .. } => {
+                matches!(self.degraded, Some(ClientError::Unreachable(_)))
+            }
+            _ => false,
+        }
+    }
+
+    /// While [`SessionState::Offline`], tries the server again now instead of at the next
+    /// [`RECONNECT_EVERY`]; otherwise (or while a try is under way) does nothing. The outcome
+    /// comes through [`poll`](Self::poll): `Ready`, still `Offline`, or `Failed` if the server
+    /// answered but refused (such as [`ClientError::LibraryChanged`]).
+    pub fn reconnect(&mut self) {
+        if !matches!(self.state, SessionState::Offline { .. }) || self.reconnecting {
+            return;
+        }
+        let Some(handshake) = self.handshake.clone() else {
+            return;
+        };
+        self.reconnecting = true;
+        self.submit(move |rpc| handshake.run(rpc));
     }
 
     /// Thumbnails and previews of this session's server, as egui textures.
@@ -354,6 +418,12 @@ impl Session {
     /// id. Requests run one at a time in the order made, after the handshake. If the
     /// handshake failed (even if [`poll`](Self::poll) has not reported it yet), or the session
     /// has failed since, the reply carries that failure and nothing is sent.
+    ///
+    /// While offline, nothing is sent either: the catalog answers from the saved copies;
+    /// what it cannot answer fails with [`ClientError::NotSaved`], or with
+    /// [`ClientError::Offline`] for a change (`media.update`, `library.rescan`).
+    /// `library.info` answers with the recorded library. While connected, a request that
+    /// cannot reach the server is answered from the saved copies if the catalog can.
     pub fn request(&mut self, request: Request) -> RequestId {
         let id = RequestId(self.next_request);
         self.next_request += 1;
@@ -367,10 +437,11 @@ impl Session {
         }
         let gate = self.gate.clone();
         let health = self.health.clone();
+        let offline = self.offline.clone();
         self.submit(move |rpc| {
             Event::Reply(Reply {
                 id,
-                result: gated(&gate, &health, rpc, request),
+                result: gated(&gate, &health, &offline, rpc, request),
             })
         });
         id
@@ -378,7 +449,8 @@ impl Session {
 
     /// Takes the results that have arrived, updating [`state`](Self::state) on the way.
     /// Replies to [`request`](Self::request)s are returned in arrival order; the handshake's
-    /// result only changes the state. Call it every frame.
+    /// result only changes the state. Call it every frame; while offline, it also starts the
+    /// next try of the server when it is due.
     pub fn poll(&mut self) -> Vec<Reply> {
         let mut replies = Vec::new();
         while let Ok(Stamped { generation, event }) = self.events.try_recv() {
@@ -389,10 +461,21 @@ impl Session {
             }
             match event {
                 Event::Connected(result) => {
+                    self.handshake_ended();
                     self.state = match result {
-                        Ok(library) => SessionState::Ready { library },
+                        Ok(library) => {
+                            // Back from offline: what is on screen came from the saved copies.
+                            if matches!(self.state, SessionState::Offline { .. }) {
+                                self.refetch_listing = true;
+                            }
+                            SessionState::Ready { library }
+                        }
                         Err(e) => SessionState::Failed(e),
                     };
+                }
+                Event::Offline(library) => {
+                    self.handshake_ended();
+                    self.state = SessionState::Offline { library };
                 }
                 Event::Reply(reply) => {
                     match &reply.result {
@@ -414,7 +497,47 @@ impl Session {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        self.tell_sync();
+        self.reconnect_when_due();
         replies
+    }
+
+    fn handshake_ended(&mut self) {
+        self.reconnecting = false;
+        self.last_handshake = Instant::now();
+    }
+
+    /// Tells the offline sync when the server starts or stops answering.
+    fn tell_sync(&mut self) {
+        let online = match &self.state {
+            SessionState::Ready { library }
+                if !matches!(self.degraded, Some(ClientError::Unreachable(_))) =>
+            {
+                Some(library)
+            }
+            _ => None,
+        };
+        if online.is_some() == self.sync_online {
+            return;
+        }
+        self.sync_online = online.is_some();
+        if let Some(handle) = self.offline.get() {
+            handle.set_online(online);
+        }
+    }
+
+    /// While offline, tries the server again [`RECONNECT_EVERY`] after the last handshake, and
+    /// asks egui to wake up for it.
+    fn reconnect_when_due(&mut self) {
+        if !matches!(self.state, SessionState::Offline { .. }) || self.reconnecting {
+            return;
+        }
+        let since = self.last_handshake.elapsed();
+        if since >= RECONNECT_EVERY {
+            self.reconnect();
+        } else {
+            self.ctx.request_repaint_after(RECONNECT_EVERY - since);
+        }
     }
 
     /// Whether the library's contents may have changed since the last call, so the listing on
@@ -438,6 +561,11 @@ impl Session {
                 self.refetch_listing = true;
             }
             *library = info.clone();
+            if self.sync_online
+                && let Some(handle) = self.offline.get()
+            {
+                handle.set_online(Some(info));
+            }
         }
     }
 
@@ -471,21 +599,172 @@ impl Session {
     }
 }
 
+impl Drop for Session {
+    /// Stops the offline sync at once: it must not go on talking to a server the app left.
+    fn drop(&mut self) {
+        if let Some(handle) = self.offline.get() {
+            handle.stop();
+        }
+    }
+}
+
+/// The handshake job and what it opens, kept by the session to run it again when it
+/// reconnects. Runs on the worker.
+struct Handshake {
+    profile: ProfileId,
+    url: Url,
+    token: Token,
+    client: ClientInfo,
+    dirs: SessionDirs,
+    catalog: Option<Arc<dyn OfflineCatalog>>,
+    ctx: egui::Context,
+    gate: Arc<Mutex<Gate>>,
+    health: Health,
+    /// The worker's flag: set once the session is dropped.
+    cancelled: Arc<AtomicBool>,
+    cache: Arc<OnceLock<Arc<MediaCache>>>,
+    uploads: Arc<OnceLock<Uploads>>,
+    offline: Arc<OnceLock<OfflineHandle>>,
+}
+
+impl Handshake {
+    /// `server.info`, [`check_handshake`], then `library.info`; then opens what the library
+    /// needs and sets the gate. When the session is offline, a server that now serves another
+    /// library fails with [`ClientError::LibraryChanged`]: the saved copies are not its.
+    fn run(&self, rpc: Result<&RpcClient, ClientError>) -> Event {
+        let expected = match &*lock_gate(&self.gate) {
+            Gate::Offline { library } => Some(library.library_id.clone()),
+            _ => None,
+        };
+        let result = rpc
+            .and_then(|rpc| handshake(rpc, &self.client))
+            .and_then(|library| match expected {
+                Some(id) if id != library.library_id => Err(ClientError::LibraryChanged),
+                _ => Ok(library),
+            });
+        let (gate, event) = match result {
+            Ok(library) => {
+                self.connected(&library);
+                let gate = Gate::Open {
+                    library_id: library.library_id.clone(),
+                };
+                (gate, Event::Connected(Ok(library)))
+            }
+            Err(e @ ClientError::Unreachable(_)) => match self.known_library() {
+                Some(library) => {
+                    // Thumbnails come from the saved copies, then from the temporary cache.
+                    self.open_cache(&library.library_id);
+                    self.start_offline(&library.library_id);
+                    let gate = Gate::Offline {
+                        library: library.clone(),
+                    };
+                    (gate, Event::Offline(library))
+                }
+                None => (Gate::Closed(e.clone()), Event::Connected(Err(e))),
+            },
+            Err(e) => (Gate::Closed(e.clone()), Event::Connected(Err(e))),
+        };
+        *lock_gate(&self.gate) = gate;
+        event
+    }
+
+    /// After a successful handshake: the server answers, the library is recorded, and what
+    /// was not started yet (by an earlier handshake of this session) starts. Uploads start
+    /// only here: they need the server.
+    fn connected(&self, library: &LibraryInfo) {
+        *self.health.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.open_cache(&library.library_id);
+        if let (None, Some(root)) = (self.uploads.get(), &self.dirs.data) {
+            match queue_path(root, &library.library_id, &self.profile.to_string()) {
+                Some(path) => {
+                    let _ = self.uploads.set(Uploads::start(EngineConfig {
+                        url: self.url.clone(),
+                        token: self.token.clone(),
+                        app: self.client.app.clone(),
+                        ctx: self.ctx.clone(),
+                        gate: self.gate.clone(),
+                        health: self.health.clone(),
+                        cancelled: self.cancelled.clone(),
+                        path,
+                    }));
+                }
+                None => tracing::warn!("library or profile id is not a safe file name"),
+            }
+        }
+        if let (Some(root), Some(_)) = (&self.dirs.data, &self.catalog) {
+            if let Err(e) = KnownLibraries::new(root).record(self.profile, library) {
+                tracing::warn!("cannot record the library for offline use: {e}");
+            }
+            self.start_offline(&library.library_id);
+        }
+    }
+
+    /// Opens the library's thumbnail cache (and trims it), the first time its id is known.
+    fn open_cache(&self, library_id: &str) {
+        let (None, Some(root)) = (self.cache.get(), &self.dirs.cache) else {
+            return;
+        };
+        match MediaCache::open(root, library_id) {
+            Some(opened) => {
+                let opened = Arc::new(opened);
+                let _ = self.cache.set(opened.clone());
+                trim_in_background(opened, self.cancelled.clone());
+            }
+            None => tracing::warn!("library id is not a safe cache directory name"),
+        }
+    }
+
+    /// The library the profile was last connected to, if the session can work offline.
+    fn known_library(&self) -> Option<LibraryInfo> {
+        let (Some(root), Some(_)) = (&self.dirs.data, &self.catalog) else {
+            return None;
+        };
+        KnownLibraries::new(root).get(self.profile)
+    }
+
+    /// Starts the library's offline handle, the first time its id is known.
+    fn start_offline(&self, library_id: &str) {
+        let (Some(root), Some(catalog)) = (&self.dirs.data, &self.catalog) else {
+            return;
+        };
+        // A dropped session starts nothing: its `Drop` has already stopped what there was.
+        if self.offline.get().is_some() || self.cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(store) = OfflineStore::open(root, library_id) else {
+            tracing::warn!("library id is not a safe offline directory name");
+            return;
+        };
+        let _ = self.offline.set(OfflineHandle::start(
+            store,
+            catalog.clone(),
+            self.url.clone(),
+            self.token.clone(),
+            root.join("offline").join("settings.toml"),
+            self.ctx.clone(),
+        ));
+    }
+}
+
 pub(crate) fn lock_gate(gate: &Mutex<Gate>) -> std::sync::MutexGuard<'_, Gate> {
     gate.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Runs `request` only if the handshake let it through. A `library.info` naming another
 /// library closes the gate: this request and every later one fail with
-/// [`ClientError::LibraryChanged`], and `poll` moves the session to `Failed`.
+/// [`ClientError::LibraryChanged`], and `poll` moves the session to `Failed`. Offline, the
+/// saved copies answer (see [`answer_offline`]); a request that cannot reach the server is
+/// answered from them too, if they can.
 fn gated(
     gate: &Mutex<Gate>,
     health: &Mutex<Option<ClientError>>,
+    offline: &OnceLock<OfflineHandle>,
     rpc: Result<&RpcClient, ClientError>,
     request: Request,
 ) -> Result<Response, ClientError> {
     let library_id = match lock_gate(gate).clone() {
         Gate::Open { library_id } => library_id,
+        Gate::Offline { library } => return answer_offline(offline.get(), &request, library),
         Gate::Closed(e) => return Err(e),
         // With one worker thread the handshake always runs first; kept as a guard.
         Gate::Pending => {
@@ -494,8 +773,15 @@ fn gated(
             ));
         }
     };
+    // Kept only when the saved copies could answer it.
+    let fallback = offline.get().map(|handle| (handle, request.clone()));
     let response = run(rpc?, request);
     note_health(health, &response);
+    if let (Err(ClientError::Unreachable(_)), Some((handle, request))) = (&response, fallback)
+        && let Some(saved) = saved_answer(handle, &request)
+    {
+        return saved;
+    }
     let response = response?;
     if let Response::LibraryInfo(info) = &response
         && info.library_id != library_id
@@ -504,6 +790,34 @@ fn gated(
         return Err(ClientError::LibraryChanged);
     }
     Ok(response)
+}
+
+/// The answer to `request` while offline: `library.info` is the recorded `library`; the
+/// catalog answers the rest from the saved copies, and what it cannot answer is
+/// [`ClientError::NotSaved`], or [`ClientError::Offline`] for a change.
+fn answer_offline(
+    offline: Option<&OfflineHandle>,
+    request: &Request,
+    library: LibraryInfo,
+) -> Result<Response, ClientError> {
+    if let Request::LibraryInfo = request {
+        return Ok(Response::LibraryInfo(library));
+    }
+    offline
+        .and_then(|handle| saved_answer(handle, request))
+        .unwrap_or(Err(match request {
+            Request::MediaUpdate(_) | Request::LibraryRescan => ClientError::Offline,
+            _ => ClientError::NotSaved,
+        }))
+}
+
+/// The catalog's answer from the saved copies, once they are read.
+fn saved_answer(
+    handle: &OfflineHandle,
+    request: &Request,
+) -> Option<Result<Response, ClientError>> {
+    handle.wait_loaded();
+    handle.catalog().answer(request, &handle.docs())
 }
 
 /// Trims `cache` on a short-lived thread of its own: a big cache must not delay the session's

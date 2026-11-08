@@ -42,6 +42,8 @@ asteria-common-client-servers-error-library-changed = the server now serves a di
 asteria-common-client-servers-error-server = the server reported an error
 asteria-common-client-servers-error-protocol = the server's answer could not be understood
 asteria-common-client-servers-error-local = something went wrong on this device
+asteria-common-client-servers-error-not-saved = it is not saved for offline use
+asteria-common-client-servers-error-offline = it cannot be edited while offline
 
 # The server switcher in the status bar.
 asteria-common-client-status-none = No server
@@ -49,5 +51,7 @@ asteria-common-client-status-connected = Connected
 asteria-common-client-status-connecting = Connecting
 asteria-common-client-status-failed = Not connected: { $reason }
 asteria-common-client-status-degraded = Not responding: { $reason }
+asteria-common-client-status-offline = Offline (showing saved items)
 asteria-common-client-status-manage = Manage servers...
+asteria-common-client-status-reconnect = Reconnect
 asteria-common-client-status-hover = { $name }: { $status }

@@ -147,10 +147,26 @@ pub fn library_info(library_id: &str) -> Value {
     })
 }
 
+/// A local address nothing listens on (until a test serves on it).
+pub fn free_addr() -> SocketAddr {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+}
+
 /// Starts a stub HTTP/1.1 server on a free local port that answers every request with
 /// `handler`, one thread per connection. It runs until the test process ends.
 pub fn serve(handler: impl Fn(&StubRequest) -> StubResponse + Send + Sync + 'static) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    serve_at("127.0.0.1:0".parse().unwrap(), handler)
+}
+
+/// Like [`serve`], on `addr` (such as one taken from [`free_addr`]).
+pub fn serve_at(
+    addr: SocketAddr,
+    handler: impl Fn(&StubRequest) -> StubResponse + Send + Sync + 'static,
+) -> SocketAddr {
+    let listener = TcpListener::bind(addr).unwrap();
     let addr = listener.local_addr().unwrap();
     let handler = Arc::new(handler);
     std::thread::spawn(move || {

@@ -23,6 +23,8 @@ pub enum SwitcherAction {
     Switch(ProfileId),
     /// Open the servers settings.
     Manage,
+    /// Try the server again now: call [`Session::reconnect`]. Offered only while offline.
+    Reconnect,
 }
 
 impl ServerSwitcher<'_> {
@@ -64,6 +66,11 @@ impl ServerSwitcher<'_> {
                     tr!(ui, "asteria-common-client-status-connected"),
                 ),
             },
+            Some(SessionState::Offline { .. }) => (
+                icons::cloud_off(),
+                Swatch::Orange,
+                tr!(ui, "asteria-common-client-status-offline"),
+            ),
             Some(SessionState::Failed(e)) => {
                 let reason = error_text(ui.ctx(), e);
                 (
@@ -83,6 +90,10 @@ impl ServerSwitcher<'_> {
         } else {
             egui::Button::image_and_text(dot, name.as_str())
         };
+        let offline = matches!(
+            session.map(|s| s.state()),
+            Some(SessionState::Offline { .. })
+        );
         let active = profiles.active().map(|p| p.id);
         let servers: Vec<(ProfileId, String)> = profiles
             .servers
@@ -93,6 +104,13 @@ impl ServerSwitcher<'_> {
             egui::containers::menu::MenuButton::from_button(button.frame(false)).ui(ui, |ui| {
                 ui.strong(name.as_str());
                 ui.weak(status.as_str());
+                let reconnect = offline
+                    && ui
+                        .button(tr!(ui, "asteria-common-client-status-reconnect"))
+                        .clicked();
+                if reconnect {
+                    ui.close();
+                }
                 ui.separator();
                 let mut picked = None;
                 for (id, server) in &servers {
@@ -110,7 +128,7 @@ impl ServerSwitcher<'_> {
                 if manage {
                     ui.close();
                 }
-                (picked, manage)
+                (picked, manage, reconnect)
             });
         let mut hover = tr!(
             ui,
@@ -124,10 +142,11 @@ impl ServerSwitcher<'_> {
         }
         menu.0.on_hover_text(hover);
         let inner = menu.1?;
-        let (picked, manage) = inner.inner;
+        let (picked, manage, reconnect) = inner.inner;
         match picked {
             Some(id) => Some(SwitcherAction::Switch(id)),
             None if manage => Some(SwitcherAction::Manage),
+            None if reconnect => Some(SwitcherAction::Reconnect),
             None => None,
         }
     }
