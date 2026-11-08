@@ -7,8 +7,8 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
 use asteria_common_core::ids::LibraryId;
+use asteria_music_api::name_key;
 use asteria_music_api::{AlbumId, ArtistId, TrackTags};
-use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 /// The album artist of a compilation, spelt this way on the wire.
@@ -117,15 +117,6 @@ pub fn album_folder(rel: &str) -> &str {
     } else {
         dir
     }
-}
-
-/// The key two names are compared by: NFKC, lower case, trimmed.
-pub fn name_key(s: &str) -> String {
-    s.nfkc()
-        .collect::<String>()
-        .to_lowercase()
-        .trim()
-        .to_owned()
 }
 
 fn album_id(library: &LibraryId, folder: &str, title_key: &str) -> AlbumId {

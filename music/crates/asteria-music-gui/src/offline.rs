@@ -6,7 +6,7 @@ use asteria_common_client::session::{Request, Response};
 use asteria_music_api::{
     ALBUM_GET, ALBUM_LIST, ARTIST_GET, ARTIST_LIST, Album, AlbumListing, AlbumSummary, Artist,
     ArtistListing, ArtistSummary, MusicTrack, PLAYLIST_GET, PLAYLIST_LIST, Playlist,
-    PlaylistListing, PlaylistSummary,
+    PlaylistListing, PlaylistSummary, name_key,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -40,15 +40,9 @@ const RPC_NOT_FOUND: i32 = -32001;
 /// The music app's [`OfflineCatalog`]: albums, artists and playlists.
 pub struct MusicCatalog;
 
-fn get<T: DeserializeOwned>(
-    rpc: &mut dyn Fetch,
-    method: &str,
-    id: &str,
-) -> Result<(T, serde_json::Value), ClientError> {
+fn get<T: DeserializeOwned>(rpc: &mut dyn Fetch, method: &str, id: &str) -> Result<T, ClientError> {
     let value = rpc.call(method, serde_json::json!({ "id": id }))?;
-    let typed = serde_json::from_value(value.clone())
-        .map_err(|e| ClientError::Protocol(format!("{method}: {e}")))?;
-    Ok((typed, value))
+    serde_json::from_value(value).map_err(|e| ClientError::Protocol(format!("{method}: {e}")))
 }
 
 fn is_not_found(e: &ClientError) -> bool {
@@ -73,9 +67,12 @@ fn doc(kind: &str, id: String, value: &impl Serialize) -> Result<Doc, ClientErro
 
 /// `album` cut down to the tracks `artist` appears on.
 fn part_of(mut album: Album, artist: &str) -> Album {
+    // The server's own rule for who is on a track.
+    let key = name_key(artist);
     album
         .tracks
-        .retain(|t| t.tags.artists.iter().any(|a| a == artist));
+        .retain(|t| t.tags.artists.iter().any(|a| name_key(a) == key));
+    album.summary.track_count = album.tracks.len() as u32;
     album
 }
 
@@ -101,23 +98,23 @@ impl OfflineCatalog for MusicCatalog {
     fn fetch(&self, pin: &PinTarget, rpc: &mut dyn Fetch) -> Result<Vec<Doc>, ClientError> {
         match pin.kind.as_str() {
             PIN_ALBUM => {
-                let (album, _): (Album, _) = get(rpc, ALBUM_GET, &pin.id)?;
+                let album: Album = get(rpc, ALBUM_GET, &pin.id)?;
                 Ok(vec![doc(DOC_ALBUM, pin.id.clone(), &album)?])
             }
             PIN_ARTIST => {
-                let (artist, _): (Artist, _) = get(rpc, ARTIST_GET, &pin.id)?;
+                let artist: Artist = get(rpc, ARTIST_GET, &pin.id)?;
                 let mut docs = Vec::new();
                 for summary in &artist.albums {
                     // An album that vanished since the listing is left out; the artist stays.
                     match get::<Album>(rpc, ALBUM_GET, &summary.id.0) {
-                        Ok((album, _)) => docs.push(doc(DOC_ALBUM, summary.id.0.clone(), &album)?),
+                        Ok(album) => docs.push(doc(DOC_ALBUM, summary.id.0.clone(), &album)?),
                         Err(e) if is_not_found(&e) => {}
                         Err(e) => return Err(e),
                     }
                 }
                 for summary in &artist.appears_on {
                     match get::<Album>(rpc, ALBUM_GET, &summary.id.0) {
-                        Ok((album, _)) => {
+                        Ok(album) => {
                             let id = format!("{}\n{}", summary.id.0, pin.id);
                             let part = part_of(album, &artist.summary.name);
                             docs.push(doc(DOC_ALBUM_PART, id, &part)?);
@@ -131,7 +128,7 @@ impl OfflineCatalog for MusicCatalog {
             }
             PIN_PLAYLIST => {
                 // A playlist cut short is kept as it came.
-                let (playlist, _): (Playlist, _) = get(rpc, PLAYLIST_GET, &pin.id)?;
+                let playlist: Playlist = get(rpc, PLAYLIST_GET, &pin.id)?;
                 Ok(vec![doc(DOC_PLAYLIST, pin.id.clone(), &playlist)?])
             }
             other => Err(ClientError::Protocol(format!("unknown pin kind {other}"))),
@@ -144,12 +141,6 @@ impl OfflineCatalog for MusicCatalog {
             DOC_ALBUM | DOC_ALBUM_PART => {
                 if let Ok(album) = serde_json::from_value::<Album>(doc.value.clone()) {
                     for track in &album.tracks {
-                        track_media(track, &mut out);
-                    }
-                    // The cover is one of the tracks' own thumbs: the same key as above.
-                    if let Some(cover) = &album.summary.cover_item
-                        && let Some(track) = album.tracks.iter().find(|t| &t.item.id == cover)
-                    {
                         track_media(track, &mut out);
                     }
                 }
@@ -523,6 +514,24 @@ mod tests {
         let v = answer(&docs, ALBUM_LIST, json!({"cursor": "c", "limit": 50})).unwrap();
         let listing: AlbumListing = serde_json::from_value(v).unwrap();
         assert!(listing.albums.is_empty());
+    }
+
+    #[test]
+    fn an_artist_part_matches_names_the_way_the_server_groups_them() {
+        let guest = album(
+            "guest",
+            "Guest",
+            None,
+            vec![
+                track("g1", Some("h1"), &["ann"], None),
+                track("g2", Some("h2"), &["\u{ff21}\u{ff4e}\u{ff4e}"], None),
+                track("g3", Some("h3"), &["Ann "], None),
+                track("g4", Some("h4"), &["Bob"], None),
+            ],
+        );
+        let part = part_of(guest, "Ann");
+        assert_eq!(part.tracks.len(), 3);
+        assert_eq!(part.summary.track_count, 3);
     }
 
     #[test]

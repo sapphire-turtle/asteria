@@ -1,6 +1,7 @@
 //! Wire types shared between the asteria-music server and its clients.
 
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 pub use asteria_common_api::*;
 
@@ -15,6 +16,16 @@ pub fn client_info() -> ClientInfo {
         app: APP.into(),
         app_api: APP_API,
     }
+}
+
+/// The key two names are compared by: NFKC, lower case, trimmed. The server groups artists
+/// by it, so a client that groups them again must use it too.
+pub fn name_key(s: &str) -> String {
+    s.nfkc()
+        .collect::<String>()
+        .to_lowercase()
+        .trim()
+        .to_owned()
 }
 
 /// Method name of `album.list`.

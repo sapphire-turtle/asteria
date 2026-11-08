@@ -470,6 +470,7 @@ dependencies = [
  "asteria-common-api",
  "serde",
  "serde_json",
+ "unicode-normalization",
 ]
 
 [[package]]
