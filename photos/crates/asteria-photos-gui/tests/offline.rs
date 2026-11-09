@@ -10,9 +10,13 @@ use asteria_common_client::profiles::Profiles;
 use asteria_common_client::session::SessionState;
 use asteria_photos_gui::PhotosApp;
 use asteria_photos_gui::offline::PIN_FOLDER;
+use std::sync::{Arc, Mutex};
+
 use corundum_framework::egui;
 
-use support::common::free_addr;
+use support::common::{
+    StubRequest, StubResponse, free_addr, library_info, photos_server_info, serve,
+};
 use support::server::{TestServer, red_jpg};
 use support::*;
 
@@ -212,4 +216,78 @@ fn an_item_not_saved_does_not_open_offline() {
     open_in_viewer(&ctx, &mut app, &broken.id);
     frame(&ctx, &mut app);
     assert_eq!(app.opened_item(), None);
+}
+
+/// A server older than `offline-image`: it lists `p1`, `p2` and `p3` and serves only their
+/// `preview` (404 for every other picture). Returns its address and the media paths asked.
+fn server_without_offline_image() -> (std::net::SocketAddr, Arc<Mutex<Vec<String>>>) {
+    let webp = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../crates/asteria-common-core/tests/fixtures/red.webp"),
+    )
+    .unwrap();
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let log = asked.clone();
+    let addr = serve(move |req: &StubRequest| {
+        if let Some((id, method)) = req.rpc() {
+            return match method.as_str() {
+                "server.info" => StubResponse::rpc_result(id, photos_server_info()),
+                "library.info" => StubResponse::rpc_result(id, library_info("old-lib")),
+                "folder.list" => StubResponse::rpc_result(id, listing(&[], &["p1", "p2", "p3"])),
+                _ => StubResponse::new(404, Vec::new()),
+            };
+        }
+        log.lock().unwrap().push(req.path.clone());
+        if req.path.ends_with("/preview") {
+            StubResponse::new(200, webp.clone()).header("content-type", "image/webp")
+        } else {
+            StubResponse::new(404, Vec::new())
+        }
+    });
+    (addr, asked)
+}
+
+#[test]
+fn low_quality_against_an_older_server_shows_preview() {
+    let (addr, asked) = server_without_offline_image();
+    let (fx, _) = fixture(&[("old", addr)], 0);
+    let ctx = egui::Context::default();
+    let mut app = PhotosApp::new(fx.paths.clone(), &ctx);
+    run_until(
+        &ctx,
+        &mut app,
+        "the listing",
+        |_| {},
+        |a| item_ids(a).len() == 3,
+    );
+    app.set_low_quality(true);
+    let id = |i: &str| ItemId(i.into());
+    open_in_viewer(&ctx, &mut app, &id("p1"));
+    assert_eq!(app.opened_item(), Some(&id("p1")));
+    run_until(
+        &ctx,
+        &mut app,
+        "the preview of p1",
+        |_| {},
+        |_| has_texture(&ctx, "asteria-media/p1/preview"),
+    );
+    assert!(!has_texture(&ctx, "asteria-media/p1/offline-image"));
+    // The next photos go to preview at once: the server's lack is remembered.
+    frame_with(&ctx, &mut app, vec![key(egui::Key::ArrowRight)]);
+    assert_eq!(app.opened_item(), Some(&id("p2")));
+    run_until(
+        &ctx,
+        &mut app,
+        "the previews of p2 and p3",
+        |_| {},
+        |_| {
+            has_texture(&ctx, "asteria-media/p2/preview")
+                && has_texture(&ctx, "asteria-media/p3/preview")
+        },
+    );
+    let asked = asked.lock().unwrap();
+    assert!(
+        !asked.iter().any(|p| p == "/media/p3/offline-image"),
+        "{asked:?}"
+    );
 }

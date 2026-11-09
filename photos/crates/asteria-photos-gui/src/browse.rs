@@ -27,7 +27,7 @@ use corundum_framework::egui;
 use corundum_framework::gui::{icons, tr};
 
 use crate::detail::{DetailView, Edit, Edits};
-use crate::display::{DisplaySettings, display_preset};
+use crate::display::{DisplayPreset, DisplaySettings};
 use crate::offline::PIN_FOLDER;
 
 /// Items asked for per `folder.list` page.
@@ -71,6 +71,8 @@ pub struct BrowseState {
     /// The `library.info` waited for.
     info: Option<RequestId>,
     next_info: Instant,
+    /// The preset of the viewer and the detail pane.
+    pub(crate) display: DisplayPreset,
 }
 
 impl Default for BrowseState {
@@ -94,6 +96,7 @@ impl BrowseState {
             edits: Edits::default(),
             info: None,
             next_info: Instant::now() + IDLE_POLL,
+            display: DisplayPreset::default(),
         }
     }
 
@@ -461,7 +464,7 @@ impl BrowseState {
             ui.weak(tr!(ui, "asteria-photos-detail-none"));
             return;
         };
-        let preset = display_preset(session, display);
+        let preset = self.display.of(session, display, item);
         let openable = Openable::of(session).open(item);
         if crate::detail::ui(ui, item, &mut self.edits, session, preset, openable) {
             self.opened = Some(item.id.clone());

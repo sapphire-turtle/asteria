@@ -3,7 +3,8 @@
 //! Left and Right move to the previous and next item of the listing (the selection follows,
 //! and the next page is fetched near the end); Esc closes it. Videos show their still
 //! preview only: playback is for a later plan. It draws the `preview` preset (`offline-image`
-//! when offline or set to show in low quality, see [`display_preset`]), and asks for the
+//! when offline or set to show in low quality, see
+//! [`DisplayPreset`](crate::display::DisplayPreset)), and asks for the
 //! neighbours' too so a step shows at once: three images, well within the loader's budget of
 //! eight.
 
@@ -16,7 +17,7 @@ use corundum_framework::gui::{icons, tr};
 
 use crate::browse::BrowseState;
 use crate::detail::fit;
-use crate::display::{DisplaySettings, display_preset};
+use crate::display::DisplaySettings;
 
 /// What the person asked of the viewer, besides moving in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,8 +59,8 @@ pub(crate) fn ui(
         return Asked::Nothing;
     };
     let total = browse.items().len();
-    let preset = display_preset(session, display);
     let item = browse.items()[index].clone();
+    let preset = browse.display.of(session, display, &item);
     let mut asked = Asked::Nothing;
     let mut step = 0;
     let fill = ui.visuals().extreme_bg_color;

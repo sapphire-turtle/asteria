@@ -6,7 +6,9 @@
 use std::io::Write;
 use std::path::Path;
 
-use asteria_common_client::images::Preset;
+use asteria_common_api::MediaItem;
+use asteria_common_client::images::{ImageState, Preset};
+use asteria_common_client::rpc::ClientError;
 use asteria_common_client::session::Session;
 use corundum_framework::egui;
 use corundum_framework::gui::settings::SettingsSection;
@@ -65,13 +67,37 @@ impl DisplaySettings {
     }
 }
 
-/// The preset the viewer and the detail pane draw: `offline-image` when the setting asks for
-/// it or the session is offline (only that one is saved), `preview` otherwise.
-pub(crate) fn display_preset(session: &Session, settings: &DisplaySettings) -> Preset {
-    if settings.low_quality || session.is_offline() {
+/// Which preset the viewer and the detail pane draw, for one session: it remembers whether
+/// the server turned out not to know `offline-image` (an older one answers 404).
+#[derive(Debug, Default)]
+pub(crate) struct DisplayPreset {
+    lacks_offline_image: bool,
+}
+
+impl DisplayPreset {
+    /// `offline-image` when the session is offline (only that one is saved) or the setting
+    /// asks for it, `preview` otherwise. Online, if the server answers `offline-image` of
+    /// `item` with not found, `preview` instead, for it and every later item.
+    pub(crate) fn of(
+        &mut self,
+        session: &mut Session,
+        settings: &DisplaySettings,
+        item: &MediaItem,
+    ) -> Preset {
+        if session.is_offline() {
+            return Preset::OfflineImage;
+        }
+        if !settings.low_quality || self.lacks_offline_image {
+            return Preset::Preview;
+        }
+        if let ImageState::Failed(ClientError::NotFound) =
+            session.images().request(item, Preset::OfflineImage)
+        {
+            tracing::info!("the server has no offline-image; showing preview instead");
+            self.lacks_offline_image = true;
+            return Preset::Preview;
+        }
         Preset::OfflineImage
-    } else {
-        Preset::Preview
     }
 }
 
