@@ -5,13 +5,17 @@ mod common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use asteria_common_api::ItemId;
 use asteria_common_client::offline::{
-    DEFAULT_LIMIT_BYTES, OfflineHandle, OfflineStore, PinStatus, SyncPhase,
+    DEFAULT_LIMIT_BYTES, Doc, Docs, Fetch, MediaKey, OfflineCatalog, OfflineHandle, OfflineStore,
+    PinStatus, PinTarget, SyncPhase,
 };
 use asteria_common_client::profiles::Token;
+use asteria_common_client::rpc::ClientError;
+use asteria_common_client::session::{Request, Response};
 use corundum_framework::egui;
 
 use common::offline::{
@@ -38,9 +42,13 @@ impl Fixture {
 
     /// A handle on the library `lib1`, offline until `set_online` is called.
     fn handle(&self) -> OfflineHandle {
+        self.handle_with(Arc::new(FakeCatalog))
+    }
+
+    fn handle_with(&self, catalog: Arc<dyn OfflineCatalog>) -> OfflineHandle {
         OfflineHandle::start(
             OfflineStore::open(self.dir.path(), "lib1").unwrap(),
-            Arc::new(FakeCatalog),
+            catalog,
             self.server.url(),
             Token::new("t"),
             self.settings(),
@@ -456,4 +464,70 @@ fn unpinning_past_a_full_sync_downloads_what_now_fits() {
     h.unpin("set", "s1");
     wait_for("c saved", || idle(&h) && has(&h, "c"));
     assert!(!has(&h, "a"));
+}
+
+/// [`FakeCatalog`], counting its `media_of` calls.
+#[derive(Default)]
+struct CountingCatalog {
+    media_of_calls: AtomicUsize,
+}
+
+impl OfflineCatalog for CountingCatalog {
+    fn fetch(&self, pin: &PinTarget, rpc: &mut dyn Fetch) -> Result<Vec<Doc>, ClientError> {
+        FakeCatalog.fetch(pin, rpc)
+    }
+
+    fn media_of(&self, doc: &Doc) -> Vec<MediaKey> {
+        self.media_of_calls.fetch_add(1, Ordering::Relaxed);
+        FakeCatalog.media_of(doc)
+    }
+
+    fn answer(&self, request: &Request, docs: &Docs) -> Option<Result<Response, ClientError>> {
+        FakeCatalog.answer(request, docs)
+    }
+}
+
+#[test]
+fn pin_info_does_not_read_the_documents_again() {
+    let f = Fixture::new();
+    f.server.set("s1", &["a", "b"]);
+    let catalog = Arc::new(CountingCatalog::default());
+    let h = f.handle_with(catalog.clone());
+    h.set_online(Some(&library(1)));
+    pin_and_wait(&h, "s1", &["a", "b"]);
+    let calls = catalog.media_of_calls.load(Ordering::Relaxed);
+    for _ in 0..10 {
+        let info = h.pin_info("set", "s1").unwrap();
+        assert_eq!(
+            (info.estimate, info.bytes),
+            (Some(2 * ESTIMATE), 2 * ESTIMATE)
+        );
+        assert_eq!(h.pins(), vec![info]);
+    }
+    assert_eq!(catalog.media_of_calls.load(Ordering::Relaxed), calls);
+}
+
+#[test]
+fn pin_info_follows_unpinning_and_clearing() {
+    let f = Fixture::new();
+    f.server.set("s1", &["a", "shared"]);
+    f.server.set("s2", &["b", "shared"]);
+    let h = f.handle();
+    h.set_online(Some(&library(1)));
+    pin_and_wait(&h, "s1", &["a", "shared"]);
+    pin_and_wait(&h, "s2", &["b", "shared"]);
+    let bytes = |set: &str| h.pin_info("set", set).map(|i| (i.bytes, i.estimate));
+    assert_eq!(bytes("s2"), Some((2 * ESTIMATE, Some(2 * ESTIMATE))));
+    h.unpin("set", "s1");
+    wait_for("a removed", || !has(&h, "a"));
+    assert_eq!(bytes("s1"), None);
+    assert_eq!(bytes("s2"), Some((2 * ESTIMATE, Some(2 * ESTIMATE))));
+    h.clear_all();
+    assert_eq!(bytes("s2"), None);
+    wait_for("cleared", || idle(&h) && !has(&h, "b"));
+    h.pin(set_pin("s2"));
+    wait_for("s2 saved again", || {
+        saved(&h, "s2") && idle(&h) && has(&h, "b") && has(&h, "shared")
+    });
+    assert_eq!(bytes("s2"), Some((2 * ESTIMATE, Some(2 * ESTIMATE))));
 }

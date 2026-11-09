@@ -57,7 +57,7 @@ pub struct SyncProgress {
 pub struct PinInfo {
     pub pin: Pin,
     /// The stored media the pin's documents point to (a file shared with other pins counts
-    /// for each).
+    /// for each). While a sync downloads, it may lag a few files behind.
     pub bytes: u64,
     /// The estimated size of all of the pin's media; `None` until its answers are fetched.
     pub estimate: Option<u64>,
@@ -83,6 +83,15 @@ enum Command {
 /// A stored media file: `(file_hash, preset)`.
 type MediaId = (String, String);
 
+/// The media one pin's documents point to, each once.
+struct PinMedia {
+    ids: Vec<MediaId>,
+    estimate: u64,
+}
+
+/// How many downloads go by between two measures of the pins' stored bytes.
+const MEASURE_EVERY: u32 = 32;
+
 struct State {
     /// In the order added.
     pins: Vec<Pin>,
@@ -91,6 +100,12 @@ struct State {
     docs: Arc<Docs>,
     /// The size of each stored file a document points to.
     stored: HashMap<MediaId, u64>,
+    /// The media of each pin whose answers are saved, worked out on the control thread
+    /// whenever the copies change, so [`OfflineHandle::pin_info`] need not.
+    pin_media: Arc<HashMap<DocKey, PinMedia>>,
+    /// The stored bytes of each pin in `pin_media`, measured whenever `stored` changes (during
+    /// the downloads, every [`MEASURE_EVERY`] files).
+    pin_bytes: HashMap<DocKey, u64>,
     phase: SyncPhase,
     unsavable: u32,
     used_bytes: u64,
@@ -190,6 +205,8 @@ impl OfflineHandle {
             pin_docs: HashMap::new(),
             docs: Arc::default(),
             stored: HashMap::new(),
+            pin_media: Arc::default(),
+            pin_bytes: HashMap::new(),
             phase: SyncPhase::Idle,
             unsavable: 0,
             used_bytes: 0,
@@ -287,15 +304,15 @@ impl OfflineHandle {
         find(&s.pins, kind, id).map(|p| p.status)
     }
 
-    /// Every pin, in the order added.
+    /// Every pin, in the order added. Cheap: the sizes are worked out when the copies change.
     pub fn pins(&self) -> Vec<PinInfo> {
         let s = self.shared().lock();
-        s.pins.iter().map(|p| self.shared().info(&s, p)).collect()
+        s.pins.iter().map(|p| info(&s, p)).collect()
     }
 
     pub fn pin_info(&self, kind: &str, id: &str) -> Option<PinInfo> {
         let s = self.shared().lock();
-        find(&s.pins, kind, id).map(|p| self.shared().info(&s, p))
+        find(&s.pins, kind, id).map(|p| info(&s, p))
     }
 
     pub fn progress(&self) -> SyncProgress {
@@ -321,6 +338,8 @@ impl OfflineHandle {
             s.pin_docs.clear();
             s.docs = Arc::default();
             s.stored.clear();
+            s.pin_media = Arc::default();
+            s.pin_bytes.clear();
             s.mark = SyncMark::default();
             s.pending = None;
             self.shared().interrupt.store(true, Ordering::Release);
@@ -467,6 +486,28 @@ impl Drop for Inner {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+fn info(s: &State, pin: &Pin) -> PinInfo {
+    let key = (pin.target.kind.clone(), pin.target.id.clone());
+    PinInfo {
+        pin: pin.clone(),
+        bytes: s.pin_bytes.get(&key).copied().unwrap_or(0),
+        estimate: s.pin_media.get(&key).map(|m| m.estimate),
+    }
+}
+
+/// Measures the stored bytes of each pin in `s.pin_media` (a file shared with other pins
+/// counts for each).
+fn measure(s: &mut State) {
+    s.pin_bytes = s
+        .pin_media
+        .iter()
+        .map(|(key, media)| {
+            let bytes = media.ids.iter().filter_map(|id| s.stored.get(id)).sum();
+            (key.clone(), bytes)
+        })
+        .collect();
 }
 
 fn find<'a>(pins: &'a [Pin], kind: &str, id: &str) -> Option<&'a Pin> {
@@ -667,26 +708,33 @@ impl Shared {
         }
     }
 
-    fn info(&self, s: &State, pin: &Pin) -> PinInfo {
-        let key = (pin.target.kind.clone(), pin.target.id.clone());
-        let estimate = s.pin_docs.get(&key).map(|refs| {
-            let mut seen = HashSet::new();
-            let (mut bytes, mut estimate) = (0, 0);
-            for media in self.media_of_refs(&s.docs, refs) {
-                let id = (media.file_hash, media.preset);
-                if !seen.contains(&id) {
-                    bytes += s.stored.get(&id).copied().unwrap_or(0);
-                    estimate += media.estimate;
-                    seen.insert(id);
+    /// Works out each saved pin's media from the copies (off the lock: for some apps it
+    /// decodes every document), then measures them. On the control thread.
+    fn index_pins(&self) {
+        let (docs, pin_docs) = {
+            let s = self.lock();
+            (s.docs.clone(), s.pin_docs.clone())
+        };
+        let index: HashMap<DocKey, PinMedia> = pin_docs
+            .iter()
+            .map(|(key, refs)| {
+                let mut seen = HashSet::new();
+                let mut estimate = 0;
+                let mut ids = Vec::new();
+                for media in self.media_of_refs(&docs, refs) {
+                    let id = (media.file_hash, media.preset);
+                    if seen.insert(id.clone()) {
+                        estimate += media.estimate;
+                        ids.push(id);
+                    }
                 }
-            }
-            (bytes, estimate)
+                (key.clone(), PinMedia { ids, estimate })
+            })
+            .collect();
+        self.update(|s| {
+            s.pin_media = Arc::new(index);
+            measure(s);
         });
-        PinInfo {
-            pin: pin.clone(),
-            bytes: estimate.map_or(0, |(b, _)| b),
-            estimate: estimate.map(|(_, e)| e),
-        }
     }
 
     /// The media the documents `refs` point to (repeats included).
@@ -734,8 +782,9 @@ impl Shared {
             s.stored = stored;
             s.pin_docs = pin_docs;
             s.used_bytes = used;
-            s.loaded = true;
         });
+        self.index_pins();
+        self.lock().loaded = true;
         self.wake.notify_all();
     }
 
@@ -772,6 +821,7 @@ impl Shared {
             s.stored.retain(|id, _| keep.contains(id));
             s.used_bytes = used;
         });
+        self.index_pins();
         Ok(())
     }
 
@@ -783,6 +833,8 @@ impl Shared {
             s.pin_docs.clear();
             s.docs = Arc::default();
             s.stored.clear();
+            s.pin_media = Arc::default();
+            s.pin_bytes.clear();
             s.used_bytes = 0;
             s.unsavable = 0;
             s.phase = SyncPhase::Idle;
@@ -851,6 +903,7 @@ impl Shared {
             tracing::warn!("offline sync: {reason}");
         }
         self.update(|s| {
+            measure(s);
             if s.pending.as_ref() == Some(&mark) {
                 s.pending = None;
             }
@@ -959,6 +1012,7 @@ impl Shared {
         // New copies answer at once, while the media download.
         let docs = self.read_docs();
         self.update(|s| s.docs = docs.clone());
+        self.index_pins();
         if let Some(end) = stopped_by {
             return end;
         }
@@ -985,6 +1039,7 @@ impl Shared {
         let total = u32::try_from(needed.len()).unwrap_or(u32::MAX);
         self.update(|s| {
             s.stored.extend(found);
+            measure(s);
             s.phase = SyncPhase::Syncing { done: 0, total };
         });
 
@@ -1110,7 +1165,12 @@ impl Shared {
                 Ok(_) => {
                     jobs.done += 1;
                     let (done, total) = (jobs.done, downloads.total);
-                    self.update(|s| s.phase = SyncPhase::Syncing { done, total });
+                    self.update(|s| {
+                        if done % MEASURE_EVERY == 0 {
+                            measure(s);
+                        }
+                        s.phase = SyncPhase::Syncing { done, total };
+                    });
                 }
                 Err(Fatal(reason)) => {
                     jobs.fatal.get_or_insert(reason);
