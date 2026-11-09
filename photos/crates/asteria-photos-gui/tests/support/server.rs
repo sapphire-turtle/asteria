@@ -44,6 +44,16 @@ impl TestServer {
     /// A library holding a copy of a small JPEG under each of `files`; `prepare` may then
     /// change the folder (break a sidecar, say) before the scan.
     pub fn start(files: &[&str], prepare: impl FnOnce(&Path)) -> TestServer {
+        TestServer::start_with(files, prepare, true)
+    }
+
+    /// As [`start`](Self::start), but with no image tool: what the in-process decoder cannot
+    /// read is refused at once (422) instead of handed to `vipsthumbnail`.
+    pub fn start_without_tools(files: &[&str], prepare: impl FnOnce(&Path)) -> TestServer {
+        TestServer::start_with(files, prepare, false)
+    }
+
+    fn start_with(files: &[&str], prepare: impl FnOnce(&Path), tools: bool) -> TestServer {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         std::fs::create_dir(&root).unwrap();
@@ -74,11 +84,13 @@ impl TestServer {
             .1
             .expose()
             .to_owned();
-        let processor = Arc::new(Processor::new(
-            dir.path().join("cache/thumbs"),
-            1,
-            Duration::from_secs(60),
-        ));
+        let thumbs = dir.path().join("cache/thumbs");
+        let processor = Arc::new(if tools {
+            Processor::new(thumbs, 1, Duration::from_secs(60))
+        } else {
+            let missing = dir.path().join("no-such-tool");
+            Processor::with_tools(thumbs, 1, Duration::from_secs(60), &missing, &missing)
+        });
         let uploads = Arc::new(UploadStore::open(lib.state_dir().unwrap()).unwrap());
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)

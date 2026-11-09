@@ -16,13 +16,17 @@ use support::common::free_addr;
 use support::server::{TestServer, red_jpg};
 use support::*;
 
-/// A library with `top.jpg` at the root and `Inbox/a.jpg`, plus `Inbox/broken.jpg`, which
-/// the server cannot render (so it is never saved).
-fn library() -> TestServer {
-    TestServer::start(&["top.jpg"], |root| {
+/// A library with `top.jpg` at the root and `Inbox/a.jpg`; with `broken`, also
+/// `Inbox/broken.jpg`, which the server cannot render (so it is never saved). The server has
+/// no image tool: the pictures decode in-process, and the broken one is refused at once rather
+/// than handed to a subprocess, which a busy machine can make slow.
+fn library(broken: bool) -> TestServer {
+    TestServer::start_without_tools(&["top.jpg"], |root| {
         std::fs::create_dir(root.join("Inbox")).unwrap();
         std::fs::copy(red_jpg(), root.join("Inbox/a.jpg")).unwrap();
-        std::fs::write(root.join("Inbox/broken.jpg"), b"not a picture").unwrap();
+        if broken {
+            std::fs::write(root.join("Inbox/broken.jpg"), b"not a picture").unwrap();
+        }
     })
 }
 
@@ -71,6 +75,9 @@ fn save_inbox_then_lose_the_server(server: TestServer) -> (Fixture, MediaItem) {
         if status == Some(PinStatus::Saved) && phase == SyncPhase::Idle && stored == (true, true) {
             break;
         }
+        if let SyncPhase::Failed(why) = &phase {
+            panic!("the sync of Inbox failed: {why}");
+        }
         assert!(
             start.elapsed() < support::common::DEADLINE,
             "Inbox was never saved: {status:?}, {phase:?}, stored (thumb, image) {stored:?}"
@@ -88,10 +95,15 @@ fn save_inbox_then_lose_the_server(server: TestServer) -> (Fixture, MediaItem) {
     (fx, item)
 }
 
-/// The app on `fx`, once its session has gone offline.
+/// The app on `fx`, once its session has gone offline. It keeps no thumbnail cache, so every
+/// image it shows comes from the copies saved for offline.
 fn open_offline(fx: &Fixture) -> (egui::Context, PhotosApp) {
     let ctx = egui::Context::default();
-    let mut app = PhotosApp::new(fx.paths.clone(), &ctx);
+    let paths = asteria_photos_gui::AppPaths {
+        cache: None,
+        ..fx.paths.clone()
+    };
+    let mut app = PhotosApp::new(paths, &ctx);
     run_until(
         &ctx,
         &mut app,
@@ -120,7 +132,7 @@ fn texture(item: &MediaItem, preset: &str) -> String {
 
 #[test]
 fn a_saved_folder_opens_with_the_server_gone() {
-    let (fx, item) = save_inbox_then_lose_the_server(library());
+    let (fx, item) = save_inbox_then_lose_the_server(library(false));
     let (ctx, mut app) = open_offline(&fx);
     // The root is not saved, but leads down to what is.
     run_until(
@@ -146,7 +158,7 @@ fn a_saved_folder_opens_with_the_server_gone() {
 
 #[test]
 fn low_quality_shows_offline_image() {
-    let server = library();
+    let server = library(false);
     let (fx, _) = fixture_with_tokens(&[("real", server.addr, &server.token)], 0);
     let ctx = egui::Context::default();
     let mut app = PhotosApp::new(fx.paths.clone(), &ctx);
@@ -176,7 +188,7 @@ fn low_quality_shows_offline_image() {
 
 #[test]
 fn offline_shows_offline_image_even_with_the_setting_off() {
-    let (fx, item) = save_inbox_then_lose_the_server(library());
+    let (fx, item) = save_inbox_then_lose_the_server(library(false));
     let (ctx, mut app) = open_offline(&fx);
     assert!(!app.display_settings().low_quality);
     open_and_find(&ctx, &mut app, "Inbox", "Inbox/a.jpg");
@@ -194,7 +206,7 @@ fn offline_shows_offline_image_even_with_the_setting_off() {
 
 #[test]
 fn an_item_not_saved_does_not_open_offline() {
-    let (fx, _) = save_inbox_then_lose_the_server(library());
+    let (fx, _) = save_inbox_then_lose_the_server(library(true));
     let (ctx, mut app) = open_offline(&fx);
     let broken = open_and_find(&ctx, &mut app, "Inbox", "Inbox/broken.jpg");
     open_in_viewer(&ctx, &mut app, &broken.id);
