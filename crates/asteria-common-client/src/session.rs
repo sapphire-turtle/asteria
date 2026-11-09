@@ -423,7 +423,8 @@ impl Session {
     /// what it cannot answer fails with [`ClientError::NotSaved`], or with
     /// [`ClientError::Offline`] for a change (`media.update`, `library.rescan`).
     /// `library.info` answers with the recorded library. While connected, a request that
-    /// cannot reach the server is answered from the saved copies if the catalog can.
+    /// cannot reach the server is answered from the saved copies if the catalog can, unless
+    /// it asks for a later page (it carries a `cursor`).
     pub fn request(&mut self, request: Request) -> RequestId {
         let id = RequestId(self.next_request);
         self.next_request += 1;
@@ -492,11 +493,19 @@ impl Session {
         // Lets image requests through (or fails them) once the handshake has settled.
         self.images.poll();
         // Read after the replies: the worker records a request's outcome before sending it.
-        self.degraded = self
+        let health = self
             .health
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        // The server answers again: what is on screen may have come from the saved copies.
+        if matches!(self.state, SessionState::Ready { .. })
+            && matches!(self.degraded, Some(ClientError::Unreachable(_)))
+            && health.is_none()
+        {
+            self.refetch_listing = true;
+        }
+        self.degraded = health;
         self.tell_sync();
         self.reconnect_when_due();
         replies
@@ -544,7 +553,9 @@ impl Session {
     /// screen should be fetched again. Clears the mark. A `library.info` answer raises it when
     /// its epoch moved (the server rebuilt its cache), when a scan ended, or when, with no scan
     /// before or now, the item count or the revision changed (the server's watcher found
-    /// changes, or a write went through).
+    /// changes, or a write went through). Coming back from offline raises it too, as does the
+    /// server answering again after [`degraded`](Self::degraded) was
+    /// [`ClientError::Unreachable`]: what is on screen came from the saved copies.
     pub fn take_refetch_listing(&mut self) -> bool {
         std::mem::take(&mut self.refetch_listing)
     }
@@ -773,8 +784,12 @@ fn gated(
             ));
         }
     };
-    // Kept only when the saved copies could answer it.
-    let fallback = offline.get().map(|handle| (handle, request.clone()));
+    // Kept only when the saved copies could answer it. A later page is not: a copy is the
+    // whole answer, which would repeat the pages already shown; it fails, and is retried.
+    let fallback = offline
+        .get()
+        .filter(|_| !is_later_page(&request))
+        .map(|handle| (handle, request.clone()));
     let response = run(rpc?, request);
     note_health(health, &response);
     if let (Err(ClientError::Unreachable(_)), Some((handle, request))) = (&response, fallback)
@@ -790,6 +805,15 @@ fn gated(
         return Err(ClientError::LibraryChanged);
     }
     Ok(response)
+}
+
+/// Whether `request` asks for a page after the first: it carries a cursor.
+fn is_later_page(request: &Request) -> bool {
+    match request {
+        Request::FolderList(p) => p.cursor.is_some(),
+        Request::Call { params, .. } => params.get("cursor").is_some_and(|c| !c.is_null()),
+        _ => false,
+    }
 }
 
 /// The answer to `request` while offline: `library.info` is the recorded `library`; the

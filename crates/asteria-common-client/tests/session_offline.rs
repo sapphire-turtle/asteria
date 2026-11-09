@@ -309,3 +309,39 @@ fn dropping_the_session_stops_the_sync() {
     assert_eq!(server.requests("GET /media/"), after);
     assert!(after < items.len(), "{after} downloads");
 }
+
+#[test]
+fn recovering_from_a_degraded_server_refetches_the_listing() {
+    let data = tempfile::tempdir().unwrap();
+    let server = FakeServer::start();
+    server.set("s1", &["a", "b"]);
+    let mut session = open(&profile(server.addr, "t"), data.path());
+    assert!(matches!(session.state(), SessionState::Ready { .. }));
+    save(&mut session, "s1", &["a", "b"]);
+    session.take_refetch_listing();
+
+    server.gone(true);
+    let next_page = Request::Call {
+        method: "set.get".into(),
+        params: json!({ "id": "s1", "cursor": "page-2" }),
+    };
+    let ids = [session.request(set_get("s1")), session.request(next_page)];
+    let replies = wait_replies(&mut session, &ids);
+    assert!(replies[0].result.is_ok(), "{:?}", replies[0]);
+    // A later page is not answered from the copies: the copy is the whole listing, which
+    // would be appended to the pages already shown.
+    assert!(
+        matches!(replies[1].result, Err(ClientError::Unreachable(_))),
+        "{:?}",
+        replies[1]
+    );
+    assert!(session.is_offline());
+    assert!(!session.take_refetch_listing());
+
+    server.gone(false);
+    let id = session.request(set_get("s1"));
+    assert!(wait_replies(&mut session, &[id])[0].result.is_ok());
+    assert!(session.degraded().is_none());
+    // What is on screen came from the copies: fetch it again.
+    assert!(session.take_refetch_listing());
+}
