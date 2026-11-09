@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use asteria_common_client::i18n;
 use asteria_common_client::offline::{
-    LIMIT_CHOICES_GIB, OfflineHandle, OfflinePage, OfflineStore, PinStatus, PinTarget,
+    LIMIT_CHOICES_GIB, OfflineHandle, OfflinePage, OfflineStore, PinStatus, PinTarget, SyncPhase,
 };
 use asteria_common_client::profiles::Token;
 use asteria_common_client::widgets::offline_toggle::{offline_status, offline_toggle, saved_mark};
@@ -185,8 +185,13 @@ fn two_pins(f: &Fixture) {
             name: name.into(),
         });
     }
+    // Idle too: a pin is Saved once its answers are in, while the media is still coming, and
+    // the "Saving for offline" line that shows meanwhile would move the buttons between the
+    // frame a click is aimed in and the frame it lands in.
     wait_for("both saved", || {
-        saved(&f.handle, "s1") && saved(&f.handle, "s2")
+        saved(&f.handle, "s1")
+            && saved(&f.handle, "s2")
+            && f.handle.progress().phase == SyncPhase::Idle
     });
 }
 
