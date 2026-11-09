@@ -47,6 +47,7 @@ fn an_extra_page_is_listed_and_drawn_when_chosen() {
     // No servers: the app opens on Settings, at the servers page.
     let paths = AppPaths {
         servers: dir.path().join("config/servers.toml"),
+        display: dir.path().join("config/display.toml"),
         cache: None,
         data: None,
     };
@@ -80,4 +81,26 @@ fn an_extra_page_is_listed_and_drawn_when_chosen() {
     frame_with(&ctx, &mut app, vec![button(false)]);
     frame(&ctx, &mut app);
     assert!(drawn.get() > 0, "choosing the extra page draws it");
+}
+
+#[test]
+fn display_and_offline_are_listed_after_the_extra_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = AppPaths {
+        servers: dir.path().join("config/servers.toml"),
+        display: dir.path().join("config/display.toml"),
+        cache: None,
+        data: Some(dir.path().join("data")),
+    };
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut app = PhotosApp::new(paths, &ctx).with_extra_settings(vec![Box::new(Counted {
+        drawn: Rc::default(),
+    })]);
+    let output = frame_with(&ctx, &mut app, Vec::new());
+    let extra = find(&output, "Extra page").expect("the extra page is listed");
+    let display = find(&output, "Display").expect("the display page is listed");
+    let offline = find(&output, "Offline").expect("the offline page is listed");
+    assert!(extra.y < display.y, "display comes after the extra pages");
+    assert!(display.y < offline.y, "offline comes after display");
 }

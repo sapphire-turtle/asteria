@@ -105,3 +105,12 @@ asteria-photos-status-uploads-awaiting = ↑ { $done } / { $total }・判断待�
 asteria-photos-status-uploads-hover = アップロードを開く
 asteria-photos-drop-starting = 接続中です。少し待ってからもう一度送ってください
 asteria-photos-drop-no-data = アップロードは使えません：キューを置く場所がありません
+
+# 表示の設定。
+asteria-photos-display-title = 表示
+asteria-photos-display-low-quality = 低画質で表示する
+asteria-photos-display-low-quality-hint = 回線が細いときに、オフライン用の小さな画像で表示します。この端末に保存したものがあれば、それを使います。
+asteria-photos-display-save-failed = 表示の設定を保存できませんでした: { $reason }
+
+# サーバーなしで。
+asteria-photos-offline-not-saved = オフライン用に保存されていないため、サーバーなしでは開けません。

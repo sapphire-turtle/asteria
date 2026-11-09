@@ -1,11 +1,15 @@
 //! [`Connection`]: everything tied to the server in use, dropped whole on a switch.
 
+use std::sync::Arc;
+
+use asteria_common_client::offline::OfflineCatalog;
 use asteria_common_client::profiles::ServerProfile;
 use asteria_common_client::rpc::ClientError;
 use asteria_common_client::session::{Session, SessionDirs, SessionState};
 use corundum_framework::egui;
 
 use crate::browse::BrowseState;
+use crate::offline::PhotosCatalog;
 use crate::uploads::UploadsView;
 
 /// One server in use: its [`Session`] (requests, images, cache) and its [`BrowseState`] (the
@@ -30,11 +34,14 @@ impl Connection {
         dirs: SessionDirs,
         reopened: bool,
     ) -> Connection {
-        let mut session = Session::open_with_dirs(
+        // With a data directory, folders can be saved for offline and browsed from the copies.
+        let catalog: Arc<dyn OfflineCatalog> = Arc::new(PhotosCatalog);
+        let mut session = Session::open_with(
             profile,
             asteria_photos_api::client_info(),
             ctx.clone(),
             dirs,
+            Some(catalog),
         );
         let mut browse = BrowseState::new();
         // Queued behind the handshake; it fails with the handshake if that fails.

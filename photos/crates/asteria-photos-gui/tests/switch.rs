@@ -169,6 +169,7 @@ fn with_no_servers_settings_open_on_the_servers_page() {
     let dir = tempfile::tempdir().unwrap();
     let paths = AppPaths {
         servers: dir.path().join("servers.toml"),
+        display: dir.path().join("display.toml"),
         cache: None,
         data: Some(dir.path().join("data")),
     };
@@ -246,6 +247,7 @@ fn the_first_server_added_is_used_and_saved() {
     let dir = tempfile::tempdir().unwrap();
     let paths = AppPaths {
         servers: dir.path().join("servers.toml"),
+        display: dir.path().join("display.toml"),
         cache: None,
         data: Some(dir.path().join("data")),
     };

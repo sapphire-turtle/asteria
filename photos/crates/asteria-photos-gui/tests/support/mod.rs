@@ -106,6 +106,7 @@ pub fn fixture_with_tokens(
     profiles.save(&path).unwrap();
     let paths = AppPaths {
         servers: path,
+        display: dir.path().join("config/display.toml"),
         cache: Some(dir.path().join("cache")),
         data: Some(dir.path().join("data")),
     };
@@ -156,6 +157,15 @@ pub fn run_until(
         assert!(start.elapsed() < DEADLINE, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Whether a texture named `name` is loaded (the image loader names them
+/// `asteria-media/<item>/<preset>`).
+pub fn has_texture(ctx: &egui::Context, name: &str) -> bool {
+    ctx.tex_manager()
+        .read()
+        .allocated()
+        .any(|(_, meta)| meta.name == name)
 }
 
 pub fn item_ids(app: &PhotosApp) -> Vec<String> {

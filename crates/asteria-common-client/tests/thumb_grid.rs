@@ -291,3 +291,27 @@ fn last_visible_tells_how_far_the_drawn_rows_reach() {
     });
     assert_eq!(r.last_visible, None);
 }
+
+#[test]
+fn a_dimmed_item_is_not_opened() {
+    let items: Vec<MediaItem> = (0..10).map(item).collect();
+    let ctx = egui::Context::default();
+    let mut source = Counting::default();
+    let dim = |i: &MediaItem| i.id.0 == "item-2";
+    let open = |sel: &str, source: &mut Counting| {
+        let sel = Some(ItemId(sel.into()));
+        frame(&ctx, key(egui::Key::Enter), 800.0, 600.0, |ui| {
+            ThumbGrid::new(&items)
+                .selected(sel)
+                .dimmed(&dim)
+                .show(ui, source)
+        })
+    };
+    assert_eq!(open("item-2", &mut source).double_clicked, None);
+    // Its thumbnail is still asked for, and the others open as before.
+    assert!(source.requested.iter().any(|r| r == "item-2"));
+    assert_eq!(
+        open("item-3", &mut source).double_clicked,
+        Some(ItemId("item-3".into()))
+    );
+}

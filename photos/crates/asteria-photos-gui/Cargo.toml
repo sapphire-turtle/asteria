@@ -14,7 +14,9 @@ asteria-common-api = { path = "../../../crates/asteria-common-api", version = "2
 asteria-common-client = { path = "../../../crates/asteria-common-client" }
 asteria-photos-api = { path = "../asteria-photos-api" }
 corundum-framework = { workspace = true, features = ["gui", "serde", "eframe"] }
+serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

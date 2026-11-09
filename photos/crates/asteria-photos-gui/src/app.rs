@@ -8,20 +8,23 @@
 //! The selected item's details are in corundum's side pane (a right column when wide), and
 //! an item opened from the grid fills the window ([`crate::viewer`]) until Esc.
 //!
-//! The servers are kept in `servers.toml`. It is read once, before the first frame; every
-//! change is written by a background thread, so the UI thread does no disk I/O.
+//! The servers are kept in `servers.toml`, and the display settings in `display.toml`. Each is
+//! read once, before the first frame; every change is written by a background thread, so the
+//! UI thread does no disk I/O.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use asteria_common_api::ItemId;
 use asteria_common_client::errors::{error_detail, error_text};
+use asteria_common_client::offline::OfflinePage;
 use asteria_common_client::profiles::{ProfileId, Profiles};
 use asteria_common_client::profiles::{ServerProfile, Token};
 use asteria_common_client::saver::Saver;
 use asteria_common_client::session::{SessionDirs, SessionState};
 use asteria_common_client::settings::ExtraSettingsPage;
 use asteria_common_client::settings::servers::{ServersChange, ServersPage};
+use asteria_common_client::widgets::offline_toggle::offline_status;
 use asteria_common_client::widgets::server_switcher::{ServerSwitcher, SwitcherAction};
 use corundum_framework::egui;
 use corundum_framework::gui::settings::{ListItem, SettingsLayout, SettingsSection};
@@ -29,6 +32,7 @@ use corundum_framework::gui::{COMPACT_WIDTH, Destination, Shell, ShellApp, Side,
 
 pub use crate::connection::Connection;
 use crate::detail::{DetailView, Edit};
+use crate::display::{DisplayPage, DisplaySettings};
 use crate::viewer;
 
 /// The screens: the library on the rail, Settings at its foot.
@@ -45,6 +49,8 @@ enum Page {
     Servers,
     /// The page at this index of [`State::extra_pages`].
     Extra(usize),
+    Display,
+    Offline,
 }
 
 /// Where the app keeps its files.
@@ -52,11 +58,13 @@ enum Page {
 pub struct AppPaths {
     /// The registered servers and the one in use.
     pub servers: PathBuf,
+    /// The display settings ("Show in low quality").
+    pub display: PathBuf,
     /// The root of the thumbnail cache (one directory per library under it); `None` keeps
     /// no cache on disk.
     pub cache: Option<PathBuf>,
-    /// The root of the app's data; the upload queues are kept under it. `None` turns uploads
-    /// off.
+    /// The root of the app's data; the upload queues and the copies saved for offline are kept
+    /// under it. `None` turns uploads and saving for offline off.
     pub data: Option<PathBuf>,
 }
 
@@ -75,6 +83,10 @@ struct State {
     servers_page: ServersPage,
     /// The pages handed in from outside, listed after the servers.
     extra_pages: Vec<Box<dyn ExtraSettingsPage>>,
+    display_page: DisplayPage,
+    /// `None` when the save thread could not start.
+    display_saver: Option<Saver<DisplaySettings>>,
+    offline_page: OfflinePage,
     settings: SettingsLayout<Page>,
     /// `None` when `servers.toml` could not be read (saving would overwrite it) or the save
     /// thread could not start; [`State::save_blocked`] says why.
@@ -91,8 +103,8 @@ struct State {
 }
 
 impl PhotosApp {
-    /// Reads `servers.toml` (this is the one disk read on the UI thread, before the first
-    /// frame) and connects to the server used last. With no server registered, it opens on
+    /// Reads `servers.toml` and `display.toml` (the only disk reads on the UI thread, before
+    /// the first frame) and connects to the server used last. With no server registered, it opens on
     /// Settings, ready to add one.
     pub fn new(paths: AppPaths, ctx: &egui::Context) -> PhotosApp {
         crate::i18n::register(ctx);
@@ -125,6 +137,14 @@ impl PhotosApp {
         if let Some(why) = &save_blocked {
             servers_page.show_error(why.clone());
         }
+        let display = DisplaySettings::load(&paths.display);
+        let display_saver = match spawn_display_saver(paths.display.clone(), ctx.clone()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(error = %e, "starting the display settings saver failed");
+                None
+            }
+        };
         let shell = Shell::new(vec![
             Destination::new(
                 Screen::Library,
@@ -149,6 +169,9 @@ impl PhotosApp {
             connection: None,
             servers_page,
             extra_pages: Vec::new(),
+            display_page: DisplayPage::new(display),
+            display_saver,
+            offline_page: OfflinePage::new(),
             settings: SettingsLayout::new(),
             saver,
             save_blocked,
@@ -296,6 +319,17 @@ impl PhotosApp {
         (since.elapsed() < NOTICE_FOR).then_some(text.as_str())
     }
 
+    /// The display settings as they stand.
+    pub fn display_settings(&self) -> &DisplaySettings {
+        &self.state.display_page.settings
+    }
+
+    /// Show `offline-image` rather than `preview` from now on; kept in `display.toml`.
+    pub fn set_low_quality(&mut self, low: bool) {
+        self.state.display_page.settings.low_quality = low;
+        self.state.apply_display_change();
+    }
+
     /// The Settings page of the servers, as the user works it.
     pub fn servers_page_mut(&mut self) -> &mut ServersPage {
         &mut self.state.servers_page
@@ -352,6 +386,12 @@ impl State {
             while let Some(e) = saver.take_error() {
                 let why = tr!(self.ctx, "asteria-photos-save-failed", reason = e);
                 self.servers_page.show_error(why);
+            }
+        }
+        if let Some(saver) = &self.display_saver {
+            while let Some(e) = saver.take_error() {
+                let why = tr!(self.ctx, "asteria-photos-display-save-failed", reason = e);
+                self.display_page.show_error(why);
             }
         }
         if let Some(c) = &mut self.connection {
@@ -422,10 +462,14 @@ impl State {
         self.open_screen = Some(Screen::Settings);
     }
 
-    /// Whether an item is shown full screen, on a connection that works.
+    /// Whether an item is shown full screen, on a connection that works (or offline, from the
+    /// saved copies).
     fn viewer_open(&self) -> bool {
         self.connection.as_ref().is_some_and(|c| {
-            matches!(c.session.state(), SessionState::Ready { .. }) && c.browse.opened().is_some()
+            matches!(
+                c.session.state(),
+                SessionState::Ready { .. } | SessionState::Offline { .. }
+            ) && c.browse.opened().is_some()
         })
     }
 
@@ -433,7 +477,8 @@ impl State {
         let Some(c) = &mut self.connection else {
             return;
         };
-        if viewer::ui(ui, &mut c.browse, &mut c.session) == viewer::Asked::Details {
+        let display = &self.display_page.settings;
+        if viewer::ui(ui, &mut c.browse, &mut c.session, display) == viewer::Asked::Details {
             self.open_details = true;
         }
     }
@@ -528,12 +573,43 @@ impl State {
                 .enumerate()
                 .map(|(i, p)| ListItem::entry(Page::Extra(i), p.label(ui.ctx()))),
         );
+        items.push(ListItem::Entry {
+            page: Page::Display,
+            label: self.display_page.label(ui.ctx()),
+            dirty: false,
+        });
+        items.push(ListItem::entry(
+            Page::Offline,
+            tr!(ui, "asteria-common-client-offline-title"),
+        ));
         let page = &mut self.servers_page;
         let extra = &mut self.extra_pages;
+        let display = &mut self.display_page;
+        let offline_page = &mut self.offline_page;
+        let offline = self.connection.as_ref().and_then(|c| c.session.offline());
         self.settings.ui(ui, &items, |ui, open| match open {
             Page::Servers => page.ui(ui),
             Page::Extra(i) => extra[i].ui(ui),
+            Page::Display => display.ui(ui),
+            Page::Offline => offline_page.ui(ui, offline),
         });
+        if self.display_page.take_change().is_some() {
+            self.apply_display_change();
+        }
+    }
+
+    /// Writes the settings the display page holds; the screens read them every frame.
+    fn apply_display_change(&mut self) {
+        let settings = self.display_page.settings.clone();
+        match &self.display_saver {
+            Some(saver) => saver.save(settings),
+            None => self.display_page.show_error(tr!(
+                self.ctx,
+                "asteria-photos-display-save-failed",
+                reason = "no save thread"
+            )),
+        }
+        self.ctx.request_repaint();
     }
 
     /// The uploads' count (while any group is unfinished) and a refused drop, on the status bar.
@@ -621,6 +697,23 @@ fn spawn_saver(path: PathBuf, ctx: egui::Context) -> std::io::Result<Saver<Profi
     })
 }
 
+/// A saver that writes `display.toml` on the thread `photos-display-save`.
+fn spawn_display_saver(
+    path: PathBuf,
+    ctx: egui::Context,
+) -> std::io::Result<Saver<DisplaySettings>> {
+    Saver::spawn(
+        "photos-display-save",
+        ctx,
+        move |settings: &DisplaySettings| {
+            settings.save(&path).map_err(|e| {
+                tracing::warn!(path = %path.display(), error = %e, "saving display.toml failed");
+                e.to_string()
+            })
+        },
+    )
+}
+
 /// What a connection depends on: the server, its address and its token (not its name).
 fn endpoint(p: Option<&ServerProfile>) -> Option<(ProfileId, String, Token)> {
     p.map(|p| (p.id, p.url.as_str().to_string(), p.token.clone()))
@@ -658,12 +751,15 @@ impl ShellApp<Screen> for State {
     /// The selected item's details, beside the library (the side pane is the shell's, so
     /// other screens show a word about it).
     fn side_ui(&mut self, ui: &mut egui::Ui, screen: Screen, _side: &mut Side) {
-        let ready = self
-            .connection
-            .as_mut()
-            .filter(|c| matches!(c.session.state(), SessionState::Ready { .. }));
+        let ready = self.connection.as_mut().filter(|c| {
+            matches!(
+                c.session.state(),
+                SessionState::Ready { .. } | SessionState::Offline { .. }
+            )
+        });
+        let display = &self.display_page.settings;
         match (screen, ready) {
-            (Screen::Library, Some(c)) => c.browse.detail_ui(ui, &mut c.session),
+            (Screen::Library, Some(c)) => c.browse.detail_ui(ui, &mut c.session, display),
             (Screen::Library, None) => {
                 ui.weak(tr!(ui, "asteria-photos-detail-none"));
             }
@@ -682,8 +778,13 @@ impl ShellApp<Screen> for State {
         None
     }
 
+    /// The switcher, how saving for offline goes, then the uploads.
     fn status_ui(&mut self, ui: &mut egui::Ui) {
         self.switcher_ui(ui, false);
+        offline_status(
+            ui,
+            self.connection.as_ref().and_then(|c| c.session.offline()),
+        );
         self.uploads_status_ui(ui);
     }
 }

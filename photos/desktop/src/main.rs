@@ -80,11 +80,13 @@ fn first_run_needed(servers: &Profiles, done: bool) -> bool {
     servers.servers.is_empty() && !done
 }
 
-/// Where the app keeps `servers.toml` (its config directory), the thumbnail cache (its cache
-/// directory) and the upload queues (its data directory).
+/// Where the app keeps `servers.toml` and `display.toml` (its config directory), the
+/// thumbnail cache (its cache directory), and the upload queues and the copies saved for
+/// offline (its data directory).
 fn paths(dirs: &AppDirs) -> AppPaths {
     AppPaths {
         servers: dirs.config().join("servers.toml"),
+        display: dirs.config().join("display.toml"),
         cache: Some(dirs.cache().to_path_buf()),
         data: Some(dirs.data().to_path_buf()),
     }
@@ -294,6 +296,7 @@ mod tests {
     fn temp_paths(dir: &tempfile::TempDir) -> AppPaths {
         AppPaths {
             servers: dir.path().join("config/servers.toml"),
+            display: dir.path().join("config/display.toml"),
             cache: None,
             data: None,
         }
