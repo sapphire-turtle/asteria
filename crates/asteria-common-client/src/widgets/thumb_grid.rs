@@ -17,7 +17,10 @@
 //! has focus (`ctx.memory(|m| m.focused())` is `None`): a focused text field or button keeps its
 //! keys, and so does egui's focus navigation. A key is consumed only when the grid acts on it:
 //! Enter with nothing selected is left alone. A move scrolls the selected cell into view. With
-//! nothing selected, an arrow selects the first item. The Lucide icons need `corundum_framework::gui::icons::install_loaders(ctx)` once;
+//! nothing selected, an arrow selects the first item.
+//!
+//! A cell the caller marks [`dimmed`](ThumbGrid::dimmed) (offline, an item with no saved copy to
+//! show) is drawn faded and is never reported as opened; it can still be selected. The Lucide icons need `corundum_framework::gui::icons::install_loaders(ctx)` once;
 //! the shell does it.
 
 use asteria_common_api::{ItemId, MediaItem, MediaKind};
@@ -66,6 +69,7 @@ pub struct ThumbGrid<'a> {
     cell: f32,
     selected: Option<ItemId>,
     id_salt: egui::IdSalt,
+    dimmed: Option<&'a dyn Fn(&MediaItem) -> bool>,
 }
 
 /// What the grid remembers between frames, to scroll a moved selection into view.
@@ -82,6 +86,7 @@ impl<'a> ThumbGrid<'a> {
             cell: DEFAULT_CELL_SIZE,
             selected: None,
             id_salt: egui::IdSalt::new("asteria-thumb-grid"),
+            dimmed: None,
         }
     }
 
@@ -99,6 +104,13 @@ impl<'a> ThumbGrid<'a> {
     /// Tells two grids in one `Ui` apart (their scroll position and view state).
     pub fn id_salt(mut self, salt: impl egui::AsIdSalt) -> Self {
         self.id_salt = egui::IdSalt::new(salt);
+        self
+    }
+
+    /// Which items are drawn faded and cannot be opened (no double click, no Enter). Asked of
+    /// every visible item every frame, so it must be cheap.
+    pub fn dimmed(mut self, dimmed: &'a dyn Fn(&MediaItem) -> bool) -> Self {
+        self.dimmed = Some(dimmed);
         self
     }
 
@@ -175,9 +187,11 @@ impl<'a> ThumbGrid<'a> {
                         scroll_to = Some(bottom - view.height);
                     }
                 }
-            } else if enter && let Some(id) = current.map(|i| self.items[i].id.clone()) {
+            } else if enter && let Some(i) = current {
                 consume(ui, Enter);
-                resp.double_clicked = Some(id);
+                if !self.is_dimmed(&self.items[i]) {
+                    resp.double_clicked = Some(self.items[i].id.clone());
+                }
             }
         }
         let selected = resp.selected.clone().or(self.selected.clone());
@@ -197,14 +211,15 @@ impl<'a> ThumbGrid<'a> {
                     resp.last_visible = resp.last_visible.max(Some(end - 1));
                     for item in &self.items[start..end] {
                         let is_selected = selected.as_ref() == Some(&item.id);
-                        let r = draw_cell(ui, item, cell, is_selected, source);
+                        let dimmed = self.is_dimmed(item);
+                        let r = draw_cell(ui, item, cell, is_selected, dimmed, source);
                         if r.clicked() {
                             resp.clicked = Some(item.id.clone());
                             if !is_selected {
                                 resp.selected = Some(item.id.clone());
                             }
                         }
-                        if r.double_clicked() {
+                        if r.double_clicked() && !dimmed {
                             resp.double_clicked = Some(item.id.clone());
                         }
                     }
@@ -222,7 +237,14 @@ impl<'a> ThumbGrid<'a> {
         });
         resp
     }
+
+    fn is_dimmed(&self, item: &MediaItem) -> bool {
+        self.dimmed.is_some_and(|f| f(item))
+    }
 }
+
+/// How much of a dimmed cell's picture shows through.
+const DIMMED_ALPHA: f32 = 0.3;
 
 /// Lucide's `lock` (ISC, `assets/icons/LICENSE-Lucide`), stroked in white like corundum's icons
 /// so it tints the same way. Move it to corundum when corundum gets a lock icon.
@@ -235,12 +257,14 @@ fn draw_cell(
     item: &MediaItem,
     cell: f32,
     selected: bool,
+    dimmed: bool,
     source: &mut impl ThumbSource,
 ) -> egui::Response {
     let state = source.thumb(item);
     let (rect, response) = ui.allocate_exact_size(vec2(cell, cell), Sense::click());
     let name = item.path.rsplit('/').next().unwrap_or(&item.path);
-    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, name));
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, !dimmed, selected, name));
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -256,7 +280,11 @@ fn draw_cell(
                 tex.id(),
                 image,
                 Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
+                if dimmed {
+                    Color32::WHITE.gamma_multiply(DIMMED_ALPHA)
+                } else {
+                    Color32::WHITE
+                },
             );
         }
         ImageState::Loading => {}

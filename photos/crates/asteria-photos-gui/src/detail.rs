@@ -341,16 +341,19 @@ impl<'a> DetailView<'a> {
     }
 }
 
-/// Draw the pane for `item` into `ui` (the side pane's column, card or screen). Returns
-/// whether "View full screen" was clicked.
+/// Draw the pane for `item` into `ui` (the side pane's column, card or screen), its picture at
+/// `preset`. Returns whether "View full screen" was clicked; the button is off unless
+/// `openable` (offline, an item with no saved copy is not).
 pub(crate) fn ui(
     ui: &mut egui::Ui,
     item: &MediaItem,
     edits: &mut Edits,
     session: &mut Session,
+    preset: Preset,
+    openable: bool,
 ) -> bool {
     let mut open = false;
-    preview_ui(ui, item, session);
+    preview_ui(ui, item, session, preset);
     if item.kind == MediaKind::Video {
         ui.weak(tr!(ui, "asteria-photos-detail-video"));
     }
@@ -360,7 +363,14 @@ pub(crate) fn ui(
         None => (None, item.path.as_str()),
     };
     ui.heading(name);
-    if ui.button(tr!(ui, "asteria-photos-detail-open")).clicked() {
+    let button = ui.add_enabled(
+        openable,
+        egui::Button::new(tr!(ui, "asteria-photos-detail-open")),
+    );
+    if button
+        .on_disabled_hover_text(tr!(ui, "asteria-photos-offline-not-saved"))
+        .clicked()
+    {
         open = true;
     }
     ui.add_space(4.0);
@@ -423,10 +433,10 @@ pub(crate) fn ui(
     open
 }
 
-/// The preview, as large as fits the pane's width.
-fn preview_ui(ui: &mut egui::Ui, item: &MediaItem, session: &mut Session) {
+/// The picture at `preset`, as large as fits the pane's width.
+fn preview_ui(ui: &mut egui::Ui, item: &MediaItem, session: &mut Session, preset: Preset) {
     let max = egui::vec2(ui.available_width(), PREVIEW_HEIGHT);
-    match session.images().request(item, Preset::Preview) {
+    match session.images().request(item, preset) {
         ImageState::Ready(tex) => {
             let size = fit(tex.size_vec2(), max);
             ui.add(egui::Image::new(egui::load::SizedTexture::new(

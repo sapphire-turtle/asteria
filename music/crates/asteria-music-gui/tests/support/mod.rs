@@ -21,6 +21,7 @@ use corundum_framework_audio::fakes::{FakeItem, FakeOpener, FakeOutputs};
 use corundum_framework_audio::{Feed, Opener, OutputConfig};
 use serde_json::{Value, json};
 
+pub use common::offline::file_hash;
 use common::{DEADLINE, StubResponse, library_info, serve};
 
 /// The `server.info` result of an asteria-music server.
@@ -96,6 +97,10 @@ pub struct Music {
     pub bad_albums: bool,
     /// The next this many `album.list` calls for a page after the first fail.
     pub fail_later_pages: Arc<std::sync::atomic::AtomicU32>,
+    /// An album's tracks carry file hashes ([`file_hash`] of their ids), and their files are
+    /// served for offline (`/media/<id>/<preset>`), but for the second track of each album
+    /// (`<album>-t1`), which is 404.
+    pub offline_media: bool,
 }
 
 impl Default for Music {
@@ -106,6 +111,7 @@ impl Default for Music {
             album_delay: Duration::ZERO,
             bad_albums: false,
             fail_later_pages: Arc::default(),
+            offline_media: false,
         }
     }
 }
@@ -127,11 +133,21 @@ impl Music {
         let log = seen.clone();
         let addr = serve(move |req| {
             let Some((id, method)) = req.rpc() else {
-                // A track's fetch: recorded by its path, and refused.
+                // A file's fetch: recorded by its path, and refused unless saved for offline.
                 log.lock()
                     .unwrap()
                     .push((req.method.clone(), json!(req.path)));
-                return StubResponse::new(404, Vec::new());
+                let served = self.offline_media
+                    && req
+                        .path
+                        .strip_prefix("/media/")
+                        .and_then(|rest| rest.split_once('/'))
+                        .is_some_and(|(item, _)| !item.ends_with("-t1"));
+                return if served {
+                    StubResponse::new(200, b"saved".to_vec())
+                } else {
+                    StubResponse::new(404, Vec::new())
+                };
             };
             let params = serde_json::from_slice::<Value>(&req.body).unwrap()["params"].clone();
             log.lock().unwrap().push((method.clone(), params.clone()));
@@ -162,7 +178,12 @@ impl Music {
                         "folder": "Band/Album",
                         "tracks": (0..4).map(|n| {
                             let artist = if n == 1 { "Guest" } else { "Band" };
-                            track(&format!("{aid}-t{n}"), n + 1, artist)
+                            let tid = format!("{aid}-t{n}");
+                            let mut t = track(&tid, n + 1, artist);
+                            if self.offline_media {
+                                t["item"]["file_hash"] = json!(file_hash(&tid));
+                            }
+                            t
                         }).collect::<Vec<_>>(),
                     })
                 }
@@ -237,6 +258,7 @@ pub fn fixture(servers: &[(&str, SocketAddr)], active: usize) -> (Fixture, Vec<P
         servers: path,
         playback: dir.path().join("config/playback.toml"),
         cache: Some(dir.path().join("cache")),
+        data: Some(dir.path().join("data")),
     };
     (Fixture { _dir: dir, paths }, ids)
 }

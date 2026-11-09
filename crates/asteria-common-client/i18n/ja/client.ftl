@@ -42,6 +42,8 @@ asteria-common-client-servers-error-library-changed = サーバーのライブ�
 asteria-common-client-servers-error-server = サーバーがエラーを返しました
 asteria-common-client-servers-error-protocol = サーバーの応答を読み取れません
 asteria-common-client-servers-error-local = この端末で問題が起きました
+asteria-common-client-servers-error-not-saved = オフライン用に保存していません
+asteria-common-client-servers-error-offline = オフラインでは編集できません
 
 # The server switcher in the status bar.
 asteria-common-client-status-none = サーバーなし
@@ -49,5 +51,31 @@ asteria-common-client-status-connected = 接続済み
 asteria-common-client-status-connecting = 接続中
 asteria-common-client-status-failed = 接続できません：{ $reason }
 asteria-common-client-status-degraded = 応答がありません：{ $reason }
+asteria-common-client-status-offline = オフライン（保存したものを表示中）
 asteria-common-client-status-manage = サーバーを管理…
+asteria-common-client-status-reconnect = 再接続
 asteria-common-client-status-hover = { $name }：{ $status }
+
+# オフライン保存のトグル、「オフライン」設定ページ、ステータスバーの同期の表示。
+asteria-common-client-offline-title = オフライン
+asteria-common-client-offline-save = オフライン用に保存
+asteria-common-client-offline-saved = オフライン用に保存済み
+asteria-common-client-offline-syncing = オフライン用に保存中…
+asteria-common-client-offline-full = 保存していません：容量の上限に達しました
+asteria-common-client-offline-gone = サーバーにありません
+asteria-common-client-offline-estimate = 、約 { $size }
+asteria-common-client-offline-remove = 外す
+asteria-common-client-offline-needs-server = サーバーにつなぐと使えます
+asteria-common-client-offline-usage = { $limit } のうち { $used } を使用中
+asteria-common-client-offline-limit = 容量の上限：
+asteria-common-client-offline-empty = オフライン用に保存したものはありません
+asteria-common-client-offline-sync-now = 今すぐ同期
+asteria-common-client-offline-clear = すべて削除
+asteria-common-client-offline-clear-confirm = オフライン用に保存したものをすべて削除しますか？
+asteria-common-client-offline-clear-yes = すべて削除する
+asteria-common-client-offline-cancel = キャンセル
+asteria-common-client-offline-unsavable = { $count } 件のファイルは保存できませんでした
+asteria-common-client-offline-failed = 保存を中断しました：{ $reason }
+asteria-common-client-offline-status-syncing = オフライン用に保存中 { $done }/{ $total }
+asteria-common-client-offline-status-full = オフラインの保存容量がいっぱいです
+asteria-common-client-offline-status-failed = オフライン用の保存を中断しました

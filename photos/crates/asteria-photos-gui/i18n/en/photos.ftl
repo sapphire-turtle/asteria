@@ -108,3 +108,12 @@ asteria-photos-status-uploads-awaiting = ↑ { $done } / { $total } · { $count 
 asteria-photos-status-uploads-hover = Open the uploads
 asteria-photos-drop-starting = Still connecting; try again in a moment.
 asteria-photos-drop-no-data = Uploads are not available: this app has no place to keep the queue.
+
+# The display settings.
+asteria-photos-display-title = Display
+asteria-photos-display-low-quality = Show in low quality
+asteria-photos-display-low-quality-hint = For a slow connection: pictures are shown at the smaller size saved for offline, from the copy saved on this device when there is one.
+asteria-photos-display-save-failed = The display settings could not be saved: { $reason }
+
+# Without the server.
+asteria-photos-offline-not-saved = Not saved for offline, so it cannot be opened without the server.

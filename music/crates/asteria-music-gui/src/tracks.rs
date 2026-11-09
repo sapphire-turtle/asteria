@@ -2,13 +2,18 @@
 //!
 //! Columns: disc, number, title, the artist (only when it differs from the album artist), and
 //! the length as `m:ss`. In a playlist a [`Missing`](EntryStatus::Missing) entry is dimmed, with
-//! the path written in the playlist, and a [`Moved`](EntryStatus::Moved) one is marked. A click
-//! on a row plays from it; the right-click menu has "play next" and "add to queue". The table
+//! the path written in the playlist, and a [`Moved`](EntryStatus::Moved) one is marked. Offline,
+//! a track whose audio is not saved is dimmed too ([`Availability`]). A click on a row plays
+//! from it; the right-click menu has "play next" and "add to queue". The table
 //! only reports what the user asked for ([`TrackAction`]); the app turns it into a command.
 
+use asteria_common_client::offline::OfflineHandle;
+use asteria_common_client::session::Session;
 use asteria_music_api::{Album, EntryStatus, MusicTrack, Playlist};
 use corundum_framework::egui::{self, Align2, Sense, vec2};
 use corundum_framework::gui::tr;
+
+use crate::player::Quality;
 
 /// What the user asked of a row. The index is the row's: an album's track, a playlist's entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +21,37 @@ pub enum TrackAction {
     Play(usize),
     PlayNext(usize),
     Append(usize),
+}
+
+/// Which tracks can be played now: every one while the server answers; offline, only those
+/// whose offline audio is saved. Asked of the handle's record of what is stored, so a frame
+/// that draws many rows does no disk I/O.
+#[derive(Clone, Debug, Default)]
+pub enum Availability {
+    #[default]
+    All,
+    /// Offline, with the library's copies (`None` when the app keeps none).
+    Saved(Option<OfflineHandle>),
+}
+
+impl Availability {
+    pub fn of(session: &Session) -> Availability {
+        if session.is_offline() {
+            Availability::Saved(session.offline().cloned())
+        } else {
+            Availability::All
+        }
+    }
+
+    pub fn can_play(&self, track: &MusicTrack) -> bool {
+        match self {
+            Availability::All => true,
+            Availability::Saved(handle) => handle
+                .as_ref()
+                .zip(track.item.file_hash.as_deref())
+                .is_some_and(|(h, hash)| h.is_stored(hash, Quality::Low.preset())),
+        }
+    }
 }
 
 /// One row of the table.
@@ -87,13 +123,15 @@ const NUMBER_W: f32 = 36.0;
 const LENGTH_W: f32 = 56.0;
 const PAD: f32 = 6.0;
 
-/// Draws the table. `album_artist` is the album's artist, if the rows all belong to one album.
-/// Returns what the user asked for this frame.
+/// Draws the table. `album_artist` is the album's artist, if the rows all belong to one album;
+/// `available` says which tracks can be played (asked only for the rows drawn). Returns what
+/// the user asked for this frame.
 pub fn show(
     ui: &mut egui::Ui,
     salt: impl egui::AsIdSalt,
     rows: &[Row<'_>],
     album_artist: Option<&str>,
+    available: &Availability,
 ) -> Option<TrackAction> {
     let font = egui::TextStyle::Body.resolve(ui.style());
     let row_h = ui.text_style_height(&egui::TextStyle::Body) + 8.0;
@@ -105,7 +143,7 @@ pub fn show(
         .show_rows(ui, row_h, rows.len(), |ui, range| {
             for index in range {
                 let row = &rows[index];
-                if let Some(a) = row_ui(ui, index, row, album_artist, &font, row_h) {
+                if let Some(a) = row_ui(ui, index, row, album_artist, available, &font, row_h) {
                     action = Some(a);
                 }
             }
@@ -169,10 +207,12 @@ fn row_ui(
     index: usize,
     row: &Row<'_>,
     album_artist: Option<&str>,
+    available: &Availability,
     font: &egui::FontId,
     row_h: f32,
 ) -> Option<TrackAction> {
-    let can_play = playable(row);
+    let saved = row.track.is_none_or(|t| available.can_play(t));
+    let can_play = playable(row) && saved;
     let sense = if can_play {
         Sense::click()
     } else {
@@ -196,7 +236,7 @@ fn row_ui(
         }
         let strong = visuals.text_color();
         let weak = visuals.weak_text_color();
-        let color = if row.status == EntryStatus::Missing {
+        let color = if row.status == EntryStatus::Missing || !saved {
             weak
         } else {
             strong
@@ -250,6 +290,10 @@ fn row_ui(
     if row.status == EntryStatus::Missing {
         let path = row.raw_path.unwrap_or_default().to_string();
         response.on_hover_text(tr!(ui, "asteria-music-tracks-missing-hover", path = path));
+        return None;
+    }
+    if !saved {
+        response.on_hover_text(tr!(ui, "asteria-music-offline-not-saved"));
         return None;
     }
     if row.status == EntryStatus::Moved && response.hovered() {
@@ -306,6 +350,13 @@ mod tests {
             },
             display_title: "t".into(),
         }
+    }
+
+    #[test]
+    fn online_every_track_plays_and_offline_without_copies_none() {
+        let t = track(&["A"], None);
+        assert!(Availability::All.can_play(&t));
+        assert!(!Availability::Saved(None).can_play(&t));
     }
 
     #[test]

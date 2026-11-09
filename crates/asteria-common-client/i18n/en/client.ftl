@@ -42,6 +42,8 @@ asteria-common-client-servers-error-library-changed = the server now serves a di
 asteria-common-client-servers-error-server = the server reported an error
 asteria-common-client-servers-error-protocol = the server's answer could not be understood
 asteria-common-client-servers-error-local = something went wrong on this device
+asteria-common-client-servers-error-not-saved = it is not saved for offline use
+asteria-common-client-servers-error-offline = it cannot be edited while offline
 
 # The server switcher in the status bar.
 asteria-common-client-status-none = No server
@@ -49,5 +51,31 @@ asteria-common-client-status-connected = Connected
 asteria-common-client-status-connecting = Connecting
 asteria-common-client-status-failed = Not connected: { $reason }
 asteria-common-client-status-degraded = Not responding: { $reason }
+asteria-common-client-status-offline = Offline (showing saved items)
 asteria-common-client-status-manage = Manage servers...
+asteria-common-client-status-reconnect = Reconnect
 asteria-common-client-status-hover = { $name }: { $status }
+
+# The save-for-offline toggle, the Offline settings page and the status bar's sync text.
+asteria-common-client-offline-title = Offline
+asteria-common-client-offline-save = Save for offline
+asteria-common-client-offline-saved = Saved for offline
+asteria-common-client-offline-syncing = Saving for offline...
+asteria-common-client-offline-full = Not saved: the size limit is reached
+asteria-common-client-offline-gone = No longer on the server
+asteria-common-client-offline-estimate = , about { $size }
+asteria-common-client-offline-remove = Remove
+asteria-common-client-offline-needs-server = Connect to a server to use this.
+asteria-common-client-offline-usage = Using { $used } of { $limit }
+asteria-common-client-offline-limit = Size limit:
+asteria-common-client-offline-empty = Nothing is saved for offline yet.
+asteria-common-client-offline-sync-now = Sync now
+asteria-common-client-offline-clear = Delete all
+asteria-common-client-offline-clear-confirm = Delete everything saved for offline?
+asteria-common-client-offline-clear-yes = Yes, delete all
+asteria-common-client-offline-cancel = Cancel
+asteria-common-client-offline-unsavable = { $count } files could not be saved.
+asteria-common-client-offline-failed = Saving stopped: { $reason }
+asteria-common-client-offline-status-syncing = Saving for offline { $done }/{ $total }
+asteria-common-client-offline-status-full = Offline storage is full
+asteria-common-client-offline-status-failed = Saving for offline stopped

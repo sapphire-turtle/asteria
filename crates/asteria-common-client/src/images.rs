@@ -16,6 +16,7 @@ use corundum_framework::egui;
 use url::Url;
 
 use crate::media_cache::MediaCache;
+use crate::offline::OfflineHandle;
 use crate::profiles::Token;
 use crate::rpc::{ClientError, RpcClient};
 use crate::session::{Gate, Health, lock_gate, note_health};
@@ -42,6 +43,8 @@ pub enum Preset {
     Thumb,
     /// Long side 1920 px.
     Preview,
+    /// Long side 1024 px, smaller files: what is saved for offline viewing.
+    OfflineImage,
 }
 
 impl Preset {
@@ -50,6 +53,7 @@ impl Preset {
         match self {
             Preset::Thumb => "thumb",
             Preset::Preview => "preview",
+            Preset::OfflineImage => "offline-image",
         }
     }
 
@@ -58,7 +62,7 @@ impl Preset {
     pub fn texture_budget(self) -> usize {
         match self {
             Preset::Thumb => 1_000,
-            Preset::Preview => 8,
+            Preset::Preview | Preset::OfflineImage => 8,
         }
     }
 }
@@ -129,8 +133,10 @@ enum EntryState {
 ///   item's `file_hash` changes, it is loaded again.
 /// - Nothing is sent before the session's handshake succeeds; if it fails, or the session
 ///   fails later, requests fail with that error.
-/// - With a `file_hash` and a cache, the disk cache is read first and a fetched image is
-///   stored there.
+/// - The saved offline copy is read first (by `file_hash`, or without one by the item id as
+///   the saved answers know it). Then, with a `file_hash` and a cache, the disk cache is read,
+///   and a fetched image is stored there. An offline session fetches nothing: an image not
+///   found on disk fails with [`ClientError::NotSaved`], and is tried again after the backoff.
 /// - Up to [`MAX_CONCURRENT`] images load at once, on threads of their own (not the
 ///   session's request worker). Images requested in the latest egui pass are taken from the
 ///   queue first; one not requested in the last [`STALE_AFTER_PASSES`] passes has scrolled
@@ -148,6 +154,7 @@ pub struct ImageLoader {
     token: Token,
     gate: Arc<Mutex<Gate>>,
     cache: Arc<OnceLock<Arc<MediaCache>>>,
+    offline: Arc<OnceLock<OfflineHandle>>,
     health: Health,
     entries: HashMap<Key, Entry>,
     /// Entries waiting for the handshake, in request order.
@@ -181,6 +188,7 @@ impl ImageLoader {
         token: Token,
         gate: Arc<Mutex<Gate>>,
         cache: Arc<OnceLock<Arc<MediaCache>>>,
+        offline: Arc<OnceLock<OfflineHandle>>,
         health: Health,
     ) -> ImageLoader {
         let (results_tx, results) = mpsc::channel();
@@ -190,6 +198,7 @@ impl ImageLoader {
             token,
             gate,
             cache,
+            offline,
             health,
             entries: HashMap::new(),
             held: Vec::new(),
@@ -212,8 +221,9 @@ impl ImageLoader {
     }
 
     /// Like [`request`](Self::request), for an image known only by its item id, such as an
-    /// album's cover. Without a `file_hash` the disk cache is neither read nor written, and
-    /// the entry is the one `request` would use for the same id, with no `file_hash`.
+    /// album's cover. Without a `file_hash` the disk cache is neither read nor written (the
+    /// saved offline copy still is), and the entry is the one `request` would use for the same
+    /// id, with no `file_hash`.
     pub fn request_id(&mut self, id: &ItemId, preset: Preset) -> ImageState {
         self.request_with(id, None, preset)
     }
@@ -280,7 +290,8 @@ impl ImageLoader {
     /// handshake. [`request`](Self::request) and [`Session::poll`](crate::session::Session::poll)
     /// call it; there is no need to call it yourself.
     pub fn poll(&mut self) {
-        let (mut thumbs, mut previews) = (false, false);
+        // The presets that got a texture, to evict beyond their budgets.
+        let mut arrived = Vec::new();
         let (first, longest) = self.backoff;
         while let Ok(done) = self.results.try_recv() {
             let Some(entry) = self.entries.get_mut(&done.key) else {
@@ -297,9 +308,8 @@ impl ImageLoader {
                 }
                 Outcome::Image(image) => {
                     let (id, preset) = &done.key;
-                    match preset {
-                        Preset::Thumb => thumbs = true,
-                        Preset::Preview => previews = true,
+                    if !arrived.contains(preset) {
+                        arrived.push(*preset);
                     }
                     entry.failures = 0;
                     let name = format!("asteria-media/{}/{}", id.0, preset.as_str());
@@ -319,11 +329,8 @@ impl ImageLoader {
             };
         }
         self.release_held();
-        if thumbs {
-            self.evict(Preset::Thumb);
-        }
-        if previews {
-            self.evict(Preset::Preview);
+        for preset in arrived {
+            self.evict(preset);
         }
     }
 
@@ -342,10 +349,12 @@ impl ImageLoader {
         let gate = lock_gate(&self.gate).clone();
         let failure = match gate {
             Gate::Pending => return,
-            Gate::Open { .. } => self.start_pool().err().map(|error| Failure {
-                error,
-                permanent: false,
-            }),
+            Gate::Open { .. } | Gate::Offline { .. } => {
+                self.start_pool().err().map(|error| Failure {
+                    error,
+                    permanent: false,
+                })
+            }
             Gate::Closed(error) => Some(Failure {
                 error,
                 permanent: true,
@@ -395,6 +404,7 @@ impl ImageLoader {
                     newest_pass: self.newest_pass.clone(),
                     gate: self.gate.clone(),
                     cache: self.cache.clone(),
+                    offline: self.offline.clone(),
                     health: self.health.clone(),
                     results: Mutex::new(self.results_tx.clone()),
                     ui: self.ctx.clone(),
@@ -527,6 +537,7 @@ struct PoolContext {
     newest_pass: Arc<AtomicU64>,
     gate: Arc<Mutex<Gate>>,
     cache: Arc<OnceLock<Arc<MediaCache>>>,
+    offline: Arc<OnceLock<OfflineHandle>>,
     /// The session's view of whether the server answers; each fetch reports to it.
     health: Health,
     results: Mutex<mpsc::Sender<Done>>,
@@ -697,23 +708,34 @@ fn next_job(shared: &Shared) -> Option<Next> {
     }
 }
 
-/// Reads the image from the disk cache, or fetches it (and caches it), then decodes it.
+/// Reads the image from the saved offline copy or the disk cache, or fetches it (and caches
+/// it), then decodes it.
 fn load(shared: &Shared, job: &Job) -> Result<egui::ColorImage, Failure> {
     let cx = &shared.cx;
-    check_gate(&cx.gate).map_err(Failure::permanent)?;
+    let online = check_gate(&cx.gate).map_err(Failure::permanent)?;
     let preset = job.preset.as_str();
+    if let Some(handle) = cx.offline.get() {
+        let saved = match &job.file_hash {
+            Some(hash) => handle.media(hash, preset),
+            None => {
+                handle.wait_loaded();
+                handle.media_of_item(&job.id, preset)
+            }
+        };
+        if let Some(image) = saved.and_then(|path| read_image(&path, "saved")) {
+            return Ok(image);
+        }
+    }
     let cache = cx.cache.get();
     if let Some(cache) = cache
-        && let Some(path) = cache.get(job.file_hash.as_deref(), preset)
+        && let Some(image) = cache
+            .get(job.file_hash.as_deref(), preset)
+            .and_then(|path| read_image(&path, "cached"))
     {
-        // A file trimmed away or damaged since is a miss.
-        match std::fs::read(&path) {
-            Ok(bytes) => match decode(&bytes) {
-                Ok(image) => return Ok(image),
-                Err(e) => tracing::debug!("cached image unusable, fetching it: {e}"),
-            },
-            Err(e) => tracing::debug!("cached image unreadable, fetching it: {e}"),
-        }
+        return Ok(image);
+    }
+    if !online {
+        return Err(ClientError::NotSaved.into());
     }
     let client = client(cx)?;
     let fetched = client.get_bytes(&format!("media/{}/{preset}", job.id.0));
@@ -724,12 +746,24 @@ fn load(shared: &Shared, job: &Job) -> Result<egui::ColorImage, Failure> {
     // not once the session is gone (its results belong to no one).
     if let Some(cache) = cache
         && !shared.cancelled.load(Ordering::Acquire)
-        && check_gate(&cx.gate).is_ok()
+        && check_gate(&cx.gate) == Ok(true)
         && let Err(e) = cache.put(job.file_hash.as_deref(), preset, &bytes)
     {
         tracing::warn!("cannot store an image in the cache: {e}");
     }
     Ok(image)
+}
+
+/// The image in the file at `path`; `None` (a miss) if it was removed or damaged since.
+fn read_image(path: &std::path::Path, what: &str) -> Option<egui::ColorImage> {
+    match std::fs::read(path) {
+        Ok(bytes) => match decode(&bytes) {
+            Ok(image) => return Some(image),
+            Err(e) => tracing::debug!("{what} image unusable, looking further: {e}"),
+        },
+        Err(e) => tracing::debug!("{what} image unreadable, looking further: {e}"),
+    }
+    None
 }
 
 /// The pool's client, built on first use.
@@ -743,10 +777,12 @@ fn client(cx: &PoolContext) -> Result<Arc<RpcClient>, ClientError> {
     Ok(client)
 }
 
-/// Lets a job through only while the handshake's library is being served.
-fn check_gate(gate: &Mutex<Gate>) -> Result<(), ClientError> {
+/// Lets a job through only while the handshake's library is being served, online (`true`)
+/// or from the saved copies (`false`).
+fn check_gate(gate: &Mutex<Gate>) -> Result<bool, ClientError> {
     match &*lock_gate(gate) {
-        Gate::Open { .. } => Ok(()),
+        Gate::Open { .. } => Ok(true),
+        Gate::Offline { .. } => Ok(false),
         Gate::Closed(e) => Err(e.clone()),
         // The loader queues nothing before the gate opens; kept as a guard.
         Gate::Pending => Err(ClientError::Protocol(

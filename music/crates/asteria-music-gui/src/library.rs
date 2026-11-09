@@ -9,14 +9,20 @@
 //! It holds the three lists (`album.list`, `artist.list`, `playlist.list`, [`PAGE_SIZE`] at a
 //! time, the next page once the drawn rows near the end) and, per screen, what is open: an
 //! album, an artist and the album opened from it, a playlist. The methods that start playing
-//! only build a [`Command`]; the app sends it to the player.
+//! only build a [`Command`]; the app sends it to the player. Offline they leave out the tracks
+//! whose audio is not saved ([`Availability`]).
+//!
+//! What is opened has "Save for offline" by its title, and the albums, artists and playlists
+//! listed have it in their right-click menu.
 
 use std::fmt::Debug;
 
 use asteria_common_client::errors::{error_detail, error_text};
 use asteria_common_client::images::ImageLoader;
+use asteria_common_client::offline::{OfflineHandle, PinTarget};
 use asteria_common_client::rpc::ClientError;
 use asteria_common_client::session::{Reply, Request, RequestId, Response, Session};
+use asteria_common_client::widgets::offline_toggle::{offline_toggle, saved_mark};
 use asteria_music_api::{
     ALBUM_GET, ALBUM_LIST, ARTIST_GET, ARTIST_LIST, Album, AlbumId, AlbumListing, AlbumSummary,
     Artist, ArtistId, ArtistListing, ArtistSummary, EntryStatus, ListParams, MusicTrack,
@@ -27,9 +33,10 @@ use corundum_framework::gui::{icons, tr};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::cover_grid::{CoverGrid, paint_cover};
+use crate::cover_grid::{CoverGrid, is_saved, offline_menu, paint_cover};
+use crate::offline::{PIN_ALBUM, PIN_ARTIST, PIN_PLAYLIST};
 use crate::player::{Command, QueueEntry};
-use crate::tracks::{self, TrackAction};
+use crate::tracks::{self, Availability, TrackAction};
 
 /// Items asked for per `*.list` page.
 pub const PAGE_SIZE: u32 = 200;
@@ -415,9 +422,10 @@ impl LibraryState {
     // Playing.
 
     /// The playable tracks of `list`, each with the index of its row (an album's track, a
-    /// playlist's entry). A playlist's `Missing` entries are not playable.
-    fn playable(&self, list: TrackList) -> Vec<(usize, &MusicTrack)> {
-        match list {
+    /// playlist's entry). A playlist's `Missing` entries are not playable, nor are the tracks
+    /// `available` leaves out.
+    fn playable(&self, list: TrackList, available: &Availability) -> Vec<(usize, &MusicTrack)> {
+        let mut tracks: Vec<(usize, &MusicTrack)> = match list {
             TrackList::Album => album_tracks(self.album()),
             TrackList::ArtistAlbum => album_tracks(self.artist_album()),
             TrackList::Playlist => self
@@ -431,13 +439,25 @@ impl LibraryState {
                         .collect()
                 })
                 .unwrap_or_default(),
-        }
+        };
+        tracks.retain(|(_, t)| available.can_play(t));
+        tracks
     }
 
     /// The command that replaces the queue with the playable tracks of `list` and starts at
-    /// the row `index`. `None` if there is no such row or it cannot be played.
-    pub fn play_from(&self, list: TrackList, index: usize) -> Option<Command> {
-        let tracks = self.playable(list);
+    /// the row `index`. `None` if there is no such row or it cannot be played. What can be
+    /// played depends on `session` (offline, only what is saved).
+    pub fn play_from(&self, session: &Session, list: TrackList, index: usize) -> Option<Command> {
+        self.play_from_in(&Availability::of(session), list, index)
+    }
+
+    fn play_from_in(
+        &self,
+        available: &Availability,
+        list: TrackList,
+        index: usize,
+    ) -> Option<Command> {
+        let tracks = self.playable(list, available);
         let start = tracks.iter().position(|(i, _)| *i == index)?;
         Some(Command::Replace {
             items: tracks
@@ -448,27 +468,39 @@ impl LibraryState {
         })
     }
 
-    fn one(&self, list: TrackList, index: usize) -> Option<Vec<QueueEntry>> {
-        let tracks = self.playable(list);
+    fn one(
+        &self,
+        available: &Availability,
+        list: TrackList,
+        index: usize,
+    ) -> Option<Vec<QueueEntry>> {
+        let tracks = self.playable(list, available);
         let (_, t) = tracks.into_iter().find(|(i, _)| *i == index)?;
         Some(vec![QueueEntry::from_track(t)])
     }
 
     /// The command that plays the track at the row `index` of `list` right after the current one.
-    pub fn play_next(&self, list: TrackList, index: usize) -> Option<Command> {
-        self.one(list, index).map(Command::PlayNext)
+    pub fn play_next(&self, session: &Session, list: TrackList, index: usize) -> Option<Command> {
+        self.one(&Availability::of(session), list, index)
+            .map(Command::PlayNext)
     }
 
     /// The command that adds the track at the row `index` of `list` to the end of the queue.
-    pub fn append(&self, list: TrackList, index: usize) -> Option<Command> {
-        self.one(list, index).map(Command::Append)
+    pub fn append(&self, session: &Session, list: TrackList, index: usize) -> Option<Command> {
+        self.one(&Availability::of(session), list, index)
+            .map(Command::Append)
     }
 
-    fn command(&self, list: TrackList, action: TrackAction) -> Option<Command> {
+    fn command(
+        &self,
+        available: &Availability,
+        list: TrackList,
+        action: TrackAction,
+    ) -> Option<Command> {
         match action {
-            TrackAction::Play(i) => self.play_from(list, i),
-            TrackAction::PlayNext(i) => self.play_next(list, i),
-            TrackAction::Append(i) => self.append(list, i),
+            TrackAction::Play(i) => self.play_from_in(available, list, i),
+            TrackAction::PlayNext(i) => self.one(available, list, i).map(Command::PlayNext),
+            TrackAction::Append(i) => self.one(available, list, i).map(Command::Append),
         }
     }
 
@@ -476,14 +508,18 @@ impl LibraryState {
 
     /// The Albums screen: the cover grid, or the album opened. Returns what to play.
     pub fn albums_ui(&mut self, ui: &mut egui::Ui, session: &mut Session) -> Option<Command> {
+        let available = Availability::of(session);
+        let offline = session.offline().cloned();
         if let Some(detail) = &self.album {
-            let out = album_page_ui(ui, detail, session.images());
+            let out = album_page_ui(ui, detail, session.images(), offline.as_ref(), &available);
             if out.retry
                 && let Some(d) = &mut self.album
             {
                 d.fetch(session);
             }
-            let command = out.action.and_then(|a| self.command(TrackList::Album, a));
+            let command = out
+                .action
+                .and_then(|a| self.command(&available, TrackList::Album, a));
             if out.back {
                 self.close_album();
             }
@@ -502,6 +538,7 @@ impl LibraryState {
         }
         let r = CoverGrid::new(&self.albums.items)
             .id_salt(("asteria_music_albums", session.generation()))
+            .offline(offline.as_ref())
             .show(ui, session.images());
         if r.last_visible
             .is_some_and(|last| last + PREFETCH_ROWS * r.columns >= self.albums.items.len())
@@ -517,8 +554,10 @@ impl LibraryState {
     /// The Artists screen: the artists, or the artist opened with its albums (and one of
     /// them opened).
     pub fn artists_ui(&mut self, ui: &mut egui::Ui, session: &mut Session) -> Option<Command> {
+        let available = Availability::of(session);
+        let offline = session.offline().cloned();
         if let Some(detail) = &self.artist_album {
-            let out = album_page_ui(ui, detail, session.images());
+            let out = album_page_ui(ui, detail, session.images(), offline.as_ref(), &available);
             if out.retry
                 && let Some(d) = &mut self.artist_album
             {
@@ -526,7 +565,7 @@ impl LibraryState {
             }
             let command = out
                 .action
-                .and_then(|a| self.command(TrackList::ArtistAlbum, a));
+                .and_then(|a| self.command(&available, TrackList::ArtistAlbum, a));
             if out.back {
                 self.close_artist_album();
             }
@@ -552,15 +591,23 @@ impl LibraryState {
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             ui.heading(artist.summary.name.as_str());
+                            let target = PinTarget {
+                                kind: PIN_ARTIST.into(),
+                                id: artist.summary.id.0.clone(),
+                                name: artist.summary.name.clone(),
+                            };
+                            offline_toggle(ui, offline.as_ref(), &target);
                             if !artist.albums.is_empty() {
                                 ui.label(tr!(ui, "asteria-music-detail-own-albums"));
                                 opened = CoverGrid::new(&artist.albums)
+                                    .offline(offline.as_ref())
                                     .show_flowing(ui, session.images());
                             }
                             if !artist.appears_on.is_empty() {
                                 ui.add_space(8.0);
                                 ui.label(tr!(ui, "asteria-music-detail-appears-on"));
                                 opened = CoverGrid::new(&artist.appears_on)
+                                    .offline(offline.as_ref())
                                     .show_flowing(ui, session.images())
                                     .or(opened.take());
                             }
@@ -597,7 +644,15 @@ impl LibraryState {
                 last = range.end.saturating_sub(1);
                 for artist in &self.artists.items[range] {
                     ui.horizontal(|ui| {
-                        if ui.link(artist.name.as_str()).clicked() {
+                        let link = ui.link(artist.name.as_str());
+                        offline_menu(
+                            &link,
+                            offline.as_ref(),
+                            PIN_ARTIST,
+                            &artist.id.0,
+                            &artist.name,
+                        );
+                        if link.clicked() {
                             opened = Some(artist.id.clone());
                         }
                         ui.weak(tr!(
@@ -605,6 +660,9 @@ impl LibraryState {
                             "asteria-music-artists-albums",
                             count = u64::from(artist.album_count)
                         ));
+                        if is_saved(offline.as_ref(), PIN_ARTIST, &artist.id.0) {
+                            saved_mark(ui);
+                        }
                     });
                 }
             });
@@ -619,6 +677,8 @@ impl LibraryState {
 
     /// The Playlists screen: the playlists, or the playlist opened with its tracks.
     pub fn playlists_ui(&mut self, ui: &mut egui::Ui, session: &mut Session) -> Option<Command> {
+        let available = Availability::of(session);
+        let offline = session.offline().cloned();
         if let Some(detail) = &self.playlist {
             let mut back = false;
             let mut action = None;
@@ -635,6 +695,12 @@ impl LibraryState {
                 }
                 Some(playlist) => {
                     ui.heading(playlist.summary.name.as_str());
+                    let target = PinTarget {
+                        kind: PIN_PLAYLIST.into(),
+                        id: playlist.summary.id.0.clone(),
+                        name: playlist.summary.name.clone(),
+                    };
+                    offline_toggle(ui, offline.as_ref(), &target);
                     if playlist.truncated {
                         ui.weak(tr!(ui, "asteria-music-detail-truncated"));
                     }
@@ -644,10 +710,11 @@ impl LibraryState {
                         ("asteria_music_playlist", playlist.summary.id.0.as_str()),
                         &rows,
                         None,
+                        &available,
                     );
                 }
             }
-            let command = action.and_then(|a| self.command(TrackList::Playlist, a));
+            let command = action.and_then(|a| self.command(&available, TrackList::Playlist, a));
             if back {
                 self.close_playlist();
             }
@@ -676,8 +743,19 @@ impl LibraryState {
                 for playlist in &self.playlists.items[range] {
                     ui.horizontal(|ui| {
                         ui.add(icons::image(ui, icons::file_text(), 14.0));
-                        if ui.link(playlist.name.as_str()).clicked() {
+                        let link = ui.link(playlist.name.as_str());
+                        offline_menu(
+                            &link,
+                            offline.as_ref(),
+                            PIN_PLAYLIST,
+                            &playlist.id.0,
+                            &playlist.name,
+                        );
+                        if link.clicked() {
                             opened = Some(playlist.id.clone());
+                        }
+                        if is_saved(offline.as_ref(), PIN_PLAYLIST, &playlist.id.0) {
+                            saved_mark(ui);
                         }
                     });
                 }
@@ -705,10 +783,13 @@ struct AlbumPageOut {
     action: Option<TrackAction>,
 }
 
+/// An opened album: its cover, title, "Save for offline" and tracks.
 fn album_page_ui(
     ui: &mut egui::Ui,
     detail: &Detail<AlbumId, Album>,
     images: &mut ImageLoader,
+    offline: Option<&OfflineHandle>,
+    available: &Availability,
 ) -> AlbumPageOut {
     let mut out = AlbumPageOut {
         back: false,
@@ -739,6 +820,12 @@ fn album_page_ui(
                 "asteria-music-detail-album-tracks",
                 count = album.tracks.len() as u64
             ));
+            let target = PinTarget {
+                kind: PIN_ALBUM.into(),
+                id: summary.id.0.clone(),
+                name: summary.title.clone(),
+            };
+            offline_toggle(ui, offline, &target);
         });
     });
     ui.add_space(4.0);
@@ -748,6 +835,7 @@ fn album_page_ui(
         ("asteria_music_album", summary.id.0.as_str()),
         &rows,
         Some(summary.album_artist.as_str()),
+        available,
     );
     out
 }

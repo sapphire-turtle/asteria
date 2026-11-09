@@ -3,8 +3,8 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use asteria_common_core::{Library, MediaKind};
@@ -21,6 +21,12 @@ impl AppExtension for Photos {
     }
 }
 
+/// The small JPEG the libraries are made of.
+pub fn red_jpg() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../crates/asteria-common-core/tests/fixtures/red.jpg")
+}
+
 /// The server, its library and its owner's token. Stops when dropped.
 pub struct TestServer {
     _dir: tempfile::TempDir,
@@ -30,12 +36,24 @@ pub struct TestServer {
     /// The library's root folder.
     pub root: PathBuf,
     pub lib: Arc<Library>,
+    /// The path of every request the server received, in order.
+    pub requests: Arc<Mutex<Vec<String>>>,
 }
 
 impl TestServer {
     /// A library holding a copy of a small JPEG under each of `files`; `prepare` may then
     /// change the folder (break a sidecar, say) before the scan.
     pub fn start(files: &[&str], prepare: impl FnOnce(&Path)) -> TestServer {
+        TestServer::start_with(files, prepare, true)
+    }
+
+    /// As [`start`](Self::start), but with no image tool: what the in-process decoder cannot
+    /// read is refused at once (422) instead of handed to `vipsthumbnail`.
+    pub fn start_without_tools(files: &[&str], prepare: impl FnOnce(&Path)) -> TestServer {
+        TestServer::start_with(files, prepare, false)
+    }
+
+    fn start_with(files: &[&str], prepare: impl FnOnce(&Path), tools: bool) -> TestServer {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         std::fs::create_dir(&root).unwrap();
@@ -45,8 +63,7 @@ impl TestServer {
                 .with_state_dir(dir.path().join("state")),
         );
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
-        let red = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../crates/asteria-common-core/tests/fixtures/red.jpg");
+        let red = red_jpg();
         for f in files {
             std::fs::copy(&red, root.join(f)).unwrap();
         }
@@ -67,11 +84,13 @@ impl TestServer {
             .1
             .expose()
             .to_owned();
-        let processor = Arc::new(Processor::new(
-            dir.path().join("cache/thumbs"),
-            1,
-            Duration::from_secs(60),
-        ));
+        let thumbs = dir.path().join("cache/thumbs");
+        let processor = Arc::new(if tools {
+            Processor::new(thumbs, 1, Duration::from_secs(60))
+        } else {
+            let missing = dir.path().join("no-such-tool");
+            Processor::with_tools(thumbs, 1, Duration::from_secs(60), &missing, &missing)
+        });
         let uploads = Arc::new(UploadStore::open(lib.state_dir().unwrap()).unwrap());
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -79,6 +98,8 @@ impl TestServer {
             .build()
             .unwrap();
         let state_lib = lib.clone();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let log = requests.clone();
         let addr = rt.block_on(async {
             let (writer, _h) = spawn_writer(state_lib.clone(), cache.clone());
             let (rescan, rescan_rx) = tokio::sync::mpsc::channel(1);
@@ -99,7 +120,13 @@ impl TestServer {
             let addr = listener.local_addr().unwrap();
             tokio::spawn(async move {
                 let _rescan_rx = rescan_rx;
-                axum::serve(listener, router(state)).await.unwrap();
+                let app = router(state).layer(axum::middleware::from_fn(
+                    move |req: axum::extract::Request, next: axum::middleware::Next| {
+                        log.lock().unwrap().push(req.uri().path().to_owned());
+                        next.run(req)
+                    },
+                ));
+                axum::serve(listener, app).await.unwrap();
             });
             addr
         });
@@ -110,7 +137,17 @@ impl TestServer {
             token,
             root,
             lib,
+            requests,
         }
+    }
+
+    /// Whether the server was asked for a path ending in `suffix`.
+    pub fn was_asked(&self, suffix: &str) -> bool {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.ends_with(suffix))
     }
 }
 

@@ -41,7 +41,9 @@ pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// - any other answer the client cannot make sense of (another status, a body that is not the
 ///   expected JSON, a mismatched id) is [`Protocol`](Self::Protocol);
 /// - a failure on this device (a worker thread or the HTTP client could not be created,
-///   reading or writing local files) is [`Io`](Self::Io).
+///   reading or writing local files) is [`Io`](Self::Io);
+/// - while the session is offline, what was not saved is [`NotSaved`](Self::NotSaved), and a
+///   change is [`Offline`](Self::Offline).
 ///
 /// The texts carry no token: the token only ever travels in the `Authorization` header.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -68,6 +70,12 @@ pub enum ClientError {
     LibraryChanged,
     #[error("local error: {0}")]
     Io(String),
+    /// The session is offline and the answer (or image) was not saved for offline use.
+    #[error("not saved for offline use")]
+    NotSaved,
+    /// The session is offline, and changes need the server.
+    #[error("cannot edit while offline")]
+    Offline,
 }
 
 /// Talks to one server with one token. Blocking: never call it on the UI thread.

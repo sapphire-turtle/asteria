@@ -73,3 +73,8 @@ asteria-music-playback-low-quality-hint = 次の曲から効きます。回線�
 asteria-music-playback-save-failed = 再生の設定を保存できませんでした: { $reason }
 
 asteria-music-side-nothing = 再生中の曲はありません。
+
+# オフライン用の保存と、サーバーなしでの再生。
+asteria-music-offline-save = オフライン用に保存
+asteria-music-offline-remove = オフラインから削除
+asteria-music-offline-not-saved = オフライン用に保存されていないため、サーバーなしでは再生できません。

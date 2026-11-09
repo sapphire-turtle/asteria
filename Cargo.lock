@@ -371,6 +371,7 @@ dependencies = [
  "asteria-music-api",
  "asteria-photos-api",
  "axum",
+ "blake3",
  "bytes",
  "corundum-framework",
  "grain-id",
@@ -469,6 +470,7 @@ dependencies = [
  "asteria-common-api",
  "serde",
  "serde_json",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -585,9 +587,11 @@ dependencies = [
  "axum",
  "corundum-framework",
  "grain-id",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "toml 1.1.8+spec-1.1.0",
  "tracing",
  "url",
 ]

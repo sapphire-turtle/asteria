@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 asteria-common-api = { path = "../../../crates/asteria-common-api", version = "2.3.0" }
 serde.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -1,13 +1,16 @@
 //! [`Connection`]: everything tied to the server in use, dropped whole on a switch.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use asteria_common_client::offline::OfflineCatalog;
 use asteria_common_client::profiles::ServerProfile;
 use asteria_common_client::rpc::ClientError;
 use asteria_common_client::session::{Request, RequestId, Session, SessionDirs, SessionState};
 use corundum_framework::egui;
 
 use crate::library::LibraryState;
+use crate::offline::MusicCatalog;
 
 /// How often `library.info` is asked again while the server scans.
 pub const SCANNING_POLL: Duration = Duration::from_secs(2);
@@ -38,8 +41,15 @@ impl Connection {
         dirs: SessionDirs,
         reopened: bool,
     ) -> Connection {
-        let mut session =
-            Session::open_with_dirs(profile, asteria_music_api::client_info(), ctx.clone(), dirs);
+        // With a data directory, the session saves for offline and answers from the copies.
+        let catalog: Arc<dyn OfflineCatalog> = Arc::new(MusicCatalog);
+        let mut session = Session::open_with(
+            profile,
+            asteria_music_api::client_info(),
+            ctx.clone(),
+            dirs,
+            Some(catalog),
+        );
         let mut library = LibraryState::new();
         // Queued behind the handshake; they fail with the handshake if that fails.
         library.start(&mut session);

@@ -941,6 +941,40 @@ async fn a_small_picture_is_not_enlarged() {
     assert_eq!(runs(&ran), 0);
 }
 
+#[test]
+fn offline_image_parses_and_is_1024_webp() {
+    let p = Preset::parse("offline-image").unwrap();
+    assert_eq!(p, Preset::OfflineImage);
+    assert_eq!(p.name(), "offline-image");
+    assert_eq!(p.size(), 1024);
+    assert_eq!(p.ext(), "webp");
+    assert_eq!(p.mime(), "image/webp");
+    assert_eq!(p.quality(), 70.0);
+    assert_eq!(Preset::Preview.quality(), 80.0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn offline_image_never_enlarges() {
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran");
+    let tool = failing_tool(dir.path(), &ran);
+    let p = inprocess_processor(dir.path(), &tool);
+    for (hash, (w, h), expected) in [
+        ("blake3:aa00", (400, 200), (400, 200)),
+        ("blake3:bb00", (3000, 2000), (1024, 683)),
+    ] {
+        let src = dir.path().join(format!("{w}.jpg"));
+        std::fs::write(&src, encoded(w, h, image::ImageFormat::Jpeg)).unwrap();
+        let out = p
+            .render(&src, MediaKind::Image, hash, Preset::OfflineImage)
+            .await
+            .unwrap();
+        assert_eq!(webp_size(&std::fs::read(out).unwrap()), expected);
+    }
+    assert_eq!(runs(&ran), 0);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn the_exif_orientation_is_applied() {

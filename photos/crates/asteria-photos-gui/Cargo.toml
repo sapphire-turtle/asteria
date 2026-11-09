@@ -14,6 +14,9 @@ asteria-common-api = { path = "../../../crates/asteria-common-api", version = "2
 asteria-common-client = { path = "../../../crates/asteria-common-client" }
 asteria-photos-api = { path = "../asteria-photos-api" }
 corundum-framework = { workspace = true, features = ["gui", "serde", "eframe"] }
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
@@ -23,6 +26,5 @@ asteria-common-server = { path = "../../../crates/asteria-common-server" }
 axum.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
 grain-id.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
 url.workspace = true

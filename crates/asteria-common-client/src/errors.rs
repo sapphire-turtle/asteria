@@ -40,6 +40,8 @@ pub fn error_text(ctx: &egui::Context, e: &ClientError) -> String {
         ClientError::Rpc { .. } => tr!(ctx, "asteria-common-client-servers-error-server"),
         ClientError::Protocol(_) => tr!(ctx, "asteria-common-client-servers-error-protocol"),
         ClientError::Io(_) => tr!(ctx, "asteria-common-client-servers-error-local"),
+        ClientError::NotSaved => tr!(ctx, "asteria-common-client-servers-error-not-saved"),
+        ClientError::Offline => tr!(ctx, "asteria-common-client-servers-error-offline"),
     }
 }
 

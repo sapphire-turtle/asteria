@@ -9,14 +9,16 @@ use std::time::{Duration, Instant};
 
 use asteria_common_api::{ItemId, MediaItem};
 use asteria_common_client::images::{ImageState, Preset};
+use asteria_common_client::offline::PinStatus;
+use asteria_common_client::profiles::ServerProfile;
 use asteria_common_client::rpc::ClientError;
 use asteria_common_client::session::{Session, SessionDirs, SessionState};
 use corundum_framework::egui;
 use serde_json::json;
 
 use common::{
-    DEADLINE, StubRequest, StubResponse, library_info, photos_client, photos_server_info, profile,
-    serve, wait_settled,
+    DEADLINE, StubRequest, StubResponse, free_addr, library_info, offline, photos_client,
+    photos_server_info, profile, serve, wait_settled,
 };
 
 /// A 4x3 lossless WebP.
@@ -634,4 +636,101 @@ fn walk_files(dir: &Path) -> Vec<std::path::PathBuf> {
         }
     }
     files
+}
+
+/// An item the fake offline server knows by `id`, with its content hash.
+fn fake_item(id: &str) -> MediaItem {
+    let mut item = item(0);
+    item.id = ItemId(id.into());
+    item.file_hash = Some(offline::file_hash(id));
+    item
+}
+
+fn offline_session(profile: &ServerProfile, ctx: &egui::Context, data: &Path) -> Session {
+    let mut session = Session::open_with(
+        profile,
+        photos_client(),
+        ctx.clone(),
+        SessionDirs {
+            cache: None,
+            data: Some(data.to_path_buf()),
+        },
+        Some(Arc::new(offline::FakeCatalog)),
+    );
+    wait_settled(&mut session);
+    session
+}
+
+/// Connects to a fake server serving WebP media and saves the set `s1` of `item-1`.
+fn save_item_1(data: &Path, ctx: &egui::Context) -> (ServerProfile, offline::FakeServer) {
+    let server = offline::FakeServer::start();
+    server.media_bytes(webp());
+    server.set("s1", &["item-1"]);
+    let profile = profile(server.addr, "t");
+    let mut session = offline_session(&profile, ctx, data);
+    assert!(matches!(session.state(), SessionState::Ready { .. }));
+    let handle = session.offline().unwrap().clone();
+    handle.pin(offline::set_pin("s1"));
+    offline::wait_for("the saved thumb", || {
+        session.poll();
+        handle.status("set", "s1") == Some(PinStatus::Saved)
+            && handle
+                .media(&offline::file_hash("item-1"), "thumb")
+                .is_some()
+    });
+    (profile, server)
+}
+
+#[test]
+fn an_offline_copy_is_drawn_without_the_server() {
+    let data = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let (profile, _server) = save_item_1(data.path(), &ctx);
+    let gone = ServerProfile {
+        url: url::Url::parse(&format!("http://{}", free_addr())).unwrap(),
+        ..profile
+    };
+    let mut session = offline_session(&gone, &ctx, data.path());
+    assert!(matches!(session.state(), SessionState::Offline { .. }));
+
+    assert_ready(&wait_loaded(
+        &mut session,
+        &ctx,
+        &fake_item("item-1"),
+        Preset::Thumb,
+    ));
+    // Known only by its id, through the saved answers.
+    assert_ready(&wait_loaded_id(
+        &mut session,
+        &ctx,
+        &ItemId("item-1".into()),
+        Preset::Thumb,
+    ));
+    match wait_loaded(&mut session, &ctx, &fake_item("item-2"), Preset::Thumb) {
+        ImageState::Failed(ClientError::NotSaved) => {}
+        other => panic!("expected NotSaved, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_saved_copy_is_used_before_the_network() {
+    let data = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let (profile, server) = save_item_1(data.path(), &ctx);
+    let fetched = server.requests("GET /media/item-1/thumb");
+    let mut session = offline_session(&profile, &ctx, data.path());
+    assert!(matches!(session.state(), SessionState::Ready { .. }));
+    assert_ready(&wait_loaded(
+        &mut session,
+        &ctx,
+        &fake_item("item-1"),
+        Preset::Thumb,
+    ));
+    assert_eq!(server.requests("GET /media/item-1/thumb"), fetched);
+}
+
+#[test]
+fn the_offline_image_preset() {
+    assert_eq!(Preset::OfflineImage.as_str(), "offline-image");
+    assert_eq!(Preset::OfflineImage.texture_budget(), 8);
 }

@@ -8,18 +8,27 @@
 //!
 //! It also holds what the detail pane's edits wait for ([`Edits`]) and the item shown full
 //! screen ([`opened`](BrowseState::opened)), for the same reason.
+//!
+//! The folder's heading has the save-for-offline toggle, and a mark while the folder shown is
+//! saved (itself, or a folder above it). Offline, an item whose `offline-image` is not saved
+//! is dimmed and does not open ([`Openable`]).
 
 use std::time::{Duration, Instant};
 
 use asteria_common_api::{FolderListParams, ItemId, MediaItem};
 use asteria_common_client::errors::{error_detail, error_text};
+use asteria_common_client::images::Preset;
+use asteria_common_client::offline::{OfflineHandle, PinStatus, PinTarget};
 use asteria_common_client::rpc::ClientError;
 use asteria_common_client::session::{Reply, Request, RequestId, Response, Session, SessionState};
+use asteria_common_client::widgets::offline_toggle::{offline_toggle, saved_mark};
 use asteria_common_client::widgets::thumb_grid::ThumbGrid;
 use corundum_framework::egui;
 use corundum_framework::gui::{icons, tr};
 
 use crate::detail::{DetailView, Edit, Edits};
+use crate::display::{DisplayPreset, DisplaySettings};
+use crate::offline::PIN_FOLDER;
 
 /// Items asked for per `folder.list` page.
 pub const PAGE_SIZE: u32 = 200;
@@ -62,6 +71,8 @@ pub struct BrowseState {
     /// The `library.info` waited for.
     info: Option<RequestId>,
     next_info: Instant,
+    /// The preset of the viewer and the detail pane.
+    pub(crate) display: DisplayPreset,
 }
 
 impl Default for BrowseState {
@@ -85,6 +96,7 @@ impl BrowseState {
             edits: Edits::default(),
             info: None,
             next_info: Instant::now() + IDLE_POLL,
+            display: DisplayPreset::default(),
         }
     }
 
@@ -142,9 +154,11 @@ impl BrowseState {
         self.edits.send(session, item, edit)
     }
 
-    /// Show `id` full screen (and select it).
-    pub fn open_item(&mut self, id: &ItemId) {
-        if self.items.iter().any(|i| i.id == *id) {
+    /// Show `id` full screen (and select it), unless it cannot be shown now (offline, with no
+    /// saved copy).
+    pub fn open_item(&mut self, session: &Session, id: &ItemId) {
+        let can = Openable::of(session);
+        if self.items.iter().any(|i| i.id == *id && can.open(i)) {
             self.selected = Some(id.clone());
             self.opened = Some(id.clone());
         }
@@ -162,13 +176,26 @@ impl BrowseState {
     }
 
     /// Move the full-screen view `delta` items on (negative: back), staying within the
-    /// listing; the selection follows. Near the end, the next page is fetched.
+    /// listing and passing over the items that cannot be shown now (offline, with no saved
+    /// copy); the selection follows. Near the end, the next page is fetched.
     pub fn step(&mut self, session: &mut Session, delta: isize) {
         let Some(index) = self.opened_index() else {
             return;
         };
-        let last = self.items.len() - 1;
-        let to = index.saturating_add_signed(delta).min(last);
+        let can = Openable::of(session);
+        let mut to = index;
+        for _ in 0..delta.unsigned_abs() {
+            let shown = |i: &usize| can.open(&self.items[*i]);
+            let found = if delta < 0 {
+                (0..to).rev().find(shown)
+            } else {
+                (to + 1..self.items.len()).find(shown)
+            };
+            match found {
+                Some(i) => to = i,
+                None => break,
+            }
+        }
         let id = self.items[to].id.clone();
         self.selected = Some(id.clone());
         self.opened = Some(id);
@@ -325,6 +352,7 @@ impl BrowseState {
         egui::Panel::top("asteria_photos_location").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 go_to = self.breadcrumb_ui(ui);
+                self.offline_ui(ui, session.offline());
                 if let SessionState::Ready { library } = session.state()
                     && library.scanning
                 {
@@ -397,9 +425,12 @@ impl BrowseState {
                 session.generation(),
                 self.path.as_str(),
             );
+            let can = Openable::of(session);
+            let dimmed = |item: &MediaItem| !can.open(item);
             let r = ThumbGrid::new(&self.items)
                 .selected(self.selected.clone())
                 .id_salt(salt)
+                .dimmed(&dimmed)
                 .show(ui, session.images());
             if let Some(id) = r.selected {
                 self.selected = Some(id);
@@ -419,7 +450,12 @@ impl BrowseState {
     }
 
     /// The detail pane for the selected item, or a word that nothing is selected.
-    pub(crate) fn detail_ui(&mut self, ui: &mut egui::Ui, session: &mut Session) {
+    pub(crate) fn detail_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &mut Session,
+        display: &DisplaySettings,
+    ) {
         let found = self
             .selected
             .as_ref()
@@ -428,8 +464,32 @@ impl BrowseState {
             ui.weak(tr!(ui, "asteria-photos-detail-none"));
             return;
         };
-        if crate::detail::ui(ui, item, &mut self.edits, session) {
+        let preset = self.display.of(session, display, item);
+        let openable = Openable::of(session).open(item);
+        if crate::detail::ui(ui, item, &mut self.edits, session, preset, openable) {
             self.opened = Some(item.id.clone());
+        }
+    }
+
+    /// The heading's save-for-offline toggle for the folder shown (the root is named as the
+    /// breadcrumb names it), and the mark while it is saved.
+    fn offline_ui(&self, ui: &mut egui::Ui, handle: Option<&OfflineHandle>) {
+        ui.separator();
+        let name = match self.path.rsplit('/').next().filter(|n| !n.is_empty()) {
+            Some(name) => name.to_owned(),
+            None => tr!(ui, "asteria-photos-library-root"),
+        };
+        let target = PinTarget {
+            kind: PIN_FOLDER.into(),
+            id: self.path.clone(),
+            name,
+        };
+        offline_toggle(ui, handle, &target);
+        let saved = handle.is_some_and(|h| {
+            covering_folders(&self.path).any(|f| h.status(PIN_FOLDER, &f) == Some(PinStatus::Saved))
+        });
+        if saved {
+            saved_mark(ui);
         }
     }
 
@@ -457,6 +517,42 @@ impl BrowseState {
     }
 }
 
+/// Which items can be shown full screen now: every one while the server answers; offline,
+/// only those whose `offline-image` is saved. Asked of the handle's record of what is stored,
+/// so a frame that draws many cells does no disk I/O.
+pub(crate) enum Openable {
+    All,
+    /// Offline, with the library's copies (`None` when the app keeps none).
+    Saved(Option<OfflineHandle>),
+}
+
+impl Openable {
+    pub(crate) fn of(session: &Session) -> Openable {
+        if session.is_offline() {
+            Openable::Saved(session.offline().cloned())
+        } else {
+            Openable::All
+        }
+    }
+
+    pub(crate) fn open(&self, item: &MediaItem) -> bool {
+        match self {
+            Openable::All => true,
+            Openable::Saved(handle) => handle
+                .as_ref()
+                .zip(item.file_hash.as_deref())
+                .is_some_and(|(h, hash)| h.is_stored(hash, Preset::OfflineImage.as_str())),
+        }
+    }
+}
+
+/// The folders whose pin covers `path`: the root, each folder on the way down, and `path`
+/// itself. Component by component, so a pin of `20` does not cover `2026`.
+fn covering_folders(path: &str) -> impl Iterator<Item = String> + '_ {
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    (0..=parts.len()).map(move |n| parts[..n].join("/"))
+}
+
 /// `name` inside the folder `path` (`""` being the root).
 fn join(path: &str, name: &str) -> String {
     if path.is_empty() {
@@ -468,11 +564,20 @@ fn join(path: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::join;
+    use super::{covering_folders, join};
 
     #[test]
     fn joins_below_the_root_and_below_a_folder() {
         assert_eq!(join("", "a"), "a");
         assert_eq!(join("a", "b"), "a/b");
+    }
+
+    #[test]
+    fn a_folder_is_covered_by_itself_and_the_folders_above() {
+        let all = |p| covering_folders(p).collect::<Vec<_>>();
+        assert_eq!(all(""), [""]);
+        assert_eq!(all("2026/trip"), ["", "2026", "2026/trip"]);
+        // Whole names only: `20` is not above `2026`.
+        assert!(!all("2026").contains(&"20".to_owned()));
     }
 }

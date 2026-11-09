@@ -134,6 +134,7 @@ fn drop_while_disconnected_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let paths = asteria_photos_gui::app::AppPaths {
         servers: dir.path().join("servers.toml"),
+        display: dir.path().join("display.toml"),
         cache: None,
         data: Some(dir.path().join("data")),
     };

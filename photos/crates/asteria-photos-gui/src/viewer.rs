@@ -2,19 +2,22 @@
 //!
 //! Left and Right move to the previous and next item of the listing (the selection follows,
 //! and the next page is fetched near the end); Esc closes it. Videos show their still
-//! preview only: playback is for a later plan. It draws the `preview` preset, and asks for
-//! the neighbours' too so a step shows at once: three previews, well within the loader's
-//! budget of eight.
+//! preview only: playback is for a later plan. It draws the `preview` preset (`offline-image`
+//! when offline or set to show in low quality, see
+//! [`DisplayPreset`](crate::display::DisplayPreset)), and asks for the
+//! neighbours' too so a step shows at once: three images, well within the loader's budget of
+//! eight.
 
 use asteria_common_api::MediaKind;
 use asteria_common_client::errors::error_text;
-use asteria_common_client::images::{ImageState, Preset};
+use asteria_common_client::images::ImageState;
 use asteria_common_client::session::Session;
 use corundum_framework::egui;
 use corundum_framework::gui::{icons, tr};
 
 use crate::browse::BrowseState;
 use crate::detail::fit;
+use crate::display::DisplaySettings;
 
 /// What the person asked of the viewer, besides moving in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +29,12 @@ pub(crate) enum Asked {
 
 /// Draw the viewer for `browse`'s opened item, filling `ui`. Closes itself (clearing the
 /// opened item) on Esc, on its close button, or when the item is no longer listed.
-pub(crate) fn ui(ui: &mut egui::Ui, browse: &mut BrowseState, session: &mut Session) -> Asked {
+pub(crate) fn ui(
+    ui: &mut egui::Ui,
+    browse: &mut BrowseState,
+    session: &mut Session,
+    display: &DisplaySettings,
+) -> Asked {
     let (prev, next, close) = ui.input_mut(|i| {
         (
             i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
@@ -52,6 +60,7 @@ pub(crate) fn ui(ui: &mut egui::Ui, browse: &mut BrowseState, session: &mut Sess
     };
     let total = browse.items().len();
     let item = browse.items()[index].clone();
+    let preset = browse.display.of(session, display, &item);
     let mut asked = Asked::Nothing;
     let mut step = 0;
     let fill = ui.visuals().extreme_bg_color;
@@ -92,7 +101,7 @@ pub(crate) fn ui(ui: &mut egui::Ui, browse: &mut BrowseState, session: &mut Sess
                 });
             });
             let area = ui.available_rect_before_wrap();
-            match session.images().request(&item, Preset::Preview) {
+            match session.images().request(&item, preset) {
                 ImageState::Ready(tex) => {
                     let size = fit(tex.size_vec2(), area.size());
                     let rect = egui::Rect::from_center_size(area.center(), size);
@@ -123,7 +132,7 @@ pub(crate) fn ui(ui: &mut egui::Ui, browse: &mut BrowseState, session: &mut Sess
             {
                 if let Some(n) = browse.items().get(i) {
                     let n = n.clone();
-                    session.images().request(&n, Preset::Preview);
+                    session.images().request(&n, preset);
                 }
             }
             let side = egui::vec2(40.0, 40.0);

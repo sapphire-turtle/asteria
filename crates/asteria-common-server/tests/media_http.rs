@@ -187,6 +187,25 @@ async fn thumb_is_webp_and_cached() {
 }
 
 #[tokio::test]
+async fn offline_image_of_a_photo_is_served() {
+    let e = env();
+    hash_all(&e);
+    let id = item_id(&e, "a.jpg");
+    let (s, h, b) = get(
+        &e.app,
+        Some(&e.owner_token),
+        &format!("/media/{id}/offline-image"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(h["content-type"], "image/webp");
+    assert!(webp(&b));
+    let img = image::load_from_memory_with_format(&b, image::ImageFormat::WebP).unwrap();
+    assert!(img.width().max(img.height()) <= 1024);
+}
+
+#[tokio::test]
 async fn corrupt_image_is_422_and_not_retried() {
     if !have_tool("vipsthumbnail") {
         return;

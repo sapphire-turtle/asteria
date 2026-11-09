@@ -79,3 +79,8 @@ asteria-music-playback-low-quality-hint = Takes effect from the next track. For 
 asteria-music-playback-save-failed = The playback settings could not be saved: { $reason }
 
 asteria-music-side-nothing = Nothing is playing.
+
+# Saving for offline, and playing without the server.
+asteria-music-offline-save = Save for offline
+asteria-music-offline-remove = Remove from offline
+asteria-music-offline-not-saved = Not saved for offline, so it cannot play without the server.

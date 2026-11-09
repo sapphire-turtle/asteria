@@ -441,6 +441,8 @@ impl ServersPage {
                     owner = library.owner.as_str()
                 ));
             }
+            // A test session has no offline catalog, so it never ends offline.
+            SessionState::Offline { .. } => {}
             SessionState::Failed(e) => {
                 let reason = error_text(&ctx, e);
                 ui.colored_label(

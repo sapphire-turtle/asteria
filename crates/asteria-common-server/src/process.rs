@@ -235,6 +235,8 @@ const AUDIO_JOBS: usize = 1;
 pub enum Preset {
     Thumb,
     Preview,
+    /// A 1024 px WebP of quality 70 to keep offline.
+    OfflineImage,
     /// Ogg Opus for listening offline; made from audio in the server, with no external tool.
     OfflineAudio,
 }
@@ -245,6 +247,7 @@ impl Preset {
         match name {
             "thumb" => Some(Preset::Thumb),
             "preview" => Some(Preset::Preview),
+            "offline-image" => Some(Preset::OfflineImage),
             "offline-audio" => Some(Preset::OfflineAudio),
             _ => None,
         }
@@ -254,6 +257,7 @@ impl Preset {
         match self {
             Preset::Thumb => "thumb",
             Preset::Preview => "preview",
+            Preset::OfflineImage => "offline-image",
             Preset::OfflineAudio => "offline-audio",
         }
     }
@@ -263,6 +267,7 @@ impl Preset {
         match self {
             Preset::Thumb => 256,
             Preset::Preview => 1920,
+            Preset::OfflineImage => 1024,
             Preset::OfflineAudio => 0,
         }
     }
@@ -270,15 +275,24 @@ impl Preset {
     /// File extension of the rendered file.
     pub fn ext(self) -> &'static str {
         match self {
-            Preset::Thumb | Preset::Preview => "webp",
+            Preset::Thumb | Preset::Preview | Preset::OfflineImage => "webp",
             Preset::OfflineAudio => "ogg",
         }
     }
 
     pub fn mime(self) -> &'static str {
         match self {
-            Preset::Thumb | Preset::Preview => "image/webp",
+            Preset::Thumb | Preset::Preview | Preset::OfflineImage => "image/webp",
             Preset::OfflineAudio => "audio/ogg",
+        }
+    }
+
+    /// WebP quality of an image preset; 0 for a preset that is not an image.
+    pub fn quality(self) -> f32 {
+        match self {
+            Preset::Thumb | Preset::Preview => 80.0,
+            Preset::OfflineImage => 70.0,
+            Preset::OfflineAudio => 0.0,
         }
     }
 
@@ -803,13 +817,15 @@ impl Inner {
         let tmp = dir.join(format!(".tmp-{pid}-{n}.{}", preset.ext()));
         let mut cleanup = Cleanup(vec![tmp.clone()]);
         let result = match (kind, preset, &src) {
-            (MediaKind::Image, Preset::Thumb | Preset::Preview, _) => {
+            (MediaKind::Image, Preset::Thumb | Preset::Preview | Preset::OfflineImage, _) => {
                 self.render_image(&src, dir, &tmp, preset, (pid, n), &mut cleanup)
                     .await
             }
-            (MediaKind::Video, Preset::Thumb | Preset::Preview, Source::File(path)) => {
-                self.run_ffmpeg(path, &tmp, preset).await
-            }
+            (
+                MediaKind::Video,
+                Preset::Thumb | Preset::Preview | Preset::OfflineImage,
+                Source::File(path),
+            ) => self.run_ffmpeg(path, &tmp, preset).await,
             (MediaKind::Audio, Preset::OfflineAudio, Source::File(path)) => {
                 self.encode_audio(path, &tmp).await
             }
@@ -851,8 +867,9 @@ impl Inner {
                 ext: Some(ext.clone()),
             },
         };
-        let longest = preset.size();
-        let task = tokio::task::spawn_blocking(move || inprocess_image::render(source, longest));
+        let (longest, quality) = (preset.size(), preset.quality());
+        let task =
+            tokio::task::spawn_blocking(move || inprocess_image::render(source, longest, quality));
         // The decode cannot be stopped once begun, but it is bounded by the crate's limits,
         // and it only returns bytes: nothing is written for a render that timed out.
         let mut corrupt = false;
@@ -914,7 +931,7 @@ impl Inner {
     ) -> Result<(), ProcessError> {
         let n = preset.size();
         let mut dest = tmp.as_os_str().to_owned();
-        dest.push("[Q=80,strip]");
+        dest.push(format!("[Q={},strip]", preset.quality()));
         let mut cmd = Command::new(vips);
         // `NxN>` only shrinks, like the `min()` in the ffmpeg filter.
         cmd.arg(src)
@@ -966,7 +983,8 @@ impl Inner {
         // Within the budget too; past it the decode is left to end on its own (it is bounded by
         // `-Z`), as a blocking task cannot be stopped.
         let left = deadline.saturating_duration_since(Instant::now());
-        let finishing = tokio::task::spawn_blocking(move || sips::finish(&bytes, 80.0));
+        let quality = preset.quality();
+        let finishing = tokio::task::spawn_blocking(move || sips::finish(&bytes, quality));
         let webp = tokio::time::timeout(left, finishing)
             .await
             .map_err(|_| ProcessError::Unprocessable("timeout".into()))?
@@ -995,7 +1013,9 @@ impl Inner {
                 .arg(src)
                 .args(["-frames:v", "1", "-vf"])
                 .arg(&filter)
-                .args(["-c:v", "libwebp", "-quality", "80", "-y"])
+                .args(["-c:v", "libwebp", "-quality"])
+                .arg(preset.quality().to_string())
+                .arg("-y")
                 .arg(tmp);
             cmd
         };

@@ -79,13 +79,15 @@ fn first_run_needed(servers: &Profiles, done: bool) -> bool {
     servers.servers.is_empty() && !done
 }
 
-/// Where the app keeps `servers.toml` and `playback.toml` (its config directory) and the
-/// cover cache and the streamed tracks (its cache directory).
+/// Where the app keeps `servers.toml` and `playback.toml` (its config directory), the cover
+/// cache and the streamed tracks (its cache directory), and the copies saved for offline (its
+/// data directory).
 fn paths(dirs: &AppDirs) -> AppPaths {
     AppPaths {
         servers: dirs.config().join("servers.toml"),
         playback: dirs.config().join("playback.toml"),
         cache: Some(dirs.cache().to_path_buf()),
+        data: Some(dirs.data().to_path_buf()),
     }
 }
 
@@ -256,6 +258,7 @@ mod tests {
             servers: dir.path().join("config/servers.toml"),
             playback: dir.path().join("config/playback.toml"),
             cache: None,
+            data: Some(dir.path().join("data")),
         }
     }
 
