@@ -386,7 +386,7 @@ fn a_failed_sync_is_tried_again_after_the_backoff() {
     f.server.set("s1", &["a"]);
     f.server.media_status("a", 500);
     let h = f.handle();
-    h.set_retry_backoff(Duration::from_millis(300));
+    h.set_retry_backoff(Duration::from_secs(2));
     h.set_online(Some(&library(1)));
     h.pin(set_pin("s1"));
     wait_for("failed", || {
