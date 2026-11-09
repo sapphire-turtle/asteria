@@ -311,3 +311,149 @@ fn a_stopped_sync_writes_nothing() {
     assert!(store().read_docs().is_empty());
     assert!(!has(&next, "a"));
 }
+
+#[test]
+fn a_full_sync_is_not_run_again_on_an_unchanged_library_info() {
+    let f = Fixture::new();
+    f.server.set("s1", &["a"]);
+    f.server.set("s2", &["b"]);
+    let h = f.handle();
+    h.set_limit_bytes(1);
+    h.set_online(Some(&library(1)));
+    h.pin(set_pin("s1"));
+    h.pin(set_pin("s2"));
+    wait_for("full", || {
+        h.progress().phase == SyncPhase::Full && saved(&h, "s1") && saved(&h, "s2")
+    });
+    settle();
+    let before = f.server.requests("set.get");
+    for _ in 0..3 {
+        h.set_online(Some(&library(1)));
+    }
+    settle();
+    assert_eq!(f.server.requests("set.get"), before);
+    // A new mark syncs again.
+    h.set_online(Some(&library(2)));
+    wait_for("synced on a new mark", || {
+        f.server.requests("set.get") == before + 2
+    });
+}
+
+#[test]
+fn a_failed_sync_is_not_run_again_on_every_poll_but_after_a_reconnect() {
+    let f = Fixture::new();
+    f.server.set("s1", &["a"]);
+    f.server.media_status("a", 500);
+    let h = f.handle();
+    h.set_online(Some(&library(1)));
+    h.pin(set_pin("s1"));
+    wait_for("failed", || {
+        matches!(h.progress().phase, SyncPhase::Failed(_))
+    });
+    let before = (
+        f.server.requests("set.get"),
+        f.server.requests("GET /media/a/"),
+    );
+    for _ in 0..3 {
+        h.set_online(Some(&library(1)));
+    }
+    settle();
+    assert_eq!(
+        (
+            f.server.requests("set.get"),
+            f.server.requests("GET /media/a/")
+        ),
+        before
+    );
+    // Back after a real loss of the server: tried again.
+    f.server.media_status("a", 200);
+    h.set_online(None);
+    h.set_online(Some(&library(1)));
+    wait_for("saved after the reconnect", || idle(&h) && has(&h, "a"));
+}
+
+#[test]
+fn a_failed_sync_is_tried_again_after_the_backoff() {
+    let f = Fixture::new();
+    f.server.set("s1", &["a"]);
+    f.server.media_status("a", 500);
+    let h = f.handle();
+    h.set_retry_backoff(Duration::from_millis(300));
+    h.set_online(Some(&library(1)));
+    h.pin(set_pin("s1"));
+    wait_for("failed", || {
+        matches!(h.progress().phase, SyncPhase::Failed(_))
+    });
+    let before = f.server.requests("set.get");
+    // Polled at once: still waiting.
+    h.set_online(Some(&library(1)));
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(f.server.requests("set.get"), before);
+    f.server.media_status("a", 200);
+    // Polled until the backoff has passed.
+    wait_for("tried again after the backoff", || {
+        h.set_online(Some(&library(1)));
+        idle(&h) && has(&h, "a")
+    });
+    assert_eq!(f.server.requests("set.get"), before + 1);
+}
+
+#[test]
+fn a_sync_cut_off_by_going_offline_resumes_on_reconnect() {
+    let f = Fixture::new();
+    let hold = Hold::default();
+    f.server
+        .answer("s1", SetAnswer::Held(vec!["a".into()], hold.clone()));
+    let h = f.handle();
+    h.set_online(Some(&library(1)));
+    h.pin(set_pin("s1"));
+    wait_for("s1 asked for", || f.server.requests("set.get s1") == 1);
+    h.set_online(None);
+    hold.release();
+    wait_for("interrupted", || idle(&h));
+    h.set_online(Some(&library(1)));
+    wait_for("saved after the reconnect", || {
+        saved(&h, "s1") && idle(&h) && has(&h, "a")
+    });
+}
+
+#[test]
+fn a_forced_sync_cut_off_by_going_offline_resumes_on_reconnect() {
+    let f = Fixture::new();
+    f.server.set("s1", &["a"]);
+    let h = f.handle();
+    h.set_online(Some(&library(1)));
+    pin_and_wait(&h, "s1", &["a"]);
+    // The mark stays the same: only "sync now" asks for this sync.
+    let hold = Hold::default();
+    f.server.answer(
+        "s1",
+        SetAnswer::Held(vec!["a".into(), "b".into()], hold.clone()),
+    );
+    h.sync_now();
+    wait_for("s1 asked again", || f.server.requests("set.get s1") == 2);
+    h.set_online(None);
+    hold.release();
+    wait_for("interrupted", || idle(&h));
+    f.server.set("s1", &["a", "b"]);
+    h.set_online(Some(&library(1)));
+    wait_for("b saved after the reconnect", || idle(&h) && has(&h, "b"));
+}
+
+#[test]
+fn unpinning_past_a_full_sync_downloads_what_now_fits() {
+    let f = Fixture::new();
+    f.server.set("s1", &["a", "b"]);
+    f.server.set("s2", &["c"]);
+    let h = f.handle();
+    h.set_limit_bytes(2 * ESTIMATE);
+    h.set_online(Some(&library(1)));
+    pin_and_wait(&h, "s1", &["a", "b"]);
+    h.pin(set_pin("s2"));
+    wait_for("full", || h.progress().phase == SyncPhase::Full);
+    assert!(!has(&h, "c"));
+    // No library.info poll comes: unpinning alone makes room and syncs.
+    h.unpin("set", "s1");
+    wait_for("c saved", || idle(&h) && has(&h, "c"));
+    assert!(!has(&h, "a"));
+}

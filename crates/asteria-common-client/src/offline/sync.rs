@@ -105,9 +105,35 @@ struct State {
     requested: bool,
     /// A sync was asked for while offline (a pin, "sync now"): run it once online.
     forced: bool,
+    /// The sync asked for or running was forced: if it is cut short or fails, it runs again
+    /// on the next connection.
+    pending_forced: bool,
+    /// A forced sync was cut short or failed: run it again once the server comes back after
+    /// being lost.
+    resume: bool,
+    /// The last sync that ended without finishing (full, failed), so that the same mark does
+    /// not run it again on every `library.info`.
+    tried: Option<Tried>,
+    /// Failed syncs in a row; each doubles the wait before the next try.
+    failures: u32,
+    /// The wait after the first failure.
+    retry_backoff: Duration,
     /// The control thread has read the copies (or could not start).
     loaded: bool,
 }
+
+/// How the last sync that did not finish ended, for its mark.
+enum Tried {
+    /// It stopped at the size limit: run again only when something changes.
+    Full(SyncMark),
+    /// It failed: run again after a reconnect, or once `retry_at` has passed.
+    Failed { mark: SyncMark, retry_at: Instant },
+}
+
+/// The wait before retrying a failed sync, after the first failure; it doubles with each
+/// failure in a row, up to [`RETRY_BACKOFF_CAP`] times this.
+const RETRY_BACKOFF: Duration = Duration::from_secs(60);
+const RETRY_BACKOFF_CAP: u32 = 30;
 
 /// What the handle and its control thread share.
 struct Shared {
@@ -173,6 +199,11 @@ impl OfflineHandle {
             pending: None,
             requested: false,
             forced: false,
+            pending_forced: false,
+            resume: false,
+            tried: None,
+            failures: 0,
+            retry_backoff: RETRY_BACKOFF,
             loaded: false,
         };
         let shared = Arc::new(Shared {
@@ -360,11 +391,23 @@ impl OfflineHandle {
     }
 
     /// The session's view of the server: syncs (if the mark changed) only while online.
-    /// `None` stops a sync that is running.
+    /// `None` stops a sync that is running. A sync that stopped full is not run again for the
+    /// same mark; one that failed (or a forced one cut short) runs again when the server comes
+    /// back after a `None`, or for the same mark once its retry is due (one minute, doubling
+    /// with each failure in a row, up to 30).
     pub fn set_online(&self, library: Option<&LibraryInfo>) {
         match library {
             Some(info) => {
-                self.shared().update(|s| s.online = Some(info.clone()));
+                self.shared().update(|s| {
+                    // Back after the server was lost: a failed or cut-off sync runs again.
+                    if s.online.is_none() {
+                        if matches!(s.tried, Some(Tried::Failed { .. })) {
+                            s.tried = None;
+                        }
+                        s.forced |= std::mem::take(&mut s.resume);
+                    }
+                    s.online = Some(info.clone());
+                });
                 self.want_sync(false);
             }
             None => {
@@ -378,6 +421,13 @@ impl OfflineHandle {
                 self.shared().ctx.request_repaint();
             }
         }
+    }
+
+    /// Sets the wait before a failed sync is tried again (one minute unless set; it doubles
+    /// with each failure in a row). For tests.
+    #[doc(hidden)]
+    pub fn set_retry_backoff(&self, first: Duration) {
+        self.shared().lock().retry_backoff = first;
     }
 
     /// Stops the control thread (after the request it is making, if any).
@@ -394,24 +444,11 @@ impl OfflineHandle {
         let _ = self.inner.commands.send(command);
     }
 
-    /// Asks for a sync: at once if online and `force` or the mark changed since the last one
-    /// (or the one running); once online otherwise, if `force`.
+    /// See [`Shared::want_sync`].
     fn want_sync(&self, force: bool) {
-        {
-            let mut s = self.shared().lock();
-            let Some(info) = &s.online else {
-                s.forced |= force;
-                return;
-            };
-            let mark = mark_of(info, &s.pins);
-            if !force && !s.forced && (mark == s.mark || s.pending.as_ref() == Some(&mark)) {
-                return;
-            }
-            s.forced = false;
-            s.pending = Some(mark);
-            s.requested = true;
+        if self.shared().want_sync(force) {
+            self.send(Command::Sync);
         }
-        self.send(Command::Sync);
     }
 }
 
@@ -507,7 +544,13 @@ fn control(shared: &Shared, commands: &mpsc::Receiver<Command>) {
                     shared.fail(disk_error(e));
                 }
             }
-            Command::Unpin(key) => shared.forget(&key),
+            Command::Unpin(key) => {
+                shared.forget(&key);
+                // The room it made may let the downloads the limit stopped go on.
+                if shared.lock().phase == SyncPhase::Full && shared.want_sync(true) {
+                    shared.sync();
+                }
+            }
             Command::Clear => shared.clear(),
             Command::Stop => return,
         }
@@ -533,6 +576,39 @@ impl Shared {
         let r = change(&mut self.lock());
         self.ctx.request_repaint();
         r
+    }
+
+    /// Asks for a sync; `true` if one should run (the caller sends [`Command::Sync`], or runs
+    /// it on the control thread). Online, it runs if `force`, or if the mark changed since
+    /// the last sync that finished and is not the one asked for already, nor the one that
+    /// last stopped full, nor the one that last failed while its retry is not due. Offline,
+    /// `force` runs it once online.
+    fn want_sync(&self, force: bool) -> bool {
+        let mut s = self.lock();
+        let Some(info) = &s.online else {
+            s.forced |= force;
+            return false;
+        };
+        let mark = mark_of(info, &s.pins);
+        if !force && !s.forced {
+            if mark == s.mark || s.pending.as_ref() == Some(&mark) {
+                return false;
+            }
+            match &s.tried {
+                Some(Tried::Full(m)) if *m == mark => return false,
+                Some(Tried::Failed { mark: m, retry_at })
+                    if *m == mark && Instant::now() < *retry_at =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        s.pending_forced |= force || s.forced;
+        s.forced = false;
+        s.pending = Some(mark);
+        s.requested = true;
+        true
     }
 
     fn fail(&self, reason: String) {
@@ -712,6 +788,8 @@ impl Shared {
             s.phase = SyncPhase::Idle;
             s.mark = SyncMark::default();
             s.pending = None;
+            s.tried = None;
+            s.failures = 0;
             for pin in &mut s.pins {
                 pin.status = PinStatus::Pending;
             }
@@ -728,17 +806,22 @@ impl Shared {
             self.fail(disk_error(e));
             return;
         }
-        self.lock().requested = true;
+        {
+            let mut s = self.lock();
+            s.requested = true;
+            s.pending_forced = true;
+        }
         self.sync();
     }
 
     fn sync(&self) {
-        let (pins, mark) = {
+        let (pins, mark, forced) = {
             let mut s = self.lock();
             if !s.requested {
                 return;
             }
             s.requested = false;
+            let forced = std::mem::take(&mut s.pending_forced);
             let Some(info) = &s.online else {
                 // Went offline since it was asked for: run it on the next connection.
                 s.pending = None;
@@ -752,7 +835,7 @@ impl Shared {
             s.phase = SyncPhase::Syncing { done: 0, total: 0 };
             s.unsavable = 0;
             let pins: Vec<PinTarget> = s.pins.iter().map(|p| p.target.clone()).collect();
-            (pins, mark)
+            (pins, mark, forced)
         };
         self.ctx.request_repaint();
         let mut end = self.run(&pins);
@@ -774,11 +857,31 @@ impl Shared {
             s.phase = match end {
                 End::Done => {
                     s.mark = mark;
+                    s.tried = None;
+                    s.failures = 0;
+                    s.resume = false;
                     SyncPhase::Idle
                 }
-                End::Full => SyncPhase::Full,
-                End::Failed(reason) => SyncPhase::Failed(reason),
-                End::Interrupted => SyncPhase::Idle,
+                End::Full => {
+                    s.tried = Some(Tried::Full(mark));
+                    s.failures = 0;
+                    s.resume = false;
+                    SyncPhase::Full
+                }
+                End::Failed(reason) => {
+                    s.failures = s.failures.saturating_add(1);
+                    let doublings = 2u32.saturating_pow(s.failures - 1).min(RETRY_BACKOFF_CAP);
+                    s.tried = Some(Tried::Failed {
+                        mark,
+                        retry_at: Instant::now() + s.retry_backoff * doublings,
+                    });
+                    s.resume |= forced;
+                    SyncPhase::Failed(reason)
+                }
+                End::Interrupted => {
+                    s.resume |= forced;
+                    SyncPhase::Idle
+                }
             };
         });
     }
