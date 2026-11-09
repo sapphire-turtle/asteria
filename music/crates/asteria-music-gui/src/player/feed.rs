@@ -1,6 +1,8 @@
 //! The real [`Opener`]: tracks fetched from the server by [`Stream`]s and decoded by
-//! corundum-framework-audio's feeds, on a thread each.
+//! corundum-framework-audio's feeds, on a thread each; or, for a track saved for offline,
+//! read from its saved file while offline or at the low quality.
 
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -66,6 +68,16 @@ pub fn stream_dir(cache_root: &Path, library_id: &str) -> io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// Where a track is played from, as the saved copies and the settings have it.
+enum Origin {
+    /// The saved offline audio (Ogg Opus), opened.
+    Saved(File),
+    /// Offline, and not saved.
+    NotSaved,
+    /// Fetched from the server.
+    Server,
+}
+
 /// A stream the opener holds: dropping it cancels the fetch and, once the decoder thread
 /// lets go too, removes the file.
 struct Slot {
@@ -118,6 +130,36 @@ impl HttpOpener {
         self
     }
 
+    /// Offline, or at the low quality (the rendition that is saved), a track saved for offline
+    /// plays from its file; offline, one that is not saved cannot play. Stats the store: on the
+    /// player's thread, never the UI's.
+    fn origin(&self, entry: &QueueEntry, quality: Quality) -> Origin {
+        let Some(endpoint) = self.settings.endpoint() else {
+            return Origin::Server;
+        };
+        let online = self.settings.online();
+        if online && quality == Quality::Original {
+            return Origin::Server;
+        }
+        let saved = endpoint
+            .offline
+            .as_ref()
+            .zip(entry.media.file_hash.as_deref())
+            .and_then(|(offline, hash)| offline.media(hash, Quality::Low.preset()))
+            .and_then(|path| {
+                File::open(&path)
+                    .inspect_err(|e| {
+                        tracing::warn!(path = %path.display(), error = %e, "opening a saved track failed");
+                    })
+                    .ok()
+            });
+        match saved {
+            Some(file) => Origin::Saved(file),
+            None if online => Origin::Server,
+            None => Origin::NotSaved,
+        }
+    }
+
     fn start(
         &self,
         entry: &QueueEntry,
@@ -166,6 +208,20 @@ impl Opener<QueueEntry> for HttpOpener {
     fn open(&mut self, entry: &QueueEntry, at_ms: u64, target: OutputConfig) -> Box<dyn Feed> {
         let id = &entry.media.id;
         let quality = self.settings.quality();
+        match self.origin(entry, quality) {
+            Origin::Saved(file) => {
+                // A whole file: there is no stream to hold, and the last track's goes.
+                self.current = None;
+                return spawn_feed(Box::new(file), None, Some("ogg".into()), at_ms, target);
+            }
+            Origin::NotSaved => {
+                self.current = None;
+                return Box::new(FailedFeed(TrackError::Unplayable(
+                    "not saved for offline".into(),
+                )));
+            }
+            Origin::Server => {}
+        }
         if self.current.as_ref().is_some_and(|s| s.is(id, quality)) {
             // Reuse it.
         } else if self.preloaded.as_ref().is_some_and(|s| s.is(id, quality)) {
@@ -195,6 +251,11 @@ impl Opener<QueueEntry> for HttpOpener {
             return;
         };
         let (id, quality) = (&next.media.id, self.settings.quality());
+        // A saved track needs no fetch, and offline nothing is fetched.
+        if !matches!(self.origin(next, quality), Origin::Server) {
+            self.preloaded = None;
+            return;
+        }
         if self.current.as_ref().is_some_and(|s| s.is(id, quality))
             || self.preloaded.as_ref().is_some_and(|s| s.is(id, quality))
         {
@@ -245,7 +306,56 @@ mod tests {
             token: Token::new("secret"),
             library_id: "lib".into(),
             stream_dir: dir.to_owned(),
+            offline: None,
         }
+    }
+
+    /// The file hash of the tracks saved for offline in these tests.
+    fn saved_hash() -> String {
+        format!("blake3:{}", "ab".repeat(32))
+    }
+
+    /// A queue entry for `id` whose file is [`saved_hash`].
+    fn saved_entry(id: &str) -> QueueEntry {
+        let mut e = entry(id);
+        e.media.file_hash = Some(saved_hash());
+        e
+    }
+
+    /// Settings holding the test server and offline copies under `data`, with the Ogg Opus
+    /// fixture saved as the offline audio of [`saved_hash`] when `copy` says so.
+    fn settings_with_copies(
+        server: &TestServer,
+        dir: &TempDir,
+        data: &TempDir,
+        copy: bool,
+    ) -> OpenerSettings {
+        use asteria_common_client::offline::{OfflineHandle, OfflineStore};
+        let store = OfflineStore::open(data.path(), "lib").unwrap();
+        if copy {
+            let opus = std::fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tone.opus"),
+            )
+            .unwrap();
+            store
+                .put_media(&saved_hash(), "offline-audio", &opus)
+                .unwrap();
+        }
+        // Never told the server answers, so it never syncs.
+        let handle = OfflineHandle::start(
+            store,
+            Arc::new(crate::offline::MusicCatalog),
+            server.url().join("/").unwrap(),
+            Token::new("secret"),
+            data.path().join("offline/settings.toml"),
+            corundum_framework::egui::Context::default(),
+        );
+        let settings = OpenerSettings::new();
+        settings.set_endpoint(Some(Endpoint {
+            offline: Some(handle),
+            ..endpoint(server, dir.path())
+        }));
+        settings
     }
 
     /// Settings holding the test server, at the original quality.
@@ -375,6 +485,89 @@ mod tests {
             feed.poll(),
             FeedEvent::Failed(TrackError::Network("not connected".into()))
         );
+    }
+
+    #[test]
+    fn offline_plays_the_saved_file() {
+        let server = TestServer::start(Script {
+            body: tone(),
+            ..Script::default()
+        });
+        let (dir, data) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+        let settings = settings_with_copies(&server, &dir, &data, true);
+        settings.set_online(false);
+        let mut o = opener_on(&settings);
+        let mut feed = o.open(&saved_entry("a"), 0, TARGET);
+        o.preload(Some(&saved_entry("b")));
+        let (pcm, last) = drain(feed.as_mut());
+        assert_eq!(last, FeedEvent::End);
+        let frames = pcm.len() / 2;
+        assert!(frames.abs_diff(96_000) < 3_000, "{frames} frames");
+        assert!(server.paths().is_empty(), "{:?}", server.paths());
+        assert_eq!(files(&dir), 0);
+    }
+
+    #[test]
+    fn low_quality_prefers_the_saved_file() {
+        let server = TestServer::start(Script {
+            body: tone(),
+            ..Script::default()
+        });
+        let (dir, data) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+        let settings = settings_with_copies(&server, &dir, &data, true);
+        assert!(settings.online());
+        settings.set_quality(Quality::Low);
+        let mut o = opener_on(&settings);
+        let mut feed = o.open(&saved_entry("a"), 0, TARGET);
+        o.preload(Some(&saved_entry("b")));
+        let (pcm, last) = drain(feed.as_mut());
+        assert_eq!(last, FeedEvent::End);
+        assert!(!pcm.is_empty());
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(server.paths().is_empty(), "{:?}", server.paths());
+    }
+
+    #[test]
+    fn original_streams_even_when_saved() {
+        let server = TestServer::start(Script {
+            body: tone(),
+            ..Script::default()
+        });
+        let (dir, data) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+        let settings = settings_with_copies(&server, &dir, &data, true);
+        let mut o = opener_on(&settings);
+        let (_, last) = drain(o.open(&saved_entry("a"), 0, TARGET).as_mut());
+        assert_eq!(last, FeedEvent::End);
+        let paths = server.paths();
+        assert_eq!(paths.len(), 1, "{paths:?}");
+        assert!(paths[0].ends_with("/media/a/original"), "{paths:?}");
+    }
+
+    #[test]
+    fn offline_without_a_copy_is_unplayable() {
+        let server = TestServer::start(Script {
+            body: tone(),
+            ..Script::default()
+        });
+        let (dir, data) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+        let settings = settings_with_copies(&server, &dir, &data, false);
+        settings.set_online(false);
+        let mut o = opener_on(&settings);
+        let mut feed = o.open(&saved_entry("a"), 0, TARGET);
+        assert_eq!(
+            feed.poll(),
+            FeedEvent::Failed(TrackError::Unplayable("not saved for offline".into()))
+        );
+        // Nor without any copies at all.
+        let plain = OpenerSettings::new();
+        plain.set_endpoint(Some(endpoint(&server, dir.path())));
+        plain.set_online(false);
+        let mut feed = opener_on(&plain).open(&entry("b"), 0, TARGET);
+        assert_eq!(
+            feed.poll(),
+            FeedEvent::Failed(TrackError::Unplayable("not saved for offline".into()))
+        );
+        assert!(server.paths().is_empty(), "{:?}", server.paths());
     }
 
     #[test]

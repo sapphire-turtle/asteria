@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use asteria_common_client::offline::OfflineHandle;
 use asteria_common_client::profiles::Token;
 use asteria_music_api::{MediaItem, MusicTrack};
 use corundum_framework_audio::QueueItem;
@@ -86,12 +87,26 @@ pub struct Endpoint {
     pub library_id: String,
     /// Where this process keeps the tracks it streams.
     pub stream_dir: PathBuf,
+    /// The library's copies saved for offline, if the app keeps them: a track saved there
+    /// plays from its file while offline, or at the low quality.
+    pub offline: Option<OfflineHandle>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Settings {
     endpoint: Option<Endpoint>,
     quality: Quality,
+    online: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            endpoint: None,
+            quality: Quality::default(),
+            online: true,
+        }
+    }
 }
 
 /// The server and the quality the [`HttpOpener`] fetches with, shared between the app (which
@@ -101,7 +116,7 @@ struct Settings {
 pub struct OpenerSettings(Arc<Mutex<Settings>>);
 
 impl OpenerSettings {
-    /// No server, the original quality.
+    /// No server, the original quality, online.
     pub fn new() -> OpenerSettings {
         OpenerSettings::default()
     }
@@ -121,12 +136,22 @@ impl OpenerSettings {
         self.lock().quality = quality;
     }
 
+    /// Whether the server answers (the app updates it every frame). Offline, only the tracks
+    /// saved for offline play, and nothing is asked of the server.
+    pub fn set_online(&self, online: bool) {
+        self.lock().online = online;
+    }
+
     pub fn endpoint(&self) -> Option<Endpoint> {
         self.lock().endpoint.clone()
     }
 
     pub fn quality(&self) -> Quality {
         self.lock().quality
+    }
+
+    pub fn online(&self) -> bool {
+        self.lock().online
     }
 }
 
@@ -204,9 +229,12 @@ mod tests {
         let settings = OpenerSettings::new();
         assert!(settings.endpoint().is_none());
         assert_eq!(settings.quality(), Quality::Original);
+        assert!(settings.online());
         let other = settings.clone();
         other.set_quality(Quality::Low);
         assert_eq!(settings.quality(), Quality::Low);
+        other.set_online(false);
+        assert!(!settings.online());
     }
 
     /// The server is changed while a track plays and the next is fetched: the app sets the
@@ -224,6 +252,7 @@ mod tests {
             token: Token::new("secret"),
             library_id: "lib".into(),
             stream_dir: dir.path().to_owned(),
+            offline: None,
         }));
         let player = Player::spawn(
             Box::new(HttpOpener::new(settings.clone())),

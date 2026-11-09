@@ -86,6 +86,8 @@ fn pinning_saves_docs_and_media() {
         h.media(&file_hash("a"), "thumb")
     );
     assert!(h.docs().get("set", "s1").is_some());
+    assert!(h.is_stored(&file_hash("a"), "thumb"));
+    assert!(!h.is_stored(&file_hash("a"), "preview"));
     assert_eq!(h.progress().used_bytes, 2 * ESTIMATE);
     assert_eq!(f.server.requests("GET /media/a/thumb"), 1);
 }
@@ -100,6 +102,7 @@ fn media_that_cannot_be_rendered_is_counted() {
     pin_and_wait(&h, "s1", &["b"]);
     assert_eq!(h.progress().unsavable, 1);
     assert!(!has(&h, "a"));
+    assert!(!h.is_stored(&file_hash("a"), "thumb"));
 }
 
 #[test]

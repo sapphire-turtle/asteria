@@ -67,6 +67,7 @@ fn an_extra_page_is_listed_between_servers_and_playback() {
         servers: dir.path().join("config/servers.toml"),
         playback: dir.path().join("config/playback.toml"),
         cache: None,
+        data: Some(dir.path().join("data")),
     };
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
@@ -102,4 +103,23 @@ fn an_extra_page_is_listed_between_servers_and_playback() {
     frame(&ctx, &mut app, vec![button(false)]);
     frame(&ctx, &mut app, Vec::new());
     assert!(drawn.get() > 0, "choosing the extra page draws it");
+}
+
+#[test]
+fn the_offline_page_is_listed_after_playback() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = AppPaths {
+        servers: dir.path().join("config/servers.toml"),
+        playback: dir.path().join("config/playback.toml"),
+        cache: None,
+        data: Some(dir.path().join("data")),
+    };
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let (player, settings) = player(&ctx);
+    let mut app = MusicApp::new(paths, &ctx, player, settings);
+    let output = frame(&ctx, &mut app, Vec::new());
+    let offline = find(&output, "Offline").expect("the offline page is listed");
+    let playback = find(&output, "Playback").expect("playback is listed");
+    assert!(playback.y < offline.y, "offline comes after playback");
 }

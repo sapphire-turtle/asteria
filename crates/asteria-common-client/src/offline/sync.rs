@@ -133,6 +133,12 @@ pub struct OfflineHandle {
     inner: Arc<Inner>,
 }
 
+impl std::fmt::Debug for OfflineHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OfflineHandle").finish_non_exhaustive()
+    }
+}
+
 struct Inner {
     shared: Arc<Shared>,
     commands: mpsc::Sender<Command>,
@@ -332,6 +338,15 @@ impl OfflineHandle {
     /// The stored file for `(file_hash, preset)`, if there is one.
     pub fn media(&self, file_hash: &str, preset: &str) -> Option<PathBuf> {
         self.shared().store.media(file_hash, preset)
+    }
+
+    /// Whether `(file_hash, preset)` is stored, as the handle last measured: no disk I/O, so
+    /// the UI thread may ask it for every row it draws.
+    pub fn is_stored(&self, file_hash: &str, preset: &str) -> bool {
+        self.shared()
+            .lock()
+            .stored
+            .contains_key(&(file_hash.to_owned(), preset.to_owned()))
     }
 
     /// The stored file of `item` (as the saved documents know it) at `preset`.

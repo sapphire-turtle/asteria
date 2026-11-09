@@ -14,11 +14,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use asteria_common_client::errors::{error_detail, error_text};
+use asteria_common_client::offline::OfflinePage;
 use asteria_common_client::profiles::{ProfileId, Profiles, ServerProfile, Token};
 use asteria_common_client::saver::Saver;
 use asteria_common_client::session::{SessionDirs, SessionState};
 use asteria_common_client::settings::ExtraSettingsPage;
 use asteria_common_client::settings::servers::{ServersChange, ServersPage};
+use asteria_common_client::widgets::offline_toggle::offline_status;
 use asteria_common_client::widgets::server_switcher::{ServerSwitcher, SwitcherAction};
 use asteria_music_api::{AlbumId, ArtistId, PlaylistId};
 use corundum_framework::egui;
@@ -26,6 +28,7 @@ use corundum_framework::gui::settings::{ListItem, SettingsLayout, SettingsSectio
 use corundum_framework::gui::{COMPACT_WIDTH, Destination, Shell, ShellApp, Side, icons, tr};
 
 pub use crate::connection::Connection;
+use crate::library::TrackList;
 use crate::now_playing::{self, BarAction};
 use crate::player::{Command, Endpoint, OpenerSettings, Player, Quality, feed};
 use crate::queue::{self, QueueAction};
@@ -48,6 +51,7 @@ enum Page {
     /// The page at this index of [`State::extra_pages`].
     Extra(usize),
     Playback,
+    Offline,
 }
 
 /// Where the app keeps its files.
@@ -60,6 +64,9 @@ pub struct AppPaths {
     /// The root of the cover cache (one directory per library under it); `None` keeps no
     /// cache on disk.
     pub cache: Option<PathBuf>,
+    /// The root of the app's data: the copies saved for offline are kept under it. `None`
+    /// saves nothing for offline.
+    pub data: Option<PathBuf>,
 }
 
 /// The app. Hold one; call [`show`](Self::show) every frame with the window's root `Ui`.
@@ -84,6 +91,7 @@ struct State {
     extra_pages: Vec<Box<dyn ExtraSettingsPage>>,
     playback_page: PlaybackPage,
     playback_saver: Option<Saver<PlaybackSettings>>,
+    offline_page: OfflinePage,
     /// Whether the opener's settings hold the connection's endpoint.
     endpoint_sent: bool,
     /// Where the seek bar is dragged to (seconds), until the drag ends.
@@ -189,6 +197,7 @@ impl MusicApp {
             extra_pages: Vec::new(),
             playback_page: PlaybackPage::new(playback),
             playback_saver,
+            offline_page: OfflinePage::new(),
             endpoint_sent: false,
             seeking: None,
             settings: SettingsLayout::new(),
@@ -310,6 +319,19 @@ impl MusicApp {
         }
     }
 
+    /// Play the tracks of `list` from its row `index`, as a click on the row does. Offline, the
+    /// tracks not saved are left out (and the row, if it is one of them, does nothing).
+    pub fn play_from(&mut self, list: TrackList, index: usize) {
+        let command = self
+            .state
+            .connection
+            .as_ref()
+            .and_then(|c| c.library.play_from(&c.session, list, index));
+        if let Some(command) = command {
+            self.state.send(command);
+        }
+    }
+
     /// Ask for the next page of albums, as the grid does near its end.
     pub fn load_more_albums(&mut self) {
         if let Some(c) = &mut self.state.connection {
@@ -394,7 +416,7 @@ impl State {
         self.connection = self.profiles.active().map(|profile| {
             let dirs = SessionDirs {
                 cache: self.paths.cache.clone(),
-                data: None,
+                data: self.paths.data.clone(),
             };
             Connection::open(profile, &self.ctx, dirs, reopened)
         });
@@ -448,6 +470,12 @@ impl State {
             c.poll(&self.ctx);
         }
         self.send_endpoint();
+        // Offline, the player plays only what is saved, and asks the server nothing.
+        let online = self
+            .connection
+            .as_ref()
+            .is_none_or(|c| !c.session.is_offline());
+        self.opener_settings.set_online(online);
         // The server now serves another library: start again with it.
         if self
             .connection
@@ -604,7 +632,8 @@ impl State {
         self.player.send(command);
     }
 
-    /// Once the session is ready, tells the player which server to stream from.
+    /// Once the session is ready (or offline, on the saved copies), tells the player which
+    /// server to stream from and where the copies are.
     fn send_endpoint(&mut self) {
         if self.endpoint_sent {
             return;
@@ -612,9 +641,12 @@ impl State {
         let Some(c) = &self.connection else {
             return;
         };
-        let SessionState::Ready { library } = c.session.state() else {
+        let (SessionState::Ready { library } | SessionState::Offline { library }) =
+            c.session.state()
+        else {
             return;
         };
+        let offline = c.session.offline().cloned();
         let Some(profile) = self.profiles.active() else {
             return;
         };
@@ -632,6 +664,7 @@ impl State {
             token,
             library_id,
             stream_dir,
+            offline,
         }));
     }
 
@@ -707,13 +740,20 @@ impl State {
             label: self.playback_page.label(ui.ctx()),
             dirty: false,
         });
+        items.push(ListItem::entry(
+            Page::Offline,
+            tr!(ui, "asteria-common-client-offline-title"),
+        ));
         let page = &mut self.servers_page;
         let extra = &mut self.extra_pages;
         let playback = &mut self.playback_page;
+        let offline_page = &mut self.offline_page;
+        let offline = self.connection.as_ref().and_then(|c| c.session.offline());
         self.settings.ui(ui, &items, |ui, open| match open {
             Page::Servers => page.ui(ui),
             Page::Extra(i) => extra[i].ui(ui),
             Page::Playback => playback.ui(ui),
+            Page::Offline => offline_page.ui(ui, offline),
         });
         if self.playback_page.take_change().is_some() {
             self.apply_playback_change();
@@ -882,8 +922,13 @@ impl ShellApp<Screen> for State {
         None
     }
 
+    /// The switcher, then how saving for offline goes.
     fn status_ui(&mut self, ui: &mut egui::Ui) {
         self.switcher_ui(ui, false);
+        offline_status(
+            ui,
+            self.connection.as_ref().and_then(|c| c.session.offline()),
+        );
     }
 }
 

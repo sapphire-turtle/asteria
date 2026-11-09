@@ -1,15 +1,20 @@
 //! A grid of albums: the cover (or a music note while it loads or when there is none), the
-//! title and the album artist under it. A click opens the album.
+//! title and the album artist under it. A click opens the album; the right-click menu saves it
+//! for offline (or removes it), and a saved album is marked.
 //!
 //! Like the client crate's `ThumbGrid` it draws only the rows on screen and asks for only their
 //! covers, and it reports the last item drawn (to know when to fetch the next page) and the
 //! number of columns, which [`ThumbGrid::columns_for`] works out.
 
 use asteria_common_client::images::{ImageLoader, ImageState, Preset};
+use asteria_common_client::offline::{OfflineHandle, PinStatus, PinTarget};
+use asteria_common_client::widgets::offline_toggle::saved_mark;
 use asteria_common_client::widgets::thumb_grid::{DEFAULT_CELL_SIZE, SPACING, ThumbGrid};
 use asteria_music_api::{AlbumId, AlbumSummary};
 use corundum_framework::egui::{self, Align2, Color32, Rect, Sense, vec2};
-use corundum_framework::gui::icons;
+use corundum_framework::gui::{icons, tr};
+
+use crate::offline::PIN_ALBUM;
 
 /// The height under the cover for the title and the artist.
 const CAPTION_H: f32 = 40.0;
@@ -29,6 +34,7 @@ pub struct CoverGrid<'a> {
     albums: &'a [AlbumSummary],
     cell: f32,
     id_salt: egui::IdSalt,
+    offline: Option<&'a OfflineHandle>,
 }
 
 impl<'a> CoverGrid<'a> {
@@ -37,7 +43,14 @@ impl<'a> CoverGrid<'a> {
             albums,
             cell: DEFAULT_CELL_SIZE,
             id_salt: egui::IdSalt::new("asteria-cover-grid"),
+            offline: None,
         }
+    }
+
+    /// The library's copies saved for offline: the menu and the marks need them.
+    pub fn offline(mut self, handle: Option<&'a OfflineHandle>) -> Self {
+        self.offline = handle;
+        self
     }
 
     /// Tells two grids in one `Ui` apart.
@@ -70,7 +83,7 @@ impl<'a> CoverGrid<'a> {
                         let end = (start + columns).min(self.albums.len());
                         resp.last_visible = resp.last_visible.max(Some(end - 1));
                         for album in &self.albums[start..end] {
-                            if cell(ui, album, self.cell, images).clicked() {
+                            if cell(ui, album, self.cell, images, self.offline).clicked() {
                                 resp.opened = Some(album.id.clone());
                             }
                         }
@@ -86,7 +99,7 @@ impl<'a> CoverGrid<'a> {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(SPACING, SPACING);
             for album in self.albums {
-                if cell(ui, album, self.cell, images).clicked() {
+                if cell(ui, album, self.cell, images, self.offline).clicked() {
                     opened = Some(album.id.clone());
                 }
             }
@@ -126,20 +139,62 @@ pub fn paint_picture(ui: &egui::Ui, rect: Rect, picture: Option<&ImageState>) {
     }
 }
 
+/// The right-click menu of what can be saved for offline (`kind` and `id` as pinned, `name` for
+/// the Offline page): "Save for offline", or "Remove from offline" once pinned. Nothing without
+/// a `handle`.
+pub fn offline_menu(
+    response: &egui::Response,
+    handle: Option<&OfflineHandle>,
+    kind: &str,
+    id: &str,
+    name: &str,
+) {
+    let Some(handle) = handle else {
+        return;
+    };
+    response.context_menu(|ui| {
+        if handle.status(kind, id).is_some() {
+            if ui.button(tr!(ui, "asteria-music-offline-remove")).clicked() {
+                handle.unpin(kind, id);
+                ui.close();
+            }
+        } else if ui.button(tr!(ui, "asteria-music-offline-save")).clicked() {
+            handle.pin(PinTarget {
+                kind: kind.into(),
+                id: id.into(),
+                name: name.into(),
+            });
+            ui.close();
+        }
+    });
+}
+
+/// Whether `kind`/`id` is saved for offline (pinned, and its copies made).
+pub fn is_saved(handle: Option<&OfflineHandle>, kind: &str, id: &str) -> bool {
+    handle.is_some_and(|h| h.status(kind, id) == Some(PinStatus::Saved))
+}
+
 fn cell(
     ui: &mut egui::Ui,
     album: &AlbumSummary,
     size: f32,
     images: &mut ImageLoader,
+    offline: Option<&OfflineHandle>,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(size, size + CAPTION_H), Sense::click());
     let label = format!("{} - {}", album.title, album.album_artist);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label.as_str()));
+    offline_menu(&response, offline, PIN_ALBUM, &album.id.0, &album.title);
     if !ui.is_rect_visible(rect) {
         return response;
     }
     let cover = Rect::from_min_size(rect.min, vec2(size, size));
     paint_cover(ui, cover, album, images);
+    if is_saved(offline, PIN_ALBUM, &album.id.0) {
+        // In a child of its own at the cover's corner, so the row's layout does not move.
+        let corner = Rect::from_min_size(cover.right_top() + vec2(-22.0, 4.0), vec2(18.0, 18.0));
+        saved_mark(&mut ui.new_child(egui::UiBuilder::new().max_rect(corner)));
+    }
     let visuals = ui.visuals();
     if response.hovered() {
         ui.painter_at(rect).rect_stroke(

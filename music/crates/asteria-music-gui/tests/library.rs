@@ -6,9 +6,10 @@ mod support;
 use std::time::Duration;
 
 use asteria_common_client::rpc::ClientError;
+use asteria_common_client::session::Session;
 use asteria_music_api::{AlbumId, ArtistId, PlaylistId};
 use asteria_music_gui::app::{MusicApp, Screen};
-use asteria_music_gui::library::TrackList;
+use asteria_music_gui::library::{LibraryState, TrackList};
 use asteria_music_gui::player::Command;
 use corundum_framework::egui;
 
@@ -28,6 +29,12 @@ fn album_ids(app: &MusicApp) -> Vec<String> {
 
 fn titles(entries: &[asteria_music_gui::player::QueueEntry]) -> Vec<String> {
     entries.iter().map(|e| e.title.clone()).collect()
+}
+
+/// The connection's session and library, as the play methods take them.
+fn parts(app: &MusicApp) -> (&Session, &LibraryState) {
+    let c = app.connection().unwrap();
+    (c.session(), c.library())
 }
 
 fn open_playlist(ctx: &egui::Context, app: &mut MusicApp) {
@@ -93,17 +100,17 @@ fn clicking_a_track_replaces_the_queue_from_it() {
     run_until(&ctx, &mut app, "the album", |a| {
         a.connection().unwrap().library().album().is_some()
     });
-    let lib = app.connection().unwrap().library();
+    let (session, lib) = parts(&app);
     let Some(Command::Replace {
         items: entries,
         start,
-    }) = lib.play_from(TrackList::Album, 2)
+    }) = lib.play_from(session, TrackList::Album, 2)
     else {
         panic!("expected a Replace");
     };
     assert_eq!(start, 2);
     assert_eq!(titles(&entries), ["al1-t0", "al1-t1", "al1-t2", "al1-t3"]);
-    assert!(lib.play_from(TrackList::Album, 4).is_none());
+    assert!(lib.play_from(session, TrackList::Album, 4).is_none());
 }
 
 #[test]
@@ -111,21 +118,21 @@ fn playlist_missing_entries_are_left_out_of_the_queue() {
     let (addr, _) = Music::default().serve();
     let (_fx, ctx, mut app) = start(addr);
     open_playlist(&ctx, &mut app);
-    let lib = app.connection().unwrap().library();
+    let (session, lib) = parts(&app);
     // [found, missing, moved, found]: entry 2 is the second of the three playable ones.
     let Some(Command::Replace {
         items: entries,
         start,
-    }) = lib.play_from(TrackList::Playlist, 2)
+    }) = lib.play_from(session, TrackList::Playlist, 2)
     else {
         panic!("expected a Replace");
     };
     assert_eq!(titles(&entries), ["pa", "pm", "pd"]);
     assert_eq!(start, 1);
-    assert!(lib.play_from(TrackList::Playlist, 1).is_none());
-    assert!(lib.play_next(TrackList::Playlist, 1).is_none());
-    assert!(lib.append(TrackList::Playlist, 1).is_none());
-    assert!(lib.play_from(TrackList::Playlist, 9).is_none());
+    assert!(lib.play_from(session, TrackList::Playlist, 1).is_none());
+    assert!(lib.play_next(session, TrackList::Playlist, 1).is_none());
+    assert!(lib.append(session, TrackList::Playlist, 1).is_none());
+    assert!(lib.play_from(session, TrackList::Playlist, 9).is_none());
 }
 
 #[test]
@@ -136,12 +143,12 @@ fn play_next_and_append_build_their_commands() {
     run_until(&ctx, &mut app, "the album", |a| {
         a.connection().unwrap().library().album().is_some()
     });
-    let lib = app.connection().unwrap().library();
-    let Some(Command::PlayNext(next)) = lib.play_next(TrackList::Album, 3) else {
+    let (session, lib) = parts(&app);
+    let Some(Command::PlayNext(next)) = lib.play_next(session, TrackList::Album, 3) else {
         panic!("expected PlayNext");
     };
     assert_eq!(titles(&next), ["al1-t3"]);
-    let Some(Command::Append(add)) = lib.append(TrackList::Album, 0) else {
+    let Some(Command::Append(add)) = lib.append(session, TrackList::Album, 0) else {
         panic!("expected Append");
     };
     assert_eq!(titles(&add), ["al1-t0"]);
@@ -170,10 +177,10 @@ fn an_artist_shows_own_and_appears_on_albums() {
     run_until(&ctx, &mut app, "the artist's album", |a| {
         a.connection().unwrap().library().artist_album().is_some()
     });
-    let lib = app.connection().unwrap().library();
+    let (session, lib) = parts(&app);
     assert!(lib.album().is_none());
-    assert!(lib.play_from(TrackList::ArtistAlbum, 0).is_some());
-    assert!(lib.play_from(TrackList::Album, 0).is_none());
+    assert!(lib.play_from(session, TrackList::ArtistAlbum, 0).is_some());
+    assert!(lib.play_from(session, TrackList::Album, 0).is_none());
 }
 
 #[test]
