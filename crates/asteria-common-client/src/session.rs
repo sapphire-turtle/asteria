@@ -248,8 +248,9 @@ impl Session {
     ///   ([`KnownLibraries`]);
     /// - once the library id is known, the library's [`OfflineHandle`] starts
     ///   ([`offline`](Self::offline)); it syncs while the server answers;
-    /// - a handshake that cannot reach the server, for a profile with a recorded library,
-    ///   ends in [`SessionState::Offline`] instead of `Failed`;
+    /// - a handshake that cannot reach the server, for a profile with a recorded library that
+    ///   has something kept offline (a pin), ends in [`SessionState::Offline`] instead of
+    ///   `Failed`;
     /// - a request the server does not answer is answered from the saved copies when the
     ///   catalog can (see [`request`](Self::request)), and images come from the saved copies
     ///   first.
@@ -647,6 +648,7 @@ impl Handshake {
             Gate::Offline { library } => Some(library.library_id.clone()),
             _ => None,
         };
+        let already_offline = expected.is_some();
         let result = rpc
             .and_then(|rpc| handshake(rpc, &self.client))
             .and_then(|library| match expected {
@@ -661,7 +663,12 @@ impl Handshake {
                 };
                 (gate, Event::Connected(Ok(library)))
             }
-            Err(e @ ClientError::Unreachable(_)) => match self.known_library() {
+            // Offline only with something saved: otherwise the app shows that the server
+            // cannot be reached, not an empty library. A session already offline stays so.
+            Err(e @ ClientError::Unreachable(_)) => match self
+                .known_library()
+                .filter(|library| already_offline || self.has_pins(&library.library_id))
+            {
                 Some(library) => {
                     // Thumbnails come from the saved copies, then from the temporary cache.
                     self.open_cache(&library.library_id);
@@ -731,6 +738,15 @@ impl Handshake {
             return None;
         };
         KnownLibraries::new(root).get(self.profile)
+    }
+
+    /// Whether anything of `library_id` is kept offline (reads its pins: on the worker).
+    fn has_pins(&self, library_id: &str) -> bool {
+        self.dirs
+            .data
+            .as_deref()
+            .and_then(|root| OfflineStore::open(root, library_id))
+            .is_some_and(|store| !store.load_pins().is_empty())
     }
 
     /// Starts the library's offline handle, the first time its id is known.

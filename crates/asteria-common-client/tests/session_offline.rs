@@ -345,3 +345,24 @@ fn recovering_from_a_degraded_server_refetches_the_listing() {
     // What is on screen came from the copies: fetch it again.
     assert!(session.take_refetch_listing());
 }
+
+#[test]
+fn a_known_library_with_nothing_saved_still_fails() {
+    let data = tempfile::tempdir().unwrap();
+    let server = FakeServer::start();
+    let profile = profile(server.addr, "t");
+    let session = open(&profile, data.path());
+    assert!(matches!(session.state(), SessionState::Ready { .. }));
+    drop(session);
+
+    let session = open(&at(&profile, free_addr()), data.path());
+    assert!(
+        matches!(
+            session.state(),
+            SessionState::Failed(ClientError::Unreachable(_))
+        ),
+        "{:?}",
+        session.state()
+    );
+    assert!(!session.is_offline());
+}
