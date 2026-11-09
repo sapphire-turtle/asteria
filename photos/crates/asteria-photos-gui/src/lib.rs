@@ -7,6 +7,7 @@ pub mod browse;
 pub mod connection;
 pub mod detail;
 pub mod i18n;
+pub mod offline;
 pub mod uploads;
 mod viewer;
 
