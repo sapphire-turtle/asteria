@@ -76,31 +76,37 @@ pub(crate) struct QueueFile {
     done_lines: usize,
     /// The file does not end in a complete line, so an append would glue onto it.
     torn: bool,
+    /// Lines `open` could not read, written back as they were whenever the file is rewritten.
+    kept: Vec<Vec<u8>>,
 }
 
 impl QueueFile {
     /// Missing file → empty. A torn last line is dropped; an unreadable middle line is skipped
-    /// with a `tracing::warn!`; the file is never deleted or moved. Other read errors are returned.
+    /// with a `tracing::warn!` and kept byte for byte through compaction; the file is never deleted or moved. Other read errors are returned.
     pub fn open(path: &Path) -> io::Result<QueueFile> {
         let mut q = QueueFile {
             path: path.to_owned(),
             pending: Vec::new(),
             done_lines: 0,
             torn: false,
+            kept: Vec::new(),
         };
         let bytes = match fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(q),
             Err(e) => return Err(e),
         };
-        let text = String::from_utf8_lossy(&bytes);
-        q.torn = !text.is_empty() && !text.ends_with('\n');
-        let all: Vec<&str> = text.lines().collect();
-        for (n, raw) in all.iter().enumerate() {
-            if raw.trim().is_empty() {
+        // Split on bytes: a line that is not UTF-8 is still kept as it is.
+        let mut lines: Vec<&[u8]> = bytes.split(|&b| b == b'\n').collect();
+        // What follows the last newline: empty, or a line the writer never finished.
+        let tail = lines.pop().unwrap_or_default();
+        q.torn = !tail.is_empty();
+        for (n, raw) in lines.iter().copied().chain(Some(tail)).enumerate() {
+            if raw.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            match decode(raw) {
+            let is_tail = n == lines.len();
+            match std::str::from_utf8(raw).ok().and_then(decode) {
                 Some(Line::Add(add)) => {
                     let at = DateTime::parse_from_rfc3339(&add.at)
                         .expect("checked by decode")
@@ -116,15 +122,16 @@ impl QueueFile {
                     q.done_lines += 1;
                     q.pending.retain(|p| p.id != id);
                 }
-                None if n + 1 == all.len() => {
-                    // A write cut short by a crash.
-                    q.torn = true;
+                // A write cut short by a crash.
+                None if is_tail => {}
+                None => {
+                    tracing::warn!(
+                        "skipping an unreadable line {} of {}",
+                        n + 1,
+                        path.display()
+                    );
+                    q.kept.push(raw.to_vec());
                 }
-                None => tracing::warn!(
-                    "skipping an unreadable line {} of {}",
-                    n + 1,
-                    path.display()
-                ),
             }
         }
         Ok(q)
@@ -213,14 +220,17 @@ impl QueueFile {
         f.sync_data()
     }
 
-    /// Rewrites the file as the pending `add` lines alone.
+    /// Rewrites the file as the lines it could not read, then the pending `add` lines.
     fn compact(&mut self) -> io::Result<()> {
-        let text: String = self
-            .pending
-            .iter()
-            .map(|op| encode(&Line::from(op)))
-            .collect();
-        write_atomic(&self.path, text.as_bytes(), false)?;
+        let mut bytes: Vec<u8> = Vec::new();
+        for line in &self.kept {
+            bytes.extend_from_slice(line);
+            bytes.push(b'\n');
+        }
+        for op in &self.pending {
+            bytes.extend_from_slice(encode(&Line::from(op)).as_bytes());
+        }
+        write_atomic(&self.path, &bytes, false)?;
         self.done_lines = 0;
         self.torn = false;
         Ok(())
@@ -329,6 +339,39 @@ mod tests {
         fs::write(&path, format!("{good}garbage\n{good}")).unwrap();
         let q = QueueFile::open(&path).unwrap();
         assert_eq!(q.pending().len(), 2);
+    }
+
+    #[test]
+    fn unreadable_lines_survive_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.jsonl");
+        let mut q = QueueFile::open(&path).unwrap();
+        q.append(op("a", "i1", 3, 1)).unwrap();
+        let good = fs::read(&path).unwrap();
+        let mut raw = good.clone();
+        raw.extend_from_slice(b"garbage\n\xff\xfe not utf8\n");
+        raw.extend_from_slice(&good);
+        fs::write(&path, &raw).unwrap();
+        let kept = b"garbage\n\xff\xfe not utf8\n".to_vec();
+
+        // Emptying the pending list keeps them, and nothing else.
+        let mut q = QueueFile::open(&path).unwrap();
+        q.mark_done(&["a".into()]).unwrap();
+        assert!(q.pending().is_empty());
+        assert_eq!(fs::read(&path).unwrap(), kept);
+
+        // A later compaction by volume keeps them ahead of the pending line.
+        for n in 0..1002 {
+            q.append(op(&format!("o{n}"), "i1", 1, 1)).unwrap();
+        }
+        for n in 0..1001 {
+            q.mark_done(&[format!("o{n}")]).unwrap();
+        }
+        let mut expect = kept.clone();
+        expect.extend_from_slice(encode(&Line::from(&op("o1001", "i1", 1, 1))).as_bytes());
+        assert_eq!(fs::read(&path).unwrap(), expect);
+        let q = QueueFile::open(&path).unwrap();
+        assert_eq!(q.pending(), [op("o1001", "i1", 1, 1)]);
     }
 
     #[test]
