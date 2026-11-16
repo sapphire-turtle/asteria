@@ -392,3 +392,35 @@ fn a_newer_click_during_a_send_keeps_showing() {
     let batches = calls.batches();
     assert_eq!(batches[1][0]["value"], 5);
 }
+
+#[test]
+fn a_new_rating_ends_a_running_backoff() {
+    // The first ops.apply is told to come back in 30 s; a rating made meanwhile goes at once.
+    let dir = tempfile::tempdir().unwrap();
+    let path = queue_file(&dir);
+    let calls = Calls::default();
+    let seen = calls.clone();
+    let addr = serve(move |req| {
+        let (id, _, params) = seen.record(req);
+        if seen.count("ops.apply") == 1 {
+            StubResponse::new(503, Vec::new()).header("retry-after", "30")
+        } else {
+            StubResponse::rpc_result(id, all_applied(&params))
+        }
+    });
+    let (queue, _gate) = start(addr, &path, true);
+    queue.rate(item("A"), 1);
+    wait_for("the first attempt", || calls.count("ops.apply") == 1);
+    std::thread::sleep(Duration::from_millis(100));
+    queue.rate(item("B"), 2);
+    let start = std::time::Instant::now();
+    wait_for("both ratings to be confirmed", || queue.pending() == 0);
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+    let batches = calls.batches();
+    assert_eq!(batches.len(), 2);
+    assert_eq!(batches[1].len(), 2);
+}

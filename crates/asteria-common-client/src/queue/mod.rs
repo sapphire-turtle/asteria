@@ -13,7 +13,7 @@
 
 mod file;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
@@ -122,18 +122,23 @@ impl Inner {
 }
 
 /// Forgets `op` as `item`'s unsettled rating, unless a newer one has taken its place.
-fn settle(s: &mut State, item: &ItemId, op: &str) {
-    if s.pending.get(item).is_some_and(|u| u.id == op) {
+/// Whether it did.
+fn settle(s: &mut State, item: &ItemId, op: &str) -> bool {
+    let current = s.pending.get(item).is_some_and(|u| u.id == op);
+    if current {
         s.pending.remove(item);
     }
+    current
 }
 
-/// `op` could not be stored, so it will never be sent.
+/// `op` could not be stored, so it will never be sent. Noticed once, and only while it is
+/// still the item's newest rating: a newer click has its own fate.
 fn not_saved(s: &mut State, op: &QueuedRating) {
-    settle(s, &op.item, &op.id);
-    s.notices.push(Notice::RatingNotSaved {
-        item: op.item.clone(),
-    });
+    if settle(s, &op.item, &op.id) {
+        s.notices.push(Notice::RatingNotSaved {
+            item: op.item.clone(),
+        });
+    }
 }
 
 enum Msg {
@@ -417,6 +422,38 @@ impl Sender {
     }
 
     fn run(mut self) {
+        self.serve();
+        self.finish();
+    }
+
+    /// Once the thread stops: a rating that reached neither the file nor the thread (one made
+    /// after a cancel, as the thread let go) is reported not saved rather than shown forever.
+    fn finish(self) {
+        let Sender {
+            inner, rx, file, ..
+        } = self;
+        // From here on `rate` reports a failed send itself.
+        drop(rx);
+        let saved: HashSet<&str> = file
+            .iter()
+            .flat_map(|f| f.pending())
+            .map(|p| p.id.as_str())
+            .collect();
+        inner.change(|s| {
+            let lost: Vec<ItemId> = s
+                .pending
+                .iter()
+                .filter(|(_, u)| !saved.contains(u.id.as_str()))
+                .map(|(item, _)| item.clone())
+                .collect();
+            for item in lost {
+                s.pending.remove(&item);
+                s.notices.push(Notice::RatingNotSaved { item });
+            }
+        });
+    }
+
+    fn serve(&mut self) {
         loop {
             // Appends what was rated before a drop, too.
             if !self.pump() || self.stopped() {
@@ -457,7 +494,12 @@ impl Sender {
 
     fn handle(&mut self, msg: Msg) {
         match msg {
-            Msg::Rate(op) => self.append(op),
+            Msg::Rate(op) => {
+                self.append(op);
+                // A new rating goes at once (spec §5.2). The backoff stays, so a further
+                // failure still waits longer.
+                self.retry_at = None;
+            }
             Msg::Wake => {
                 // The server answers again: no reason to sit out the rest of a wait.
                 self.backoff = None;

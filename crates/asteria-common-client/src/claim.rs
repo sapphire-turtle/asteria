@@ -33,6 +33,8 @@ impl Drop for Claim {
 
 /// Takes ownership of the queue file `path`, waiting while another engine holds it. `None`
 /// if `give_up` turns true first. `give_up` runs with the claims locked: it must not claim.
+///
+/// It does not wait for [`Ticket`]s, so it would jump their line: never use both on one path.
 pub(crate) fn claim(path: &Path, give_up: impl Fn() -> bool) -> Option<Claim> {
     wait_until(path, give_up, |_| true)
 }
