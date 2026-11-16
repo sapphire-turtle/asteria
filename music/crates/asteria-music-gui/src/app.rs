@@ -749,11 +749,15 @@ impl State {
         let playback = &mut self.playback_page;
         let offline_page = &mut self.offline_page;
         let offline = self.connection.as_ref().and_then(|c| c.session.offline());
+        let pending = self
+            .connection
+            .as_ref()
+            .map_or(0, |c| c.session.pending_ratings());
         self.settings.ui(ui, &items, |ui, open| match open {
             Page::Servers => page.ui(ui),
             Page::Extra(i) => extra[i].ui(ui),
             Page::Playback => playback.ui(ui),
-            Page::Offline => offline_page.ui(ui, offline),
+            Page::Offline => offline_page.ui(ui, offline, pending),
         });
         if self.playback_page.take_change().is_some() {
             self.apply_playback_change();
@@ -928,6 +932,9 @@ impl ShellApp<Screen> for State {
         offline_status(
             ui,
             self.connection.as_ref().and_then(|c| c.session.offline()),
+            self.connection
+                .as_ref()
+                .map_or(0, |c| c.session.pending_ratings()),
         );
     }
 }

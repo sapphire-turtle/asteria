@@ -5,6 +5,9 @@ asteria-common-client-grid-failed = サムネイルを読み込めませんで�
 asteria-common-client-grid-video = 動画
 asteria-common-client-grid-read-only = 読み取り専用: { $reason }
 asteria-common-client-grid-rating = 5段階中 { $stars }
+asteria-common-client-rating-set = 星 { $stars } つにする
+asteria-common-client-rating-clear = 評価を消す
+asteria-common-client-ratings-pending = 未送信の評価 { $count } 件
 
 # サーバー設定のページ。
 asteria-common-client-servers-title = サーバー

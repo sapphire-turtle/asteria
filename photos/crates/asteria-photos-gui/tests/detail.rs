@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use asteria_common_api::{ItemId, MediaItem, codes};
+use asteria_common_client::widgets::stars::rating_after_click;
 use asteria_photos_gui::PhotosApp;
-use asteria_photos_gui::detail::{BUSY_RETRY_DELAY, Edit, EditError, Field, rating_after_click};
+use asteria_photos_gui::detail::{BUSY_RETRY_DELAY, Edit, EditError, Field};
 use corundum_framework::egui;
 use serde_json::{Value, json};
 
@@ -390,12 +391,4 @@ fn the_viewer_steps_through_the_listing_and_closes_on_escape() {
     assert_eq!(app.opened_item(), None);
     // The selection follows the viewer.
     assert_eq!(selected(&app), Some(id("b")));
-}
-
-#[test]
-fn rating_clicks_set_or_clear() {
-    assert_eq!(rating_after_click(None, 3), 3);
-    assert_eq!(rating_after_click(Some(0), 1), 1);
-    assert_eq!(rating_after_click(Some(2), 4), 4);
-    assert_eq!(rating_after_click(Some(4), 4), 0);
 }

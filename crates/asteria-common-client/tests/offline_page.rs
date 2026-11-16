@@ -170,8 +170,8 @@ fn the_mark_and_status_render() {
     let f = Fixture::new();
     f.frame(|ui| {
         saved_mark(ui);
-        offline_status(ui, Some(&f.handle));
-        offline_status(ui, None);
+        offline_status(ui, Some(&f.handle), 0);
+        offline_status(ui, None, 0);
     });
 }
 
@@ -200,12 +200,12 @@ fn the_page_lists_pins_and_removes_one() {
     let f = Fixture::new();
     two_pins(&f);
     let mut page = OfflinePage::new();
-    let texts = f.frame(|ui| page.ui(ui, Some(&f.handle)));
+    let texts = f.frame(|ui| page.ui(ui, Some(&f.handle), 0));
     assert!(has(&texts, "Trip") && has(&texts, "Home"), "{texts:?}");
     // Both rows have a "Remove": the first one is for the first pin.
-    f.click(|t| t == "Remove", |ui| page.ui(ui, Some(&f.handle)));
+    f.click(|t| t == "Remove", |ui| page.ui(ui, Some(&f.handle), 0));
     assert_eq!(f.handle.pins().len(), 1);
-    let texts = f.frame(|ui| page.ui(ui, Some(&f.handle)));
+    let texts = f.frame(|ui| page.ui(ui, Some(&f.handle), 0));
     assert!(!has(&texts, "Trip") ^ !has(&texts, "Home"), "{texts:?}");
 }
 
@@ -213,7 +213,7 @@ fn the_page_lists_pins_and_removes_one() {
 fn the_page_without_a_handle_only_asks_to_connect() {
     let f = Fixture::new();
     let mut page = OfflinePage::new();
-    let texts = f.frame(|ui| page.ui(ui, None));
+    let texts = f.frame(|ui| page.ui(ui, None, 0));
     assert!(has(&texts, "Connect to a server"), "{texts:?}");
     assert!(!has(&texts, "Sync now"));
 }
@@ -223,7 +223,7 @@ fn the_limit_choice_is_saved() {
     let f = Fixture::new();
     assert!(LIMIT_CHOICES_GIB.contains(&16));
     let mut page = OfflinePage::new();
-    f.click(|t| t == "16 GiB", |ui| page.ui(ui, Some(&f.handle)));
+    f.click(|t| t == "16 GiB", |ui| page.ui(ui, Some(&f.handle), 0));
     assert_eq!(f.handle.limit_bytes(), 16 << 30);
 }
 
@@ -232,12 +232,32 @@ fn delete_all_asks_first() {
     let f = Fixture::new();
     two_pins(&f);
     let mut page = OfflinePage::new();
-    f.click(|t| t == "Delete all", |ui| page.ui(ui, Some(&f.handle)));
+    f.click(|t| t == "Delete all", |ui| page.ui(ui, Some(&f.handle), 0));
     assert_eq!(f.handle.pins().len(), 2, "the first press only asks");
     // Cancelling keeps everything.
-    f.click(|t| t == "Cancel", |ui| page.ui(ui, Some(&f.handle)));
+    f.click(|t| t == "Cancel", |ui| page.ui(ui, Some(&f.handle), 0));
     assert_eq!(f.handle.pins().len(), 2);
-    f.click(|t| t == "Delete all", |ui| page.ui(ui, Some(&f.handle)));
-    f.click(|t| t.starts_with("Yes"), |ui| page.ui(ui, Some(&f.handle)));
+    f.click(|t| t == "Delete all", |ui| page.ui(ui, Some(&f.handle), 0));
+    f.click(
+        |t| t.starts_with("Yes"),
+        |ui| page.ui(ui, Some(&f.handle), 0),
+    );
     wait_for("all deleted", || f.handle.pins().is_empty());
+}
+
+#[test]
+fn unsent_ratings_are_counted_on_the_page_and_the_status() {
+    let f = Fixture::new();
+    let mut page = OfflinePage::new();
+    let texts = f.frame(|ui| page.ui(ui, Some(&f.handle), 3));
+    assert!(has(&texts, "3 ratings not sent yet"), "{texts:?}");
+    let texts = f.frame(|ui| page.ui(ui, Some(&f.handle), 1));
+    assert!(has(&texts, "1 rating not sent yet"), "{texts:?}");
+    let texts = f.frame(|ui| page.ui(ui, Some(&f.handle), 0));
+    assert!(!has(&texts, "not sent yet"), "{texts:?}");
+    // The status bar shows it even without a handle.
+    let texts = f.frame(|ui| offline_status(ui, None, 3));
+    assert!(has(&texts, "3 ratings not sent yet"), "{texts:?}");
+    let texts = f.frame(|ui| offline_status(ui, None, 0));
+    assert!(!has(&texts, "not sent yet"), "{texts:?}");
 }

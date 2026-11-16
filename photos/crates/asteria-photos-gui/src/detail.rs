@@ -13,7 +13,7 @@
 //! again and still shows the server's value.
 //!
 //! - **Rating**: clicking a star sets that many stars; clicking the star of the rating
-//!   already set clears it to 0 ([`rating_after_click`]).
+//!   already set clears it to 0 ([`rating_after_click`](asteria_common_client::widgets::stars::rating_after_click)).
 //! - **Description**: saved when the field loses focus, or when another item is selected
 //!   (or the folder changes) with text typed but not yet saved. There is no Save button.
 //! - **Read-only items** (`read_only_reason`, or a `READ_ONLY` answer): the reason shows in
@@ -30,14 +30,13 @@ use asteria_common_client::errors::{error_detail, error_text};
 use asteria_common_client::images::{ImageState, Preset};
 use asteria_common_client::rpc::ClientError;
 use asteria_common_client::session::{Reply, Request, RequestId, Response, Session};
+use asteria_common_client::widgets::stars::stars;
 use corundum_framework::egui;
 use corundum_framework::gui::theme::{self, Swatch, Tone};
 use corundum_framework::gui::{icons, tr};
 
 /// How long an edit the server answered `BUSY` waits before it is sent again (once).
 pub const BUSY_RETRY_DELAY: Duration = Duration::from_millis(500);
-/// The most stars.
-pub const MAX_RATING: i8 = 5;
 /// The colour labels offered, as written to `xmp:Label` (Lightroom's names).
 pub const LABELS: [&str; 5] = ["Red", "Yellow", "Green", "Blue", "Purple"];
 /// The preview's greatest height in the pane.
@@ -58,7 +57,7 @@ pub enum Field {
 /// One change to an item's metadata: the field's new value, whole.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
-    /// 0 (none) to [`MAX_RATING`].
+    /// 0 (none) to [`MAX_RATING`](asteria_common_client::widgets::stars::MAX_RATING).
     Rating(i8),
     /// `None` removes the label.
     Label(Option<String>),
@@ -97,12 +96,6 @@ impl Edit {
         }
         p
     }
-}
-
-/// The rating a click on star `star` (1 to 5) makes: that many stars, or none when it is
-/// the rating already set.
-pub fn rating_after_click(current: Option<i8>, star: i8) -> i8 {
-    if current == Some(star) { 0 } else { star }
 }
 
 /// Why the last edit of an item was not saved.
@@ -530,7 +523,7 @@ fn editors_ui(ui: &mut egui::Ui, item: &MediaItem, edits: &mut Edits, session: &
 
     ui.weak(tr!(ui, "asteria-photos-detail-rating"));
     ui.add_enabled_ui(!rating_busy, |ui| {
-        if let Some(r) = stars_ui(ui, item.rating) {
+        if let Some(r) = stars(ui, item.rating, 18.0) {
             edit = Some(Edit::Rating(r));
         }
     });
@@ -586,40 +579,6 @@ fn editors_ui(ui: &mut egui::Ui, item: &MediaItem, edits: &mut Edits, session: &
     if let Some(edit) = edit {
         edits.send(session, item, edit);
     }
-}
-
-/// Five stars; returns the rating a click asks for.
-fn stars_ui(ui: &mut egui::Ui, rating: Option<i8>) -> Option<i8> {
-    let set = rating.unwrap_or(0);
-    let mut clicked = None;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        for star in 1..=MAX_RATING {
-            let (tone, swatch) = if star <= set {
-                (Tone::Text, Swatch::Yellow)
-            } else {
-                (Tone::Border, Swatch::Neutral)
-            };
-            let image = icons::image_as(ui, icons::star(), 18.0, tone, swatch);
-            let hover = if rating == Some(star) {
-                tr!(ui, "asteria-photos-detail-rating-clear")
-            } else {
-                tr!(
-                    ui,
-                    "asteria-photos-detail-rating-set",
-                    stars = i64::from(star)
-                )
-            };
-            if ui
-                .add(egui::Button::image(image).frame(false))
-                .on_hover_text(hover)
-                .clicked()
-            {
-                clicked = Some(rating_after_click(rating, star));
-            }
-        }
-    });
-    clicked
 }
 
 /// The colour label menu, with the current label's colour beside it; returns the label
