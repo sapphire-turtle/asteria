@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 pub mod offline;
+pub mod ops;
 
 /// How long a test waits for something that should happen promptly.
 pub const DEADLINE: Duration = Duration::from_secs(20);

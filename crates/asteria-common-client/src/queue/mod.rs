@@ -220,9 +220,15 @@ impl OpQueue {
     }
 
     /// Send now if anything is pending (reconnect).
-    // The session calls it once it starts the queue (next task).
-    #[allow(dead_code)]
     pub(crate) fn wake(&self) {
+        let _ = self.tx.send(Msg::Wake);
+    }
+
+    /// Stops the thread as dropping the queue does (see its [`Drop`]). For the session, whose
+    /// queue may be shared a little longer with a job on its worker.
+    pub(crate) fn stop(&self) {
+        self.inner.dropped.store(true, Ordering::Release);
+        // Wakes the thread even while another sender (a test's gate) keeps the channel open.
         let _ = self.tx.send(Msg::Wake);
     }
 }
@@ -231,9 +237,7 @@ impl OpQueue {
 /// then exits, releasing the file.
 impl Drop for OpQueue {
     fn drop(&mut self) {
-        self.inner.dropped.store(true, Ordering::Release);
-        // Wakes the thread even while another sender (a test's gate) keeps the channel open.
-        let _ = self.tx.send(Msg::Wake);
+        self.stop();
     }
 }
 
