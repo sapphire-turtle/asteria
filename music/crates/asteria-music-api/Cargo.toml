@@ -7,7 +7,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-asteria-common-api = { path = "../../../crates/asteria-common-api", version = "2.3.0" }
+asteria-common-api = { path = "../../../crates/asteria-common-api", version = "2.4.0" }
 serde.workspace = true
 unicode-normalization.workspace = true
 

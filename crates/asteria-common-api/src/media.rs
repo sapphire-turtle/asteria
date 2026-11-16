@@ -13,7 +13,7 @@ pub enum MediaKind {
 }
 
 /// Stable item identifier: a UUID v5 string, opaque to clients.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ItemId(pub String);
 
@@ -81,7 +81,7 @@ pub struct MediaGetParams {
 
 /// Parameters of `media.update`. `None` leaves a field unchanged; for the nullable
 /// fields, `Some(None)` clears it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MediaUpdateParams {
     pub id: ItemId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
