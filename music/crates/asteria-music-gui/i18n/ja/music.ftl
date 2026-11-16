@@ -81,9 +81,3 @@ asteria-music-offline-save = オフライン用に保存
 asteria-music-offline-remove = オフラインから削除
 asteria-music-offline-not-saved = オフライン用に保存されていないため、サーバーなしでは再生できません。
 
-# 適用できなかった評価についてステータスバーが伝えること。
-asteria-music-rating-rejected = 評価を反映できませんでした（{ $reason }）
-asteria-music-rating-reason-not-found = 見つかりません
-asteria-music-rating-reason-read-only = 読み取り専用です
-asteria-music-rating-reason-invalid = 不正な値です
-asteria-music-rating-not-saved = 評価を保存できませんでした

@@ -14,6 +14,11 @@ asteria-common-client-ratings-pending = { $count ->
     [one] 1 rating
    *[other] { $count } ratings
 } not sent yet
+asteria-common-client-rating-rejected = Could not apply a rating ({ $reason })
+asteria-common-client-rating-reason-not-found = not found
+asteria-common-client-rating-reason-read-only = read-only
+asteria-common-client-rating-reason-invalid = invalid
+asteria-common-client-rating-not-saved = Could not save a rating
 
 # The servers settings page.
 asteria-common-client-servers-title = Servers

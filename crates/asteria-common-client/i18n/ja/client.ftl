@@ -8,6 +8,11 @@ asteria-common-client-grid-rating = 5段階中 { $stars }
 asteria-common-client-rating-set = 星 { $stars } つにする
 asteria-common-client-rating-clear = 評価を消す
 asteria-common-client-ratings-pending = 未送信の評価 { $count } 件
+asteria-common-client-rating-rejected = 評価を反映できませんでした（{ $reason }）
+asteria-common-client-rating-reason-not-found = 見つかりません
+asteria-common-client-rating-reason-read-only = 読み取り専用です
+asteria-common-client-rating-reason-invalid = 不正な値です
+asteria-common-client-rating-not-saved = 評価を保存できませんでした
 
 # サーバー設定のページ。
 asteria-common-client-servers-title = サーバー

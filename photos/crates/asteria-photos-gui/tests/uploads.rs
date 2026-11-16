@@ -147,6 +147,27 @@ fn drop_while_disconnected_is_refused() {
     assert!(app.notice().is_some());
 }
 
+#[test]
+fn narrow_a_refused_drop_is_told_at_the_foot() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = asteria_photos_gui::app::AppPaths {
+        servers: dir.path().join("servers.toml"),
+        display: dir.path().join("display.toml"),
+        cache: None,
+        data: Some(dir.path().join("data")),
+    };
+    let ctx = egui::Context::default();
+    let mut app = PhotosApp::new(paths, &ctx);
+    let narrow = egui::vec2(380.0, 700.0);
+    frame_sized_with(&ctx, &mut app, narrow, Vec::new());
+    app.drop_files(vec![dir.path().join("x.jpg")]);
+    let text = app.notice().unwrap().to_owned();
+    let at = text_centres(&ctx, &mut app, narrow, &text);
+    assert!(!at.is_empty(), "the notice is drawn");
+    // Narrow there is no status bar: the notice sits at the foot of the screen.
+    assert!(at.iter().all(|p| p.y > 350.0), "{at:?}");
+}
+
 fn group(state: GroupState) -> QueuedGroup {
     QueuedGroup {
         id: GroupId(grain_id::GrainId::random()),

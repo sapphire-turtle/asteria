@@ -98,11 +98,6 @@ asteria-photos-uploads-state-failed = Failed: { $reason }
 # Dropping files on the window, and the status bar's count.
 asteria-photos-drop-overlay = Send to Inbox
 asteria-photos-drop-refused = Not connected to a server, so the files were not sent.
-asteria-photos-rating-rejected = Could not apply a rating ({ $reason })
-asteria-photos-rating-reason-not-found = not found
-asteria-photos-rating-reason-read-only = read-only
-asteria-photos-rating-reason-invalid = invalid
-asteria-photos-rating-not-saved = Could not save a rating
 asteria-photos-status-uploads = ↑ { $done } / { $total }
 asteria-photos-status-uploads-awaiting = ↑ { $done } / { $total } · { $count } to decide
 asteria-photos-status-uploads-hover = Open the uploads

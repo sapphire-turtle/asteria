@@ -87,9 +87,3 @@ asteria-music-offline-save = Save for offline
 asteria-music-offline-remove = Remove from offline
 asteria-music-offline-not-saved = Not saved for offline, so it cannot play without the server.
 
-# What the status bar tells about a rating that could not be applied.
-asteria-music-rating-rejected = Could not apply a rating ({ $reason })
-asteria-music-rating-reason-not-found = not found
-asteria-music-rating-reason-read-only = read-only
-asteria-music-rating-reason-invalid = invalid
-asteria-music-rating-not-saved = Could not save a rating

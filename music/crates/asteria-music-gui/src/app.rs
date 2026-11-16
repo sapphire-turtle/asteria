@@ -16,20 +16,20 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use asteria_common_client::errors::{error_detail, error_text};
 use asteria_common_client::offline::OfflinePage;
 use asteria_common_client::profiles::{ProfileId, Profiles, ServerProfile, Token};
-use asteria_common_client::queue::Notice;
 use asteria_common_client::rpc::ClientError;
 use asteria_common_client::saver::Saver;
 use asteria_common_client::session::{SessionDirs, SessionState};
 use asteria_common_client::settings::ExtraSettingsPage;
 use asteria_common_client::settings::servers::{ServersChange, ServersPage};
+use asteria_common_client::widgets::notice::StatusNotice;
 use asteria_common_client::widgets::offline_toggle::offline_status;
 use asteria_common_client::widgets::server_switcher::{ServerSwitcher, SwitcherAction};
-use asteria_music_api::{AlbumId, ArtistId, PlaylistId, RejectReason};
+use asteria_music_api::{AlbumId, ArtistId, PlaylistId};
 use corundum_framework::egui;
 use corundum_framework::gui::settings::{ListItem, SettingsLayout, SettingsSection};
 use corundum_framework::gui::{COMPACT_WIDTH, Destination, Shell, ShellApp, Side, icons, tr};
@@ -112,8 +112,8 @@ struct State {
     open_screen: Option<Screen>,
     /// Whether the shell lays out for a phone this frame (no status bar).
     compact: bool,
-    /// What the status bar tells about ratings, and since when (it goes after [`NOTICE_FOR`]).
-    notice: Option<(String, Instant)>,
+    /// What the status bar tells about ratings.
+    notice: StatusNotice,
 }
 
 impl MusicApp {
@@ -214,7 +214,7 @@ impl MusicApp {
             save_blocked,
             open_screen: None,
             compact: false,
-            notice: None,
+            notice: StatusNotice::default(),
         };
         state.connect(false);
         if state.profiles.servers.is_empty() {
@@ -414,15 +414,14 @@ impl MusicApp {
 
     /// What the status bar says about a rating that could not be applied, while it does.
     pub fn notice(&self) -> Option<&str> {
-        let (text, since) = self.state.notice.as_ref()?;
-        (since.elapsed() < NOTICE_FOR).then_some(text.as_str())
+        self.state.notice.text()
     }
 
     /// When the notice the status bar shows was set (a new one, even with the same text, sets
     /// it again). For tests.
     #[doc(hidden)]
     pub fn notice_since(&self) -> Option<Instant> {
-        self.state.notice.as_ref().map(|(_, since)| *since)
+        self.state.notice.since()
     }
 }
 
@@ -491,15 +490,7 @@ impl State {
         }
         if let Some(c) = &mut self.connection {
             c.poll(&self.ctx);
-            let notices: Vec<String> = c
-                .session
-                .take_notices()
-                .iter()
-                .map(|n| rating_notice(&self.ctx, n))
-                .collect();
-            if !notices.is_empty() {
-                self.notice = Some((notices.join(" "), Instant::now()));
-            }
+            self.notice.take_ratings(&self.ctx, &mut c.session);
         }
         self.send_endpoint();
         // Offline, the player plays only what is saved, and asks the server nothing.
@@ -671,21 +662,9 @@ impl State {
     /// Tells on the status bar that a rating could not be queued (there is nowhere to keep it).
     fn rate_failed(&mut self, e: &ClientError) {
         tracing::warn!(error = %e, "queueing a rating failed");
-        let text = tr!(self.ctx, "asteria-music-rating-not-saved");
-        self.notice = Some((text, Instant::now()));
+        let text = tr!(self.ctx, "asteria-common-client-rating-not-saved");
+        self.notice.set(text);
         self.ctx.request_repaint();
-    }
-
-    /// The notice about ratings, until it expires.
-    fn notice_ui(&mut self, ui: &mut egui::Ui) {
-        if let Some((text, since)) = &self.notice {
-            if let Some(left) = NOTICE_FOR.checked_sub(since.elapsed()) {
-                ui.colored_label(ui.visuals().warn_fg_color, text.as_str());
-                ui.ctx().request_repaint_after(left);
-            } else {
-                self.notice = None;
-            }
-        }
     }
 
     /// Once the session is ready (or offline, on the saved copies), tells the player which
@@ -842,25 +821,6 @@ impl State {
     }
 }
 
-/// The status-bar text for what the rating queue has to tell.
-fn rating_notice(ctx: &egui::Context, notice: &Notice) -> String {
-    match notice {
-        Notice::RatingRejected { reason, .. } => {
-            let key = match reason {
-                RejectReason::NotFound => "asteria-music-rating-reason-not-found",
-                RejectReason::ReadOnly => "asteria-music-rating-reason-read-only",
-                RejectReason::Invalid => "asteria-music-rating-reason-invalid",
-            };
-            let reason = tr!(ctx, key);
-            tr!(ctx, "asteria-music-rating-rejected", reason = reason)
-        }
-        Notice::RatingNotSaved { .. } => tr!(ctx, "asteria-music-rating-not-saved"),
-    }
-}
-
-/// How long the status bar keeps a notice.
-const NOTICE_FOR: Duration = Duration::from_secs(8);
-
 fn quality_of(settings: &PlaybackSettings) -> Quality {
     if settings.low_quality {
         Quality::Low
@@ -971,8 +931,8 @@ impl ShellApp<Screen> for State {
         self.bar_ui(ui);
         // Narrow, there is no status bar to carry a rating's notice: it sits at the foot of
         // the screen, above the playback bar.
-        if self.compact && self.notice.is_some() {
-            egui::Panel::bottom("music-notice").show(ui, |ui| self.notice_ui(ui));
+        if self.compact {
+            self.notice.foot_ui(ui, "music-notice");
         }
         match screen {
             Screen::Albums | Screen::Artists | Screen::Playlists => self.library_ui(ui, screen),
@@ -1032,7 +992,7 @@ impl ShellApp<Screen> for State {
                 .as_ref()
                 .map_or(0, |c| c.session.pending_ratings()),
         );
-        self.notice_ui(ui);
+        self.notice.ui(ui);
     }
 }
 

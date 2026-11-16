@@ -343,8 +343,15 @@ fn row_ui(ui: &mut egui::Ui, index: usize, row: &Row<'_>, cx: &Context<'_>) -> O
     let rating = (cx.ratings)(&track.item);
     let mut action = None;
     if cx.wide {
-        // Registered after the row, so a click on a star is the star's, not the row's.
+        // Registered after the row, so a click on a star is the star's, not the row's; and a
+        // click that just misses one (between or around the stars) is the column's, which
+        // does nothing, so it never plays.
         let col = columns(rect, true)[4];
+        ui.interact(
+            col,
+            ui.scope_id().with(("asteria_music_track_rating", index)),
+            Sense::click(),
+        );
         let mut stars_ui = ui.new_child(
             egui::UiBuilder::new()
                 .id_salt(("asteria_music_track_stars", index))

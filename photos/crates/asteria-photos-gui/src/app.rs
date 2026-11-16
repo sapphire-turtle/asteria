@@ -13,18 +13,18 @@
 //! UI thread does no disk I/O.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use asteria_common_api::{ItemId, RejectReason};
+use asteria_common_api::ItemId;
 use asteria_common_client::errors::{error_detail, error_text};
 use asteria_common_client::offline::OfflinePage;
 use asteria_common_client::profiles::{ProfileId, Profiles};
 use asteria_common_client::profiles::{ServerProfile, Token};
-use asteria_common_client::queue::Notice;
 use asteria_common_client::saver::Saver;
 use asteria_common_client::session::{SessionDirs, SessionState};
 use asteria_common_client::settings::ExtraSettingsPage;
 use asteria_common_client::settings::servers::{ServersChange, ServersPage};
+use asteria_common_client::widgets::notice::StatusNotice;
 use asteria_common_client::widgets::offline_toggle::offline_status;
 use asteria_common_client::widgets::server_switcher::{ServerSwitcher, SwitcherAction};
 use corundum_framework::egui;
@@ -99,8 +99,8 @@ struct State {
     compact: bool,
     /// Open the side pane on the next frame of the library (the viewer's "Details").
     open_details: bool,
-    /// Something to tell the user on the status bar, and since when.
-    notice: Option<(String, Instant)>,
+    /// Something to tell the user on the status bar.
+    notice: StatusNotice,
 }
 
 impl PhotosApp {
@@ -179,7 +179,7 @@ impl PhotosApp {
             open_screen: None,
             compact: false,
             open_details: false,
-            notice: None,
+            notice: StatusNotice::default(),
         };
         state.connect(false);
         if state.profiles.servers.is_empty() {
@@ -297,7 +297,7 @@ impl PhotosApp {
         match uploads {
             Some(uploads) => {
                 uploads.drop_paths(paths);
-                self.state.notice = None;
+                self.state.notice.clear();
                 self.state.open_screen = Some(Screen::Uploads);
                 self.apply_open_screen();
             }
@@ -309,23 +309,22 @@ impl PhotosApp {
                     Some(_) => "asteria-photos-drop-starting",
                 };
                 let text = tr!(self.state.ctx, key);
-                self.state.notice = Some((text, Instant::now()));
+                self.state.notice.set(text);
                 self.state.ctx.request_repaint();
             }
         }
     }
 
-    /// What the status bar says about a refused drop, while it does.
+    /// What the status bar says about a refused drop or rating, while it does.
     pub fn notice(&self) -> Option<&str> {
-        let (text, since) = self.state.notice.as_ref()?;
-        (since.elapsed() < NOTICE_FOR).then_some(text.as_str())
+        self.state.notice.text()
     }
 
     /// When the notice the status bar shows was set (a new one, even with the same text, sets
     /// it again). For tests.
     #[doc(hidden)]
     pub fn notice_since(&self) -> Option<Instant> {
-        self.state.notice.as_ref().map(|(_, since)| *since)
+        self.state.notice.since()
     }
 
     /// The display settings as they stand.
@@ -405,15 +404,7 @@ impl State {
         }
         if let Some(c) = &mut self.connection {
             c.poll(&self.ctx);
-            let notices: Vec<String> = c
-                .session
-                .take_notices()
-                .iter()
-                .map(|n| rating_notice(&self.ctx, n))
-                .collect();
-            if !notices.is_empty() {
-                self.notice = Some((notices.join(" "), Instant::now()));
-            }
+            self.notice.take_ratings(&self.ctx, &mut c.session);
         }
         // The server now serves another library: start again with it, at the root.
         if self
@@ -636,7 +627,7 @@ impl State {
 
     /// The uploads' count (while any group is unfinished) and a refused drop, on the status bar.
     fn uploads_status_ui(&mut self, ui: &mut egui::Ui) {
-        self.notice_ui(ui);
+        self.notice.ui(ui);
         let Some(uploads) = self.connection.as_ref().and_then(|c| c.session.uploads()) else {
             return;
         };
@@ -671,18 +662,6 @@ impl State {
         }
     }
 
-    /// A refused drop's notice, until it expires.
-    fn notice_ui(&mut self, ui: &mut egui::Ui) {
-        if let Some((text, since)) = &self.notice {
-            if let Some(left) = NOTICE_FOR.checked_sub(since.elapsed()) {
-                ui.colored_label(ui.visuals().warn_fg_color, text.as_str());
-                ui.ctx().request_repaint_after(left);
-            } else {
-                self.notice = None;
-            }
-        }
-    }
-
     /// The server in use and its state, with a menu of the servers to switch to. `compact`
     /// shows only the state's icon (the bottom bar has little room).
     fn switcher_ui(&mut self, ui: &mut egui::Ui, compact: bool) {
@@ -704,25 +683,6 @@ impl State {
         }
     }
 }
-
-/// The status-bar text for what the rating queue has to tell.
-fn rating_notice(ctx: &egui::Context, notice: &Notice) -> String {
-    match notice {
-        Notice::RatingRejected { reason, .. } => {
-            let key = match reason {
-                RejectReason::NotFound => "asteria-photos-rating-reason-not-found",
-                RejectReason::ReadOnly => "asteria-photos-rating-reason-read-only",
-                RejectReason::Invalid => "asteria-photos-rating-reason-invalid",
-            };
-            let reason = tr!(ctx, key);
-            tr!(ctx, "asteria-photos-rating-rejected", reason = reason)
-        }
-        Notice::RatingNotSaved { .. } => tr!(ctx, "asteria-photos-rating-not-saved"),
-    }
-}
-
-/// How long the status bar keeps a notice.
-const NOTICE_FOR: Duration = Duration::from_secs(8);
 
 /// A saver that writes `servers.toml` on the thread `photos-servers-save`.
 fn spawn_saver(path: PathBuf, ctx: egui::Context) -> std::io::Result<Saver<Profiles>> {
@@ -769,9 +729,9 @@ fn is_compact(ui: &egui::Ui) -> bool {
 
 impl ShellApp<Screen> for State {
     fn screen_ui(&mut self, ui: &mut egui::Ui, screen: Screen, side: &mut Side) {
-        // Narrow, there is no status bar to carry a refused drop's notice.
+        // Narrow, there is no status bar to carry a notice: it sits at the foot of the screen.
         if self.compact {
-            self.notice_ui(ui);
+            self.notice.foot_ui(ui, "photos-notice");
         }
         match screen {
             Screen::Library => self.library_ui(ui, side),

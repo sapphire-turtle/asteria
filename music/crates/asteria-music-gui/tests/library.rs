@@ -427,3 +427,40 @@ fn a_rating_with_nowhere_to_keep_it_is_told() {
     assert_eq!(app.notice(), Some("Could not save a rating"));
     assert!(rated(&seen).is_empty());
 }
+
+#[test]
+fn a_click_between_two_stars_neither_rates_nor_plays() {
+    let (_fx, ctx, mut app, _, seen) = open_album_at(WIDE);
+    let stars = star_centres(&ctx, &mut app, WIDE);
+    // Halfway between the first two stars of row 0: the gap, not a star.
+    let gap = egui::pos2((stars[0].x + stars[1].x) / 2.0, stars[0].y);
+    click_at(&ctx, &mut app, WIDE, gap, egui::PointerButton::Primary);
+    for _ in 0..10 {
+        frame_sized(&ctx, &mut app, WIDE);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(app.player().state().queue.is_empty());
+    assert!(rated(&seen).is_empty());
+}
+
+#[test]
+fn narrow_a_notice_is_told_at_the_foot() {
+    let (_fx, ctx, mut app, _, _) = open_album_with(NARROW, |p| p.data = None);
+    let row = widget_centre(&ctx, &mut app, NARROW, "al1-t0");
+    click_at(&ctx, &mut app, NARROW, row, egui::PointerButton::Secondary);
+    frame_sized(&ctx, &mut app, NARROW);
+    let menu = widget_centre(&ctx, &mut app, NARROW, "Rating");
+    click_at(&ctx, &mut app, NARROW, menu, egui::PointerButton::Primary);
+    frame_sized(&ctx, &mut app, NARROW);
+    let one = widget_centre(&ctx, &mut app, NARROW, "★");
+    click_at(&ctx, &mut app, NARROW, one, egui::PointerButton::Primary);
+    frame_sized(&ctx, &mut app, NARROW);
+    assert_eq!(app.notice(), Some("Could not save a rating"));
+    let at: Vec<egui::Pos2> = widgets(&ctx, &mut app, NARROW, |l| l == "Could not save a rating")
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    assert!(!at.is_empty(), "the notice is drawn");
+    // Narrow there is no status bar: the notice sits at the foot of the screen.
+    assert!(at.iter().all(|p| p.y > 350.0), "{at:?}");
+}
