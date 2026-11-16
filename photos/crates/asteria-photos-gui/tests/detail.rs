@@ -537,3 +537,56 @@ fn a_refused_rating_reverts_and_notices_once() {
         "a refused rating is not sent again"
     );
 }
+
+/// What the grid's star badge on `x` says: its hover text, once the pointer has rested on it.
+fn grid_badge(ctx: &egui::Context, app: &mut PhotosApp) -> Option<String> {
+    ctx.enable_accesskit();
+    let nodes = |out: egui::FullOutput| {
+        out.platform_output
+            .accesskit_update
+            .expect("the tree comes with every frame once accessibility is on")
+            .nodes
+    };
+    let cell = nodes(frame_with(ctx, app, Vec::new()))
+        .into_iter()
+        .find(|(_, n)| n.label() == Some("x.jpg"))
+        .and_then(|(_, n)| n.bounds())
+        .expect("the grid shows x");
+    // Inside the badge's first star, at the cell's lower left, whatever the cell's size.
+    let at = egui::pos2(cell.x0 as f32 + 9.0, cell.y1 as f32 - 10.0);
+    // Moved once, then still: a tooltip waits for the pointer to rest.
+    for i in 0..120 {
+        let events = if i == 0 {
+            vec![egui::Event::PointerMoved(at)]
+        } else {
+            Vec::new()
+        };
+        let said = nodes(frame_with(ctx, app, events))
+            .into_iter()
+            .find_map(|(_, n)| {
+                n.label()
+                    .or(n.value())
+                    .filter(|l| l.starts_with("Rated "))
+                    .map(str::to_owned)
+            });
+        if said.is_some() {
+            return said;
+        }
+    }
+    None
+}
+
+#[test]
+fn the_grid_badge_shows_a_rating_at_once() {
+    let stub = rating_stub(true, None);
+    let (_fx, ctx, mut app, stars) = open_rating(&stub);
+    assert_eq!(grid_badge(&ctx, &mut app).as_deref(), Some("Rated 2 of 5"));
+
+    click_at(&ctx, &mut app, stars[3]);
+    frame(&ctx, &mut app);
+    // The server has not answered: its `ops.apply` is held.
+    assert_eq!(pending(&app), 1);
+    assert_eq!(grid_badge(&ctx, &mut app).as_deref(), Some("Rated 4 of 5"));
+    assert_eq!(pending(&app), 1);
+    stub.release.store(true, Ordering::SeqCst);
+}

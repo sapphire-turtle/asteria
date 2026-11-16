@@ -156,6 +156,20 @@ pub struct SessionDirs {
     pub data: Option<PathBuf>,
 }
 
+/// What [`Session::rating_of`] reads; from [`Session::ratings`].
+#[derive(Clone)]
+pub struct Ratings(Arc<OnceLock<OpQueue>>);
+
+impl Ratings {
+    /// [`Session::rating_of`].
+    pub fn of(&self, item: &MediaItem) -> Option<i8> {
+        self.0
+            .get()
+            .and_then(|ops| ops.rating(&item.id))
+            .or(item.rating)
+    }
+}
+
 /// The `{}` sent as the params of methods that take none.
 #[derive(Serialize)]
 struct NoParams {}
@@ -403,10 +417,14 @@ impl Session {
 
     /// The rating to draw: the queue's unconfirmed value, else `item.rating`.
     pub fn rating_of(&self, item: &MediaItem) -> Option<i8> {
-        self.ops
-            .get()
-            .and_then(|ops| ops.rating(&item.id))
-            .or(item.rating)
+        self.ratings().of(item)
+    }
+
+    /// [`rating_of`](Self::rating_of) apart from the session, to ask while the session is
+    /// borrowed for something else (a grid drawn with its [`images`](Self::images)). Meant
+    /// for one frame: it keeps the session's queue alive.
+    pub fn ratings(&self) -> Ratings {
+        Ratings(self.ops.clone())
     }
 
     /// Ratings not settled by the server yet, one per item; 0 without a queue.

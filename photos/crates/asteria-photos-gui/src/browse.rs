@@ -427,10 +427,13 @@ impl BrowseState {
             );
             let can = Openable::of(session);
             let dimmed = |item: &MediaItem| !can.open(item);
+            let ratings = session.ratings();
+            let rating = |item: &MediaItem| ratings.of(item);
             let r = ThumbGrid::new(&self.items)
                 .selected(self.selected.clone())
                 .id_salt(salt)
                 .dimmed(&dimmed)
+                .rating(&rating)
                 .show(ui, session.images());
             if let Some(id) = r.selected {
                 self.selected = Some(id);
