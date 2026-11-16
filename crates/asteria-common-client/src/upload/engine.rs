@@ -45,7 +45,7 @@ use super::queue::{
 };
 use crate::claim::{Claim, claim};
 use crate::profiles::Token;
-use crate::rpc::{ClientError, RpcClient, UPLOAD_TIMEOUT};
+use crate::rpc::{ClientError, RpcClient, UPLOAD_TIMEOUT, ends_session};
 use crate::session::{Gate, Health, lock_gate, note_health};
 
 /// The first wait after the server could not be reached or asked to wait, in milliseconds;
@@ -479,10 +479,7 @@ fn transient(e: &ClientError) -> bool {
 
 /// Whether the engine must stop talking to the server altogether.
 fn halting(e: &ClientError) -> bool {
-    matches!(
-        e,
-        ClientError::Unauthorized | ClientError::LibraryChanged | ClientError::Handshake(_)
-    ) || lacks_uploads(e)
+    ends_session(e) || lacks_uploads(e)
 }
 
 /// Whether `e` says the server has no upload methods (a server older than API 2.2).
