@@ -525,7 +525,7 @@ fn editors_ui(ui: &mut egui::Ui, item: &MediaItem, edits: &mut Edits, session: &
         edits.inputs = Some(Inputs::new(item));
     }
     let mut edit: Option<Edit> = None;
-    let metadata_enabled = !session.is_offline();
+    let metadata_enabled = DetailView::new(item, edits, session).metadata_editors_enabled();
     let [
         label_busy,
         subjects_busy,

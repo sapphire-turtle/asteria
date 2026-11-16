@@ -15,11 +15,12 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use asteria_common_api::ItemId;
+use asteria_common_api::{ItemId, RejectReason};
 use asteria_common_client::errors::{error_detail, error_text};
 use asteria_common_client::offline::OfflinePage;
 use asteria_common_client::profiles::{ProfileId, Profiles};
 use asteria_common_client::profiles::{ServerProfile, Token};
+use asteria_common_client::queue::Notice;
 use asteria_common_client::saver::Saver;
 use asteria_common_client::session::{SessionDirs, SessionState};
 use asteria_common_client::settings::ExtraSettingsPage;
@@ -34,8 +35,6 @@ pub use crate::connection::Connection;
 use crate::detail::{DetailView, Edit};
 use crate::display::{DisplayPage, DisplaySettings};
 use crate::viewer;
-use asteria_common_api::RejectReason;
-use asteria_common_client::queue::Notice;
 
 /// The screens: the library on the rail, Settings at its foot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,7 +322,8 @@ impl PhotosApp {
     }
 
     /// When the notice the status bar shows was set (a new one, even with the same text, sets
-    /// it again).
+    /// it again). For tests.
+    #[doc(hidden)]
     pub fn notice_since(&self) -> Option<Instant> {
         self.state.notice.as_ref().map(|(_, since)| *since)
     }
