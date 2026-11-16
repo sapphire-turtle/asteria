@@ -203,3 +203,45 @@ pub fn key(key: egui::Key) -> egui::Event {
         modifiers: egui::Modifiers::NONE,
     }
 }
+
+/// The centres of the detail pane's five stars, left to right. Turns accessibility on, which
+/// makes the next frame report the whole widget tree, so call it once per context, with the
+/// pane showing an editable item and its layout settled. A star's button is named by its
+/// hover text (English here).
+pub fn star_centres(ctx: &egui::Context, app: &mut PhotosApp) -> Vec<egui::Pos2> {
+    ctx.enable_accesskit();
+    let out = frame_with(ctx, app, Vec::new());
+    let update = out
+        .platform_output
+        .accesskit_update
+        .expect("the tree comes with the frame after accessibility is turned on");
+    let mut centres = Vec::new();
+    for (_, node) in update.nodes {
+        let is_star = node
+            .label()
+            .is_some_and(|l| l.starts_with("Rate ") || l == "Clear the rating");
+        if let (true, Some(b)) = (is_star, node.bounds()) {
+            centres.push(egui::pos2(
+                ((b.x0 + b.x1) / 2.0) as f32,
+                ((b.y0 + b.y1) / 2.0) as f32,
+            ));
+        }
+    }
+    centres.sort_by(|a, b| a.x.total_cmp(&b.x));
+    assert_eq!(centres.len(), 5, "the stars: {centres:?}");
+    centres
+}
+
+/// A click of the primary button at `at`: the pointer moves there, presses, and lets go, in
+/// three frames.
+pub fn click_at(ctx: &egui::Context, app: &mut PhotosApp, at: egui::Pos2) {
+    let press = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    frame_with(ctx, app, vec![egui::Event::PointerMoved(at)]);
+    frame_with(ctx, app, vec![press(true)]);
+    frame_with(ctx, app, vec![press(false)]);
+}

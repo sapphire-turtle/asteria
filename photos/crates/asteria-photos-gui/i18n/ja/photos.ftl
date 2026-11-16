@@ -98,6 +98,11 @@ asteria-photos-uploads-state-failed = 失敗：{ $reason }
 # ウィンドウへのドロップと、ステータスバーの件数
 asteria-photos-drop-overlay = Inbox に送る
 asteria-photos-drop-refused = サーバーにつながっていないので送れません
+asteria-photos-rating-rejected = 評価を反映できませんでした（{ $reason }）
+asteria-photos-rating-reason-not-found = 見つかりません
+asteria-photos-rating-reason-read-only = 読み取り専用です
+asteria-photos-rating-reason-invalid = 不正な値です
+asteria-photos-rating-not-saved = 評価を保存できませんでした
 asteria-photos-status-uploads = ↑ { $done } / { $total }
 asteria-photos-status-uploads-awaiting = ↑ { $done } / { $total }・判断待ち { $count }
 asteria-photos-status-uploads-hover = アップロードを開く

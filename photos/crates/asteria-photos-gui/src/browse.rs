@@ -138,8 +138,8 @@ impl BrowseState {
     }
 
     /// What the detail pane shows for the selected item.
-    pub fn detail(&self) -> Option<DetailView<'_>> {
-        Some(DetailView::new(self.selected_item()?, &self.edits))
+    pub fn detail(&self, session: &Session) -> Option<DetailView<'_>> {
+        Some(DetailView::new(self.selected_item()?, &self.edits, session))
     }
 
     /// Send `edit` of the selected item. Returns whether it was sent: not when nothing is

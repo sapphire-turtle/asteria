@@ -34,6 +34,8 @@ pub use crate::connection::Connection;
 use crate::detail::{DetailView, Edit};
 use crate::display::{DisplayPage, DisplaySettings};
 use crate::viewer;
+use asteria_common_api::RejectReason;
+use asteria_common_client::queue::Notice;
 
 /// The screens: the library on the rail, Settings at its foot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -281,7 +283,8 @@ impl PhotosApp {
 
     /// What the detail pane shows for the selected item.
     pub fn detail(&self) -> Option<DetailView<'_>> {
-        self.state.connection.as_ref()?.browse.detail()
+        let c = self.state.connection.as_ref()?;
+        c.browse.detail(&c.session)
     }
 
     /// Queue `paths` (files and folders) for upload to the server's Inbox and open the Uploads
@@ -317,6 +320,12 @@ impl PhotosApp {
     pub fn notice(&self) -> Option<&str> {
         let (text, since) = self.state.notice.as_ref()?;
         (since.elapsed() < NOTICE_FOR).then_some(text.as_str())
+    }
+
+    /// When the notice the status bar shows was set (a new one, even with the same text, sets
+    /// it again).
+    pub fn notice_since(&self) -> Option<Instant> {
+        self.state.notice.as_ref().map(|(_, since)| *since)
     }
 
     /// The display settings as they stand.
@@ -396,6 +405,15 @@ impl State {
         }
         if let Some(c) = &mut self.connection {
             c.poll(&self.ctx);
+            let notices: Vec<String> = c
+                .session
+                .take_notices()
+                .iter()
+                .map(|n| rating_notice(&self.ctx, n))
+                .collect();
+            if !notices.is_empty() {
+                self.notice = Some((notices.join(" "), Instant::now()));
+            }
         }
         // The server now serves another library: start again with it, at the root.
         if self
@@ -684,6 +702,22 @@ impl State {
             }
             None => {}
         }
+    }
+}
+
+/// The status-bar text for what the rating queue has to tell.
+fn rating_notice(ctx: &egui::Context, notice: &Notice) -> String {
+    match notice {
+        Notice::RatingRejected { reason, .. } => {
+            let key = match reason {
+                RejectReason::NotFound => "asteria-photos-rating-reason-not-found",
+                RejectReason::ReadOnly => "asteria-photos-rating-reason-read-only",
+                RejectReason::Invalid => "asteria-photos-rating-reason-invalid",
+            };
+            let reason = tr!(ctx, key);
+            tr!(ctx, "asteria-photos-rating-rejected", reason = reason)
+        }
+        Notice::RatingNotSaved { .. } => tr!(ctx, "asteria-photos-rating-not-saved"),
     }
 }
 
