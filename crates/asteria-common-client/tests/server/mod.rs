@@ -1,6 +1,9 @@
-//! A real photos server on a temporary library, run in-process (as `tests/session.rs` does), that
-//! can also listen on an address chosen before it started. Not in `common`: the GUI crates
-//! include that through `#[path]`, without the server.
+//! A real photos server on a temporary library, run in-process, for `tests/session.rs` and
+//! `tests/session_queue.rs`; it can also listen on an address chosen before it started. Not in
+//! `common`: the GUI crates include that through `#[path]`, without the server.
+
+// Each test binary uses its own subset of these helpers.
+#![allow(dead_code)]
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -131,9 +134,9 @@ impl TestServer {
         });
     }
 
-    /// A profile for this server, with its owner's token.
-    pub fn profile(&self) -> ServerProfile {
-        profile(self.addr, &self.token)
+    /// A profile for this server, with `token` (such as [`token`](Self::token), the owner's).
+    pub fn profile(&self, token: &str) -> ServerProfile {
+        profile(self.addr, token)
     }
 
     /// The id of the item at `path` (library-relative).

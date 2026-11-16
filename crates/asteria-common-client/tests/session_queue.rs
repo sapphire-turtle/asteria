@@ -226,7 +226,7 @@ fn a_rating_reaches_the_server() {
     let server = TestServer::start();
     let data = tempfile::tempdir().unwrap();
     let mut session = Session::open_with_dirs(
-        &server.profile(),
+        &server.profile(&server.token),
         photos_client(),
         egui::Context::default(),
         dirs(data.path()),
@@ -397,7 +397,11 @@ fn library_changed_stops_sending_and_keeps_the_file() {
 #[test]
 fn rate_without_a_data_root_is_offline_error() {
     let server = TestServer::start();
-    let mut session = Session::open(&server.profile(), photos_client(), egui::Context::default());
+    let mut session = Session::open(
+        &server.profile(&server.token),
+        photos_client(),
+        egui::Context::default(),
+    );
     wait_ready(&mut session);
     assert!(session.ops().is_none());
     assert_eq!(
@@ -415,7 +419,7 @@ fn refused_rating_becomes_a_notice() {
     });
     let data = tempfile::tempdir().unwrap();
     let mut session = Session::open_with_dirs(
-        &server.profile(),
+        &server.profile(&server.token),
         photos_client(),
         egui::Context::default(),
         dirs(data.path()),

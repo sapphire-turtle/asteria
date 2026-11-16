@@ -182,8 +182,9 @@ pub struct Session {
     events: mpsc::Receiver<Stamped>,
     /// Filled by the handshake job once the library id is known (online or offline), if a data
     /// root was given. Declared before `worker` so that it is dropped first, and [`Drop`] stops
-    /// it before either: a queue that outlived the worker could take a rating its stopping
-    /// thread no longer saves.
+    /// it before either. The worker's drop sets `cancelled` right after, which ends the queue's
+    /// thread too; the explicit stop only wakes it at once, even while a job on the worker
+    /// still holds the queue.
     ops: Arc<OnceLock<OpQueue>>,
     /// `None` if the worker could not be started; the session is then `Failed`.
     worker: Option<Worker>,
