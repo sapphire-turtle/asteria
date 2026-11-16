@@ -80,4 +80,3 @@ asteria-music-side-nothing = 再生中の曲はありません。
 asteria-music-offline-save = オフライン用に保存
 asteria-music-offline-remove = オフラインから削除
 asteria-music-offline-not-saved = オフライン用に保存されていないため、サーバーなしでは再生できません。
-

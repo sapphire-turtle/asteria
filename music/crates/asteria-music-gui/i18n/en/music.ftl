@@ -86,4 +86,3 @@ asteria-music-side-nothing = Nothing is playing.
 asteria-music-offline-save = Save for offline
 asteria-music-offline-remove = Remove from offline
 asteria-music-offline-not-saved = Not saved for offline, so it cannot play without the server.
-
