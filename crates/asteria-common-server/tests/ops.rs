@@ -155,3 +155,57 @@ async fn more_than_max_ops_is_invalid_params() {
     let v = apply(&e, ops).await;
     assert_eq!(v["result"]["results"].as_array().unwrap().len(), 200);
 }
+
+#[tokio::test]
+async fn a_sidecar_that_cannot_be_written_rejects_only_its_op() {
+    let e = env();
+    let a = item_id(&e, "a.jpg");
+    let b = item_id(&e, "sub/b.jpg");
+    let t = "2026-11-01T10:00:00Z";
+    // Broken after the scan: the cache still thinks the item is writable.
+    fs::write(e.root.join("a.jpg.xmp"), "<not xml").unwrap();
+    let v = apply(&e, vec![op("broken", &a, 4, t), op("good", &b, 3, t)]).await;
+    let rs = v["result"]["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{v}"));
+    let got: Vec<_> = rs
+        .iter()
+        .map(|r| (r["id"].as_str(), r["status"].as_str(), r["reason"].as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (Some("broken"), Some("rejected"), Some("read_only")),
+            (Some("good"), Some("applied"), None),
+        ]
+    );
+    assert_eq!(rating(&e, &b).await, 3);
+
+    // An I/O error writing it (the sidecar's place is taken by a directory) does the same.
+    fs::remove_file(e.root.join("a.jpg.xmp")).unwrap();
+    scan(&e.lib, &e.cache, &Photos).unwrap();
+    fs::create_dir(e.root.join("a.jpg.xmp")).unwrap();
+    let v = apply(
+        &e,
+        vec![
+            op("io", &a, 2, "2026-11-02T00:00:00Z"),
+            op("good2", &b, 5, "2026-11-02T00:00:00Z"),
+        ],
+    )
+    .await;
+    let rs = v["result"]["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{v}"));
+    let got: Vec<_> = rs
+        .iter()
+        .map(|r| (r["id"].as_str(), r["status"].as_str(), r["reason"].as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (Some("io"), Some("rejected"), Some("read_only")),
+            (Some("good2"), Some("applied"), None),
+        ]
+    );
+    assert_eq!(rating(&e, &b).await, 5);
+}

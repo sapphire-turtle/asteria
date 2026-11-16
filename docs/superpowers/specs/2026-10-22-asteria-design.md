@@ -579,11 +579,11 @@ music-server は photos-server と同じ形（Plan 8b からはライブラリ�
 - 結果：操作ごとに `{ "id", "status", "item"?, "reason"? }`。
   - `applied`：適用した。`item` はその後の `MediaItem`。
   - `superseded`：より新しい（または同じ時刻で値の大きい）評価がすでにあった。`item` はいまの `MediaItem`。
-  - `rejected`：受け付けられない。`reason` は `not_found`（アイテムが無い）、`read_only`（サイドカーが壊れている）、`invalid`（値が範囲外、時刻が不正）。
+  - `rejected`：受け付けられない。`reason` は `not_found`（アイテムが無い）、`read_only`（サイドカーが壊れている、または書けない）、`invalid`（値が範囲外、時刻が不正）。1 件のサイドカーが書けなくても、その操作を `rejected` にして残りを続ける。呼び出し全体のエラーは、キャッシュの失敗など全体に関わるときだけ。
 - 後勝ちの比べ方はサイドカーの `apply_rating(…, at)`（§3.3 の `RatingModified`、`UserRatings` の `Modified`）。`at` がサーバーの今より未来なら、今に切り詰める（時計の進んだ端末の評価が、以後の変更に勝ち続けないため）。
 - 書き込みは `media.update` と同じく writer のジョブで行い、ジャーナルに実行者を残す。1 件ずつサイドカーを書く（まとめて1つのファイル操作にはしない）。
 - 評価は「値と時刻」の後勝ちなので、同じ操作を何度適用しても結果は変わらない。そのためサーバーは評価の操作 ID を記録しない。ID で重複を除く記録は、冪等でない操作（プレイリストの追加、移動）を入れる Plan 9c で足す。
-- `ops.apply` を知らない古いサーバー（METHOD_NOT_FOUND）には、そのセッションの間は 1 件ずつ `media.update` で送る。時刻はサーバーが受け取った時刻になる（1人で使う限り、ほぼ差は出ない）。
+- `ops.apply` を知らない古いサーバー（METHOD_NOT_FOUND）には、そのセッションの間は 1 件ずつ `media.update` で送る。時刻はサーバーが受け取った時刻になる（1人で使う限り、ほぼ差は出ない）。1 件がエラーで答えられたら、その操作だけを `rejected` にする（NOT_FOUND は `not_found`、READ_ONLY は `read_only`、INVALID_PARAMS は `invalid`、ほかのコードは `read_only`）。通信の失敗とセッションのエラー（認証など）は、まとめて後で送り直す。
 
 **クライアント**（`asteria-common-client::queue`）
 

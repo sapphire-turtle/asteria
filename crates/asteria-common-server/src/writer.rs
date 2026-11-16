@@ -236,8 +236,9 @@ impl Writer {
 
     /// Applies rating operations in order, each as the rating `media.update` would set but
     /// at the operation's own time (never later than now), so the newest one wins. A
-    /// refused operation does not stop the others; any other failure fails the call, and
-    /// the client sends the whole batch again (a rating applied twice changes nothing).
+    /// refused operation (including one whose sidecar cannot be written) does not stop the
+    /// others; only a failure of the whole call (the cache) fails it, and the client sends
+    /// the whole batch again (a rating applied twice changes nothing).
     pub async fn apply_ops(
         &self,
         actor: Actor,
@@ -798,8 +799,8 @@ fn parse_rating_op(op: &RatingOp, now: DateTime<Utc>) -> Result<DateTime<Utc>, R
 }
 
 /// One rating, written like [`do_update`] writes one: a single sidecar write, hash fields
-/// set the same way. The outer error fails the whole call; the inner one refuses this
-/// operation.
+/// set the same way. The outer error (the cache failed) fails the whole call; the inner one
+/// refuses this operation, as does a sidecar that cannot be written.
 #[allow(clippy::too_many_arguments)]
 fn do_rating(
     library: &Library,
@@ -830,15 +831,23 @@ fn do_rating(
         // The value's range was checked before.
         changed = sc.apply_rating(owner, user, value, at).unwrap_or(false);
     });
-    let written = match written {
-        Err(FwError::MediaNotFound(_)) => return Ok(Err(RejectReason::NotFound)),
-        Err(e @ FwError::InvalidPath(_)) => return Err(map_fw(e)),
-        other => other,
-    };
+    if let Err(FwError::MediaNotFound(_)) = written {
+        return Ok(Err(RejectReason::NotFound));
+    }
     if let Err(e) = refresh_cache(library, cache, &rec) {
         tracing::warn!(error = %e, path = %rec.path, "cache refresh after write failed");
     }
-    written.map_err(map_fw)?;
+    if let Err(e) = written {
+        // This item's sidecar cannot be written (broken since the scan, or an I/O error):
+        // the operation is refused, and the others still go.
+        match e {
+            FwError::UnsafeSidecarWrite(_) => {
+                tracing::error!(error = %e, path = %rec.path, "unsafe sidecar write refused");
+            }
+            _ => tracing::warn!(error = %e, path = %rec.path, "cannot write a rating"),
+        }
+        return Ok(Err(RejectReason::ReadOnly));
+    }
     match cache.get_by_id(id).map_err(internal)? {
         Some(rec) => Ok(Ok((changed, rec))),
         None => Ok(Err(RejectReason::NotFound)),

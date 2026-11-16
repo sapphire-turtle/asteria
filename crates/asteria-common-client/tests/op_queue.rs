@@ -357,3 +357,44 @@ fn a_new_rating_ends_a_running_backoff() {
     assert_eq!(batches.len(), 2);
     assert_eq!(batches[1].len(), 2);
 }
+
+#[test]
+fn an_old_server_refusing_one_item_still_rates_the_next() {
+    // `media.update` fails for A with an error of its own; that refuses A alone.
+    let dir = tempfile::tempdir().unwrap();
+    let path = queue_file(&dir);
+    let calls = Calls::default();
+    let seen = calls.clone();
+    let addr = serve(move |req| {
+        let (id, method, params) = seen.record(req);
+        match method.as_str() {
+            "library.info" => StubResponse::rpc_result(id, common::library_info("test")),
+            "media.update" if params["id"] == "A" => {
+                StubResponse::rpc_error(id, codes::INTERNAL_ERROR, "cannot write the sidecar")
+            }
+            "media.update" => StubResponse::rpc_result(
+                id,
+                media_item(
+                    params["id"].as_str().unwrap(),
+                    params["rating"].as_i64().unwrap(),
+                ),
+            ),
+            _ => StubResponse::rpc_error(id, codes::METHOD_NOT_FOUND, "method not found"),
+        }
+    });
+    let (queue, _gate) = start(addr, &path, true);
+    queue.rate(item("A"), 4);
+    queue.rate(item("B"), 1);
+    wait_for("both ratings to be settled", || queue.pending() == 0);
+    assert_eq!(
+        queue.take_notices(),
+        [Notice::RatingRejected {
+            item: item("A"),
+            reason: RejectReason::ReadOnly,
+        }]
+    );
+    assert_eq!(queue.rating(&item("A")), None);
+    assert_eq!(queue.rating(&item("B")), Some(1));
+    assert_eq!(calls.count("media.update"), 2);
+    assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+}

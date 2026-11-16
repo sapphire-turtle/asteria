@@ -700,7 +700,9 @@ impl Sender {
         Ok(())
     }
 
-    /// One rating with `media.update`, for a server without `ops.apply`.
+    /// One rating with `media.update`, for a server without `ops.apply`. An error answer
+    /// refuses this rating (`NOT_FOUND`, `READ_ONLY` and `INVALID_PARAMS` as themselves, any
+    /// other as read-only); only a failed exchange is an `Err`.
     fn update(&mut self, op: &QueuedRating) -> Result<(), ClientError> {
         let params = MediaUpdateParams {
             id: op.item.clone(),
@@ -718,6 +720,12 @@ impl Sender {
             Err(ClientError::Rpc { code, .. }) if code == codes::INVALID_PARAMS => {
                 Outcome::Rejected(RejectReason::Invalid)
             }
+            // The server answered for this item alone: refused, so the others still go.
+            Err(ClientError::Rpc { code, message }) => {
+                tracing::warn!(code, %message, "the server refused a rating");
+                Outcome::Rejected(RejectReason::ReadOnly)
+            }
+            // The server could not be reached or refused the session: the batch waits.
             Err(e) => return Err(e),
         };
         self.settle(vec![(op.clone(), outcome)])
