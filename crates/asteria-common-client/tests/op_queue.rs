@@ -18,13 +18,26 @@ use url::Url;
 
 use common::offline::wait_for;
 use common::ops::{Calls, all_applied, media_item};
-use common::{StubResponse, serve};
+use common::{StubRequest, StubResponse, library_info, serve};
+
+/// A stub answering with `handler`, except `library.info`: the queues' library, `test`, which
+/// the sender checks before it sends. Only what reaches `handler` is for it to record.
+fn serve_queue(
+    handler: impl Fn(&StubRequest) -> StubResponse + Send + Sync + 'static,
+) -> SocketAddr {
+    serve(move |req| match req.rpc() {
+        Some((id, method)) if method == "library.info" => {
+            StubResponse::rpc_result(id, library_info("test"))
+        }
+        _ => handler(req),
+    })
+}
 
 /// A stub that applies every rating it gets.
 fn applying_server() -> (SocketAddr, Calls) {
     let calls = Calls::default();
     let seen = calls.clone();
-    let addr = serve(move |req| {
+    let addr = serve_queue(move |req| {
         let (id, _, params) = seen.record(req);
         StubResponse::rpc_result(id, all_applied(&params))
     });
@@ -109,7 +122,7 @@ fn an_unreachable_server_keeps_ops_and_retries() {
     let seen = calls.clone();
     let answer = Arc::new(AtomicBool::new(false));
     let answering = answer.clone();
-    let addr = serve(move |req| {
+    let addr = serve_queue(move |req| {
         let (id, _, params) = seen.record(req);
         if answering.load(Ordering::SeqCst) {
             StubResponse::rpc_result(id, all_applied(&params))
@@ -155,7 +168,7 @@ fn a_large_backlog_goes_in_batches() {
 fn rejected_ops_are_dropped_with_a_notice() {
     let dir = tempfile::tempdir().unwrap();
     let path = queue_file(&dir);
-    let addr = serve(move |req| {
+    let addr = serve_queue(move |req| {
         let body: Value = serde_json::from_slice(&req.body).unwrap();
         let (id, _) = req.rpc().unwrap();
         let op = &body["params"]["ops"][0];
@@ -183,7 +196,7 @@ fn rejected_ops_are_dropped_with_a_notice() {
 fn superseded_shows_the_servers_value() {
     let dir = tempfile::tempdir().unwrap();
     let path = queue_file(&dir);
-    let addr = serve(move |req| {
+    let addr = serve_queue(move |req| {
         let body: Value = serde_json::from_slice(&req.body).unwrap();
         let (id, _) = req.rpc().unwrap();
         let op = &body["params"]["ops"][0];
@@ -208,7 +221,7 @@ fn an_old_server_gets_media_update() {
     let path = queue_file(&dir);
     let calls = Calls::default();
     let seen = calls.clone();
-    let addr = serve(move |req| {
+    let addr = serve_queue(move |req| {
         let (id, method, params) = seen.record(req);
         match method.as_str() {
             "media.update" => StubResponse::rpc_result(
@@ -305,7 +318,7 @@ fn a_newer_click_during_a_send_keeps_showing() {
     let released = release.clone();
     let arrived = Arc::new(AtomicUsize::new(0));
     let arrivals = arrived.clone();
-    let addr = serve(move |req| {
+    let addr = serve_queue(move |req| {
         let (id, _, params) = seen.record(req);
         if arrivals.fetch_add(1, Ordering::SeqCst) == 0 {
             while !released.load(Ordering::SeqCst) {
@@ -333,7 +346,7 @@ fn a_new_rating_ends_a_running_backoff() {
     let path = queue_file(&dir);
     let calls = Calls::default();
     let seen = calls.clone();
-    let addr = serve(move |req| {
+    let addr = serve_queue(move |req| {
         let (id, _, params) = seen.record(req);
         if seen.count("ops.apply") == 1 {
             StubResponse::new(503, Vec::new()).header("retry-after", "30")
@@ -365,10 +378,9 @@ fn an_old_server_refusing_one_item_still_rates_the_next() {
     let path = queue_file(&dir);
     let calls = Calls::default();
     let seen = calls.clone();
-    let addr = serve(move |req| {
+    let addr = serve_queue(move |req| {
         let (id, method, params) = seen.record(req);
         match method.as_str() {
-            "library.info" => StubResponse::rpc_result(id, common::library_info("test")),
             "media.update" if params["id"] == "A" => {
                 StubResponse::rpc_error(id, codes::INTERNAL_ERROR, "cannot write the sidecar")
             }
@@ -397,4 +409,38 @@ fn an_old_server_refusing_one_item_still_rates_the_next() {
     assert_eq!(queue.rating(&item("B")), Some(1));
     assert_eq!(calls.count("media.update"), 2);
     assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+}
+
+#[test]
+fn a_rating_during_a_held_send_reaches_the_file_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = queue_file(&dir);
+    let calls = Calls::default();
+    let seen = calls.clone();
+    let release = Arc::new(AtomicBool::new(false));
+    let released = release.clone();
+    let addr = serve_queue(move |req| {
+        let (id, _, params) = seen.record(req);
+        while !released.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        StubResponse::rpc_result(id, all_applied(&params))
+    });
+    let (queue, _gate) = start(addr, &path, true);
+    queue.rate(item("A"), 2);
+    wait_for("the first send", || calls.count("ops.apply") == 1);
+    queue.rate(item("B"), 4);
+    // Saved while the send is still held, not once it returns.
+    let start = std::time::Instant::now();
+    while !file_lines(&path).iter().any(|l| l.contains("\"B\"")) {
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "B never reached the file: {:?}",
+            file_lines(&path)
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!release.load(Ordering::SeqCst));
+    release.store(true, Ordering::SeqCst);
+    wait_for("both ratings to be confirmed", || queue.pending() == 0);
 }

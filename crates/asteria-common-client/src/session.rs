@@ -565,6 +565,16 @@ impl Session {
                 }
             }
         }
+        // The rating queue found the server serving another library: the session fails as a
+        // `library.info` reply would make it.
+        if matches!(self.state, SessionState::Ready { .. })
+            && matches!(
+                &*lock_gate(&self.gate),
+                Gate::Closed(ClientError::LibraryChanged)
+            )
+        {
+            self.state = SessionState::Failed(ClientError::LibraryChanged);
+        }
         // Lets image requests through (or fails them) once the handshake has settled.
         self.images.poll();
         // Read after the replies: the worker records a request's outcome before sending it.
@@ -694,8 +704,8 @@ impl Session {
 impl Drop for Session {
     /// Stops the offline sync at once: it must not go on talking to a server the app left.
     /// Stops the rating queue too, before the worker goes: a job still holding the handshake
-    /// would otherwise keep the queue alive; its thread saves what was rated, then lets go of
-    /// the file.
+    /// would otherwise keep the queue alive. Returns once every rating made is in the queue
+    /// file (a send in flight is not waited for), so quitting the app loses none.
     fn drop(&mut self) {
         if let Some(handle) = self.offline.get() {
             handle.stop();

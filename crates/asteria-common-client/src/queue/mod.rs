@@ -1,27 +1,33 @@
 //! The rating queue kept on disk, so a rating made offline is sent once the server is back
-//! (spec §5.2). [`OpQueue`] is its side on the UI thread; one sender thread per queue appends
-//! to the file and sends with `ops.apply`.
+//! (spec §5.2). [`OpQueue`] is its side on the UI thread. Each queue has two threads: the
+//! appender writes each rating to the file as it comes, and the sender sends what the file
+//! holds with `ops.apply`.
 //!
 //! The UI side only touches memory: [`OpQueue::rate`] records the rating at once (so the star
-//! shows it) and hands it to the thread. The thread alone owns the file, and never holds the
-//! memory lock across I/O, so the UI never waits on the disk or the network.
+//! shows it) and hands it to the appender. The two threads share the file under a lock taken
+//! only for disk work, never across a request, so a rating reaches the file even while a send
+//! waits on the server; neither holds the memory lock across I/O, so the UI never waits on the
+//! disk or the network (except [`OpQueue::stop`], which waits for the appends, not the
+//! server).
 //!
-//! One queue file has one owner in the process ([`Ticket`]): a queue that opens on a file whose
-//! previous queue is still finishing waits for it to let go, and queues get the file in the
-//! order they were started, so the ratings of a dropped queue are saved before a newer queue
-//! reads the file.
+//! One queue file has one owner in the process ([`Ticket`], held by the appender): a queue that
+//! opens on a file whose previous queue is still finishing waits for it to let go, and queues
+//! get the file in the order they were started, so the ratings of a dropped queue are saved
+//! before a newer queue reads the file. A stopped queue lets go once its appends are done,
+//! without waiting for a send in flight: what that send settled goes again next time.
 
 mod file;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
 use asteria_common_api::{
-    ItemId, LibraryInfo, MAX_RATING_OPS, MEDIA_UPDATE, MediaItem, MediaUpdateParams, OPS_APPLY,
-    OpKind, OpsApplyParams, OpsApplyResult, RatingOp, RatingOpStatus, RejectReason, codes,
+    ItemId, LIBRARY_INFO, LibraryInfo, MAX_RATING_OPS, MEDIA_UPDATE, MediaItem, MediaUpdateParams,
+    OPS_APPLY, OpKind, OpsApplyParams, OpsApplyResult, RatingOp, RatingOpStatus, RejectReason,
+    codes,
 };
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use corundum_framework::egui;
@@ -64,6 +70,10 @@ pub fn set_retry_backoff(initial: Duration, max: Duration) {
 /// While the handshake has not finished, the sender looks at the gate again this often.
 const GATE_PENDING_POLL: Duration = Duration::from_millis(200);
 
+/// The longest [`OpQueue::stop`] waits for the appender: only a queue file another live queue
+/// keeps could take longer, and the app must still close.
+const FLUSH_LIMIT: Duration = Duration::from_secs(5);
+
 /// Something about a rating the user should hear of.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Notice {
@@ -103,15 +113,30 @@ struct State {
     notices: Vec<Notice>,
 }
 
+/// The ratings handed to the appender and not handled yet, for [`OpQueue::stop`] to wait on.
+#[derive(Default)]
+struct Handoff {
+    waiting: usize,
+    /// The appender has stopped: nothing more will be handled.
+    closed: bool,
+}
+
 struct Inner {
     state: Mutex<State>,
     ctx: egui::Context,
     dropped: AtomicBool,
+    handoff: Mutex<Handoff>,
+    handled: Condvar,
 }
 
 impl Inner {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn handoff(&self, f: impl FnOnce(&mut Handoff)) {
+        f(&mut self.handoff.lock().unwrap_or_else(|e| e.into_inner()));
+        self.handled.notify_all();
     }
 
     /// Applies `f` to the state and asks for a repaint.
@@ -141,28 +166,40 @@ fn not_saved(s: &mut State, op: &QueuedRating) {
     }
 }
 
+/// For the appender.
 enum Msg {
     Rate(QueuedRating),
     Wake,
 }
 
-/// The rating queue of one session, for the UI. Every method returns at once; the file and
-/// the server are handled on the queue's thread, which stops when this is dropped (with its
-/// [`Session`](crate::session::Session)).
+/// From the appender to the sender.
+enum Nudge {
+    /// A rating was appended, the file's `n`th: it goes at once, unless the sender has
+    /// seen it already.
+    Rated(u64),
+    /// The server answers again (or the queue stops).
+    Wake,
+}
+
+/// The rating queue of one session, for the UI. Every method but [`stop`](Self::stop) returns
+/// at once; the file and the server are handled on the queue's threads, which stop when this
+/// is dropped (with its [`Session`](crate::session::Session)).
 pub struct OpQueue {
     inner: Arc<Inner>,
     tx: mpsc::Sender<Msg>,
 }
 
 impl OpQueue {
-    /// Starts the sender thread for the queue at `cfg.path`. It claims the file (waiting for a
-    /// previous queue on it to let go), opens it, and sends whatever is pending whenever the
-    /// gate is open.
+    /// Starts the threads for the queue at `cfg.path`. The appender claims the file (waiting
+    /// for a previous queue on it to let go), opens it and starts the sender, which sends
+    /// whatever is pending whenever the gate is open.
     pub(crate) fn start(cfg: QueueConfig) -> OpQueue {
         let inner = Arc::new(Inner {
             state: Mutex::new(State::default()),
             ctx: cfg.ctx.clone(),
             dropped: AtomicBool::new(false),
+            handoff: Mutex::new(Handoff::default()),
+            handled: Condvar::new(),
         });
         let (tx, rx) = mpsc::channel();
         let thread_inner = inner.clone();
@@ -177,7 +214,8 @@ impl OpQueue {
         OpQueue { inner, tx }
     }
 
-    /// Records the rating in memory at once and hands it to the thread to append and send.
+    /// Records the rating in memory at once and hands it to the appender to save, then to the
+    /// sender.
     pub fn rate(&self, item: ItemId, value: i8) {
         let op = QueuedRating {
             id: GrainId::random().to_string(),
@@ -194,7 +232,9 @@ impl OpQueue {
                 },
             );
         });
+        self.inner.handoff(|h| h.waiting += 1);
         if let Err(mpsc::SendError(Msg::Rate(op))) = self.tx.send(Msg::Rate(op)) {
+            self.inner.handoff(|h| h.waiting -= 1);
             self.inner.change(|s| not_saved(s, &op));
         }
     }
@@ -224,17 +264,34 @@ impl OpQueue {
         let _ = self.tx.send(Msg::Wake);
     }
 
-    /// Stops the thread as dropping the queue does (see its [`Drop`]). For the session, whose
-    /// queue may be shared a little longer with a job on its worker.
+    /// Stops the threads as dropping the queue does (see its [`Drop`]), and waits until every
+    /// rating handed to [`rate`](Self::rate) is in the file (or noticed as not saved): the
+    /// disk, never the server. For the session, whose queue may be shared a little longer with
+    /// a job on its worker, and which must not lose a rating when the app quits.
     pub(crate) fn stop(&self) {
         self.inner.dropped.store(true, Ordering::Release);
         // Wakes the thread even while another sender (a test's gate) keeps the channel open.
         let _ = self.tx.send(Msg::Wake);
+        let deadline = Instant::now() + FLUSH_LIMIT;
+        let mut h = self.inner.handoff.lock().unwrap_or_else(|e| e.into_inner());
+        while h.waiting > 0 && !h.closed {
+            let now = Instant::now();
+            if now >= deadline {
+                tracing::warn!(waiting = h.waiting, "ratings not saved before closing");
+                return;
+            }
+            h = self
+                .inner
+                .handled
+                .wait_timeout(h, deadline - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
     }
 }
 
-/// The thread still appends what was rated before the drop and finishes a request in flight,
-/// then exits, releasing the file.
+/// The appender saves what was rated before the drop, then lets go of the file; a request in
+/// flight finishes on its own, and what it settled is sent again next time.
 impl Drop for OpQueue {
     fn drop(&mut self) {
         self.stop();
@@ -311,7 +368,8 @@ pub fn start_for_test(
     (queue, test_gate)
 }
 
-/// The thread: claims and opens the file, then appends and sends until the queue is dropped.
+/// The appender thread: claims and opens the file, starts the sender, then appends until the
+/// queue is dropped.
 fn run(inner: Arc<Inner>, rx: mpsc::Receiver<Msg>, ticket: Ticket, cfg: QueueConfig) {
     let cancelled = cfg.cancelled.clone();
     // Ratings already made are not given up: they wait for the file however long it takes.
@@ -322,6 +380,7 @@ fn run(inner: Arc<Inner>, rx: mpsc::Receiver<Msg>, ticket: Ticket, cfg: QueueCon
             && inner.lock().pending.is_empty()
     };
     let Some(_claim) = ticket.claim(give_up) else {
+        inner.handoff(|h| h.closed = true);
         return;
     };
     let file = match QueueFile::open(&cfg.path) {
@@ -331,8 +390,206 @@ fn run(inner: Arc<Inner>, rx: mpsc::Receiver<Msg>, ticket: Ticket, cfg: QueueCon
             None
         }
     };
-    Sender::new(inner, rx, file, cfg).run();
+    let disk = Arc::new(Mutex::new(Disk::new(file, &inner)));
+    let (nudge, nudges) = mpsc::channel();
+    let sender = Sender::new(inner.clone(), disk.clone(), nudges, cfg);
+    let spawned = std::thread::Builder::new()
+        .name("asteria-ratings-send".into())
+        .spawn(move || sender.run());
+    if let Err(e) = spawned {
+        // Ratings are still saved, for the next session to send.
+        tracing::warn!(error = %e, "cannot start the rating queue's sender");
+    }
+    Appender {
+        inner,
+        rx,
+        disk,
+        nudge,
+        cancelled,
+    }
+    .run();
 }
+
+/// The queue file and what goes with it, shared by the appender and the sender. Locked only
+/// for disk work, never across a request.
+struct Disk {
+    /// `None` if it could not be opened (every rating is then reported not saved), or once the
+    /// appender has let go of it.
+    file: Option<QueueFile>,
+    /// The time of the newest rating in the file, so each one appended is later.
+    last_at: Option<DateTime<Utc>>,
+    /// Ratings appended so far.
+    appended: u64,
+}
+
+impl Disk {
+    /// Shows what the file holds. A rating made while the file was being opened is newer than
+    /// any in it, so it keeps its place.
+    fn new(file: Option<QueueFile>, inner: &Inner) -> Disk {
+        let last_at = file
+            .as_ref()
+            .and_then(|f| f.pending().iter().map(|p| p.at).max());
+        let send = file.as_ref().map(|f| f.coalesced().0).unwrap_or_default();
+        if !send.is_empty() {
+            inner.change(|s| {
+                for op in send {
+                    s.pending.entry(op.item).or_insert(Unsettled {
+                        id: op.id,
+                        value: op.value,
+                    });
+                }
+            });
+        }
+        Disk {
+            file,
+            last_at,
+            appended: 0,
+        }
+    }
+}
+
+fn lock_disk(disk: &Mutex<Disk>) -> MutexGuard<'_, Disk> {
+    disk.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Saves each rating as it comes; owns the file's claim.
+struct Appender {
+    inner: Arc<Inner>,
+    rx: mpsc::Receiver<Msg>,
+    disk: Arc<Mutex<Disk>>,
+    nudge: mpsc::Sender<Nudge>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Appender {
+    fn stopped(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire) || self.inner.dropped.load(Ordering::Acquire)
+    }
+
+    fn run(self) {
+        loop {
+            // Appends what was rated before a drop, too.
+            let open = loop {
+                match self.rx.try_recv() {
+                    Ok(m) => self.handle(m),
+                    Err(mpsc::TryRecvError::Empty) => break true,
+                    Err(mpsc::TryRecvError::Disconnected) => break false,
+                }
+            };
+            if !open || self.stopped() {
+                break;
+            }
+            match self.rx.recv() {
+                Ok(m) => self.handle(m),
+                // The channel reports itself closed only once nothing is left in it.
+                Err(mpsc::RecvError) => break,
+            }
+        }
+        self.finish();
+    }
+
+    fn handle(&self, msg: Msg) {
+        match msg {
+            Msg::Rate(op) => {
+                let appended = self.append(op);
+                self.inner
+                    .handoff(|h| h.waiting = h.waiting.saturating_sub(1));
+                if let Some(n) = appended {
+                    let _ = self.nudge.send(Nudge::Rated(n));
+                }
+            }
+            Msg::Wake => {
+                let _ = self.nudge.send(Nudge::Wake);
+            }
+        }
+    }
+
+    /// Which rating of the file `op` became; `None` if it could not be saved.
+    fn append(&self, mut op: QueuedRating) -> Option<u64> {
+        let mut disk = lock_disk(&self.disk);
+        let last_at = disk.last_at;
+        let Some(file) = &mut disk.file else {
+            drop(disk);
+            self.inner.change(|s| not_saved(s, &op));
+            return None;
+        };
+        // Later than every rating before it, even if the clock went back, so the newest click
+        // wins both the coalescing here and the server's merge by time.
+        if let Some(last) = last_at
+            && op.at <= last
+        {
+            op.at = last + TimeDelta::milliseconds(1);
+        }
+        match file.append(op.clone()) {
+            Ok(()) => {
+                disk.last_at = Some(op.at);
+                disk.appended += 1;
+                Some(disk.appended)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot save a rating");
+                // An older rating of the item still in the file is the one that will be sent.
+                let older = file
+                    .pending()
+                    .iter()
+                    .rev()
+                    .find(|p| p.item == op.item)
+                    .map(|p| Unsettled {
+                        id: p.id.clone(),
+                        value: p.value,
+                    });
+                drop(disk);
+                self.inner.change(|s| {
+                    not_saved(s, &op);
+                    if let Some(older) = older {
+                        s.pending.entry(op.item.clone()).or_insert(older);
+                    }
+                });
+                None
+            }
+        }
+    }
+
+    /// Once the queue stops: lets go of the file (a send in flight then settles nothing in
+    /// it), and reports a rating that reached neither the file nor the thread (one made after
+    /// a cancel, as the thread let go) as not saved rather than showing it forever.
+    fn finish(self) {
+        let Appender {
+            inner,
+            rx,
+            disk,
+            nudge,
+            ..
+        } = self;
+        // From here on `rate` reports a failed send itself.
+        drop(rx);
+        let file = lock_disk(&disk).file.take();
+        // The sender sees its channel close and ends.
+        drop(nudge);
+        let saved: HashSet<&str> = file
+            .iter()
+            .flat_map(|f| f.pending())
+            .map(|p| p.id.as_str())
+            .collect();
+        inner.change(|s| {
+            let lost: Vec<ItemId> = s
+                .pending
+                .iter()
+                .filter(|(_, u)| !saved.contains(u.id.as_str()))
+                .map(|(item, _)| item.clone())
+                .collect();
+            for item in lost {
+                s.pending.remove(&item);
+                s.notices.push(Notice::RatingNotSaved { item });
+            }
+        });
+        inner.handoff(|h| h.closed = true);
+    }
+}
+
+/// The `{}` sent as the params of `library.info`.
+#[derive(Serialize)]
+struct NoParams {}
 
 /// What a step of the sender came to.
 enum Step {
@@ -351,11 +608,11 @@ enum Outcome {
     Rejected(RejectReason),
 }
 
+/// Sends what the file holds, whenever the gate is open.
 struct Sender {
     inner: Arc<Inner>,
-    rx: mpsc::Receiver<Msg>,
-    /// `None` if it could not be opened: every rating is then reported not saved.
-    file: Option<QueueFile>,
+    disk: Arc<Mutex<Disk>>,
+    rx: mpsc::Receiver<Nudge>,
     /// Built on the first send, so building it never holds up an append.
     rpc: Option<RpcClient>,
     url: Url,
@@ -371,21 +628,22 @@ struct Sender {
     backoff: Option<Duration>,
     /// No server request before this.
     retry_at: Option<Instant>,
-    /// The time of the newest rating in the file, so each one appended is later.
-    last_at: Option<DateTime<Utc>>,
+    /// [`Disk::appended`] when the sender last took what to send from the file: a rating
+    /// already sent does not end the wait after a failure.
+    seen: u64,
 }
 
 impl Sender {
     fn new(
         inner: Arc<Inner>,
-        rx: mpsc::Receiver<Msg>,
-        file: Option<QueueFile>,
+        disk: Arc<Mutex<Disk>>,
+        rx: mpsc::Receiver<Nudge>,
         cfg: QueueConfig,
     ) -> Sender {
-        let mut sender = Sender {
+        Sender {
             inner,
+            disk,
             rx,
-            file,
             rpc: None,
             url: cfg.url,
             token: Some(cfg.token),
@@ -396,29 +654,8 @@ impl Sender {
             halted: false,
             backoff: None,
             retry_at: None,
-            last_at: None,
-        };
-        sender.load();
-        sender
-    }
-
-    /// Shows what the file holds. A rating made while the file was being opened is newer than
-    /// any in it, so it keeps its place.
-    fn load(&mut self) {
-        let Some(file) = &self.file else { return };
-        self.last_at = file.pending().iter().map(|p| p.at).max();
-        let (send, _) = file.coalesced();
-        if send.is_empty() {
-            return;
+            seen: 0,
         }
-        self.inner.change(|s| {
-            for op in send {
-                s.pending.entry(op.item).or_insert(Unsettled {
-                    id: op.id,
-                    value: op.value,
-                });
-            }
-        });
     }
 
     fn stopped(&self) -> bool {
@@ -426,40 +663,7 @@ impl Sender {
     }
 
     fn run(mut self) {
-        self.serve();
-        self.finish();
-    }
-
-    /// Once the thread stops: a rating that reached neither the file nor the thread (one made
-    /// after a cancel, as the thread let go) is reported not saved rather than shown forever.
-    fn finish(self) {
-        let Sender {
-            inner, rx, file, ..
-        } = self;
-        // From here on `rate` reports a failed send itself.
-        drop(rx);
-        let saved: HashSet<&str> = file
-            .iter()
-            .flat_map(|f| f.pending())
-            .map(|p| p.id.as_str())
-            .collect();
-        inner.change(|s| {
-            let lost: Vec<ItemId> = s
-                .pending
-                .iter()
-                .filter(|(_, u)| !saved.contains(u.id.as_str()))
-                .map(|(item, _)| item.clone())
-                .collect();
-            for item in lost {
-                s.pending.remove(&item);
-                s.notices.push(Notice::RatingNotSaved { item });
-            }
-        });
-    }
-
-    fn serve(&mut self) {
         loop {
-            // Appends what was rated before a drop, too.
             if !self.pump() || self.stopped() {
                 return;
             }
@@ -468,7 +672,7 @@ impl Sender {
                 Step::Idle => None,
                 Step::Wait(d) => Some(d),
             };
-            let msg = match wait {
+            let nudge = match wait {
                 None => self.rx.recv().ok(),
                 Some(d) => match self.rx.recv_timeout(d) {
                     Ok(m) => Some(m),
@@ -476,16 +680,16 @@ impl Sender {
                     Err(mpsc::RecvTimeoutError::Disconnected) => None,
                 },
             };
-            match msg {
+            match nudge {
                 Some(m) => self.handle(m),
-                // The channel reports itself closed only once nothing is left in it.
+                // The appender has stopped.
                 None => return,
             }
         }
     }
 
-    /// Handles the messages that have arrived, without waiting. `false` once the
-    /// [`OpQueue`] is gone.
+    /// Handles the nudges that have arrived, without waiting. `false` once the appender is
+    /// gone.
     fn pump(&mut self) -> bool {
         loop {
             match self.rx.try_recv() {
@@ -496,15 +700,16 @@ impl Sender {
         }
     }
 
-    fn handle(&mut self, msg: Msg) {
-        match msg {
-            Msg::Rate(op) => {
-                self.append(op);
+    fn handle(&mut self, nudge: Nudge) {
+        match nudge {
+            Nudge::Rated(n) if n > self.seen => {
                 // A new rating goes at once (spec §5.2). The backoff stays, so a further
                 // failure still waits longer.
                 self.retry_at = None;
             }
-            Msg::Wake => {
+            // Already in the last send (which may have failed and be waiting).
+            Nudge::Rated(_) => {}
+            Nudge::Wake => {
                 // The server answers again: no reason to sit out the rest of a wait.
                 self.backoff = None;
                 self.retry_at = None;
@@ -512,48 +717,13 @@ impl Sender {
         }
     }
 
-    fn append(&mut self, mut op: QueuedRating) {
-        let Some(file) = &mut self.file else {
-            self.inner.change(|s| not_saved(s, &op));
-            return;
-        };
-        // Later than every rating before it, even if the clock went back, so the newest click
-        // wins both the coalescing here and the server's merge by time.
-        if let Some(last) = self.last_at
-            && op.at <= last
-        {
-            op.at = last + TimeDelta::milliseconds(1);
-        }
-        match file.append(op.clone()) {
-            Ok(()) => self.last_at = Some(op.at),
-            Err(e) => {
-                tracing::warn!(error = %e, "cannot save a rating");
-                // An older rating of the item still in the file is the one that will be sent.
-                let older = file
-                    .pending()
-                    .iter()
-                    .rev()
-                    .find(|p| p.item == op.item)
-                    .map(|p| Unsettled {
-                        id: p.id.clone(),
-                        value: p.value,
-                    });
-                self.inner.change(|s| {
-                    not_saved(s, &op);
-                    if let Some(older) = older {
-                        s.pending.entry(op.item.clone()).or_insert(older);
-                    }
-                });
-            }
-        }
-    }
-
     /// One exchange with the server, if one is due.
     fn step(&mut self) -> Step {
-        let Some(file) = &self.file else {
-            return Step::Idle;
-        };
-        if self.halted || file.pending().is_empty() {
+        let has_pending = lock_disk(&self.disk)
+            .file
+            .as_ref()
+            .is_some_and(|f| !f.pending().is_empty());
+        if self.halted || !has_pending {
             return Step::Idle;
         }
         if let Some(at) = self.retry_at {
@@ -562,13 +732,13 @@ impl Sender {
                 return Step::Wait(at - now);
             }
         }
-        match &*lock_gate(&self.gate) {
-            Gate::Open { .. } => {}
+        let library_id = match &*lock_gate(&self.gate) {
+            Gate::Open { library_id } => library_id.clone(),
             Gate::Pending => return Step::Wait(GATE_PENDING_POLL),
             // Offline: a wake brings the sender back. Closed: nothing more goes to this
             // server, and the file keeps the ratings for the next session.
             Gate::Offline { .. } | Gate::Closed(_) => return Step::Idle,
-        }
+        };
         if self.rpc.is_none()
             && let Some(token) = self.token.take()
         {
@@ -582,11 +752,31 @@ impl Sender {
                 }
             }
         }
-        match self.send_pending() {
-            Ok(()) => {
+        let result = self.same_library(&library_id).and_then(|same| {
+            if same {
+                self.send_pending().map(|()| true)
+            } else {
+                Ok(false)
+            }
+        });
+        match result {
+            Ok(true) => {
                 self.backoff = None;
                 self.retry_at = None;
                 Step::Worked
+            }
+            Ok(false) => {
+                tracing::warn!("the server serves another library; ratings kept");
+                {
+                    let mut gate = lock_gate(&self.gate);
+                    if matches!(&*gate, Gate::Open { library_id: id } if *id == library_id) {
+                        *gate = Gate::Closed(ClientError::LibraryChanged);
+                    }
+                }
+                // The session sees the closed gate at its next poll and fails.
+                self.inner.ctx.request_repaint();
+                self.halted = true;
+                Step::Idle
             }
             Err(e) if ends_session(&e) => {
                 tracing::warn!(error = %e, "the server refused the rating queue");
@@ -608,15 +798,30 @@ impl Sender {
         }
     }
 
+    /// Whether the server still serves the library the session opened (`library.info`), so
+    /// a server that came back with another library never gets this one's ratings: its ids
+    /// would all be refused `not_found`, and the ratings lost.
+    fn same_library(&self, library_id: &str) -> Result<bool, ClientError> {
+        let info: LibraryInfo = self.call(LIBRARY_INFO, &NoParams {})?;
+        Ok(info.library_id == library_id)
+    }
+
     /// Sends the newest pending rating of each item, in batches of [`MAX_RATING_OPS`]; the
     /// older ones are settled unsent. Stops at the first batch that failed.
     fn send_pending(&mut self) -> Result<(), ClientError> {
-        let file = self.file.as_mut().expect("checked by step");
-        let (send, obsolete) = file.coalesced();
-        if let Err(e) = file.mark_done(&obsolete) {
-            // They stay pending and are coalesced away again next time.
-            tracing::warn!(error = %e, "cannot settle older ratings in the queue");
-        }
+        let send = {
+            let mut disk = lock_disk(&self.disk);
+            self.seen = disk.appended;
+            let Some(file) = disk.file.as_mut() else {
+                return Ok(());
+            };
+            let (send, obsolete) = file.coalesced();
+            if let Err(e) = file.mark_done(&obsolete) {
+                // They stay pending and are coalesced away again next time.
+                tracing::warn!(error = %e, "cannot settle older ratings in the queue");
+            }
+            send
+        };
         for batch in send.chunks(MAX_RATING_OPS) {
             if self.stopped() {
                 return Ok(());
@@ -737,10 +942,13 @@ impl Sender {
             return Ok(());
         }
         let ids: Vec<String> = outcomes.iter().map(|(op, _)| op.id.clone()).collect();
-        let file = self.file.as_mut().expect("checked by step");
         // The server has them either way. If the file cannot say so, they go again after a
-        // wait and come back superseded (a refused one is refused, and noticed, again).
-        let saved = file.mark_done(&ids);
+        // wait and come back superseded (a refused one is refused, and noticed, again). A
+        // file let go of (the queue stopped) is left alone: the next session sends them again.
+        let saved = match lock_disk(&self.disk).file.as_mut() {
+            Some(file) => file.mark_done(&ids),
+            None => Ok(()),
+        };
         self.inner.change(|s| {
             for (op, outcome) in outcomes {
                 settle(s, &op.item, &op.id);

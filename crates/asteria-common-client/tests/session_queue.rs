@@ -440,3 +440,71 @@ fn refused_rating_becomes_a_notice() {
         }]
     );
 }
+
+#[test]
+fn dropping_the_session_during_a_held_send_saves_the_newer_rating() {
+    let data = tempfile::tempdir().unwrap();
+    let addr = free_addr();
+    let stub = RatingStub::start_at(addr, LIB, true);
+    let profile = profile(addr, "t");
+    let mut session = open(&profile, data.path());
+    wait_ready(&mut session);
+    session.rate(&item("A"), 2).unwrap();
+    poll_until(&mut session, "the held send", |_| {
+        stub.arrived.load(Ordering::SeqCst) == 1
+    });
+    session.rate(&item("B"), 4).unwrap();
+    // The app quits while the send is held: the drop waits for the file, not the server.
+    let start = Instant::now();
+    drop(session);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    let lines = file_lines(&queue_file(data.path(), &profile));
+    assert!(lines.iter().any(|l| l.contains("\"B\"")), "{lines:?}");
+    stub.release.store(true, Ordering::SeqCst);
+}
+
+#[test]
+fn a_library_switch_while_ready_keeps_the_queue() {
+    let data = tempfile::tempdir().unwrap();
+    let addr = free_addr();
+    let profile = profile(addr, "t");
+    known(data.path(), &profile, LIB);
+    let mut session = open_offline(&profile, data.path());
+    session.rate(&item("A"), 2).unwrap();
+    let path = queue_file(data.path(), &profile);
+    wait_for("the rating to be saved", || file_lines(&path).len() == 1);
+
+    // The handshake finds the recorded library; the server has switched by the time the
+    // queue sends.
+    let calls = Calls::default();
+    let seen = calls.clone();
+    let infos = Arc::new(AtomicUsize::new(0));
+    serve_at(addr, move |req| {
+        let (id, method, params) = seen.record(req);
+        match method.as_str() {
+            "server.info" => StubResponse::rpc_result(id, photos_server_info()),
+            "library.info" if infos.fetch_add(1, Ordering::SeqCst) == 0 => {
+                StubResponse::rpc_result(id, library_info(LIB))
+            }
+            "library.info" => StubResponse::rpc_result(id, library_info("another-library")),
+            "ops.apply" => StubResponse::rpc_result(id, all_applied(&params)),
+            _ => StubResponse::rpc_error(id, codes::METHOD_NOT_FOUND, "method not found"),
+        }
+    });
+    session.reconnect();
+    poll_until(&mut session, "Failed", |s| {
+        matches!(s.state(), SessionState::Failed(_))
+    });
+    assert_eq!(
+        session.state(),
+        &SessionState::Failed(ClientError::LibraryChanged)
+    );
+    assert_eq!(calls.count("ops.apply"), 0);
+    let lines = file_lines(&path);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("\"add\""), "{lines:?}");
+}
