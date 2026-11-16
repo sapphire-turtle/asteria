@@ -51,6 +51,8 @@ asteria-music-tracks-moved-hover = This file was moved; it was found at its new 
 asteria-music-tracks-missing-hover = No file was found for { $path }.
 asteria-music-tracks-play-next = Play next
 asteria-music-tracks-append = Add to queue
+asteria-music-tracks-rate = Rating
+asteria-music-tracks-rate-none = No rating
 
 # The playback bar.
 asteria-music-bar-previous = Previous
@@ -84,3 +86,10 @@ asteria-music-side-nothing = Nothing is playing.
 asteria-music-offline-save = Save for offline
 asteria-music-offline-remove = Remove from offline
 asteria-music-offline-not-saved = Not saved for offline, so it cannot play without the server.
+
+# What the status bar tells about a rating that could not be applied.
+asteria-music-rating-rejected = Could not apply a rating ({ $reason })
+asteria-music-rating-reason-not-found = not found
+asteria-music-rating-reason-read-only = read-only
+asteria-music-rating-reason-invalid = invalid
+asteria-music-rating-not-saved = Could not save a rating

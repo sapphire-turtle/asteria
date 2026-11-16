@@ -213,6 +213,7 @@ impl Music {
                     ],
                     "truncated": false,
                 }),
+                "ops.apply" => common::ops::all_applied(&params),
                 _ => return StubResponse::new(404, Vec::new()),
             };
             StubResponse::rpc_result(id, result)
@@ -369,15 +370,101 @@ pub fn frame(ctx: &egui::Context, app: &mut MusicApp) {
 }
 
 pub fn frame_sized(ctx: &egui::Context, app: &mut MusicApp, size: egui::Vec2) {
+    frame_with(ctx, app, size, Vec::new());
+}
+
+/// One frame of `size` with `events` as its input.
+pub fn frame_with(
+    ctx: &egui::Context,
+    app: &mut MusicApp,
+    size: egui::Vec2,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
     let mut output = ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            events,
             ..Default::default()
         },
         |ui| app.show(ui),
     );
     // There is no renderer to hand the texture uploads to.
     output.textures_delta.clear();
+    output
+}
+
+/// The widgets of one frame of `size` whose accessibility label (or a text's value) `matches`,
+/// as (label, centre).
+/// Turns accessibility on, so every frame from then on reports the whole widget tree.
+pub fn widgets(
+    ctx: &egui::Context,
+    app: &mut MusicApp,
+    size: egui::Vec2,
+    matches: impl Fn(&str) -> bool,
+) -> Vec<(String, egui::Pos2)> {
+    ctx.enable_accesskit();
+    let out = frame_with(ctx, app, size, Vec::new());
+    let update = out
+        .platform_output
+        .accesskit_update
+        .expect("the tree comes with every frame once accessibility is on");
+    let mut found = Vec::new();
+    for (_, node) in update.nodes {
+        // A text label's words are its value; a button's, its label.
+        let Some(label) = node.label().or(node.value()) else {
+            continue;
+        };
+        if let (true, Some(b)) = (matches(label), node.bounds()) {
+            let centre = egui::pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32);
+            found.push((label.to_string(), centre));
+        }
+    }
+    found
+}
+
+/// The stars drawn in one frame of `size`, top to bottom, then left to right. A star's button
+/// is named by its hover text (English here).
+pub fn star_centres(ctx: &egui::Context, app: &mut MusicApp, size: egui::Vec2) -> Vec<egui::Pos2> {
+    let mut stars: Vec<egui::Pos2> = widgets(ctx, app, size, |l| {
+        l.starts_with("Rate ") || l == "Clear the rating"
+    })
+    .into_iter()
+    .map(|(_, at)| at)
+    .collect();
+    stars.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+    stars
+}
+
+/// The centre of the one widget labelled `label` in a frame of `size`.
+pub fn widget_centre(
+    ctx: &egui::Context,
+    app: &mut MusicApp,
+    size: egui::Vec2,
+    label: &str,
+) -> egui::Pos2 {
+    let found = widgets(ctx, app, size, |l| l == label);
+    assert_eq!(found.len(), 1, "widgets labelled {label:?}: {found:?}");
+    found[0].1
+}
+
+/// A click of `button` at `at`: the pointer moves there, presses, and lets go, in three frames
+/// of `size`.
+pub fn click_at(
+    ctx: &egui::Context,
+    app: &mut MusicApp,
+    size: egui::Vec2,
+    at: egui::Pos2,
+    button: egui::PointerButton,
+) {
+    let press = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    frame_with(ctx, app, size, vec![egui::Event::PointerMoved(at)]);
+    frame_with(ctx, app, size, vec![press(true)]);
+    frame_with(ctx, app, size, vec![press(false)]);
 }
 
 /// Runs frames until `done` holds.

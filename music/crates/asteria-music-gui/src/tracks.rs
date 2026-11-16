@@ -1,16 +1,22 @@
 //! The table of an album's or a playlist's tracks, drawn row by row (only the rows on screen).
 //!
-//! Columns: disc, number, title, the artist (only when it differs from the album artist), and
-//! the length as `m:ss`. In a playlist a [`Missing`](EntryStatus::Missing) entry is dimmed, with
-//! the path written in the playlist, and a [`Moved`](EntryStatus::Moved) one is marked. Offline,
-//! a track whose audio is not saved is dimmed too ([`Availability`]). A click on a row plays
-//! from it; the right-click menu has "play next" and "add to queue". The table
-//! only reports what the user asked for ([`TrackAction`]); the app turns it into a command.
+//! Columns: disc, number, title, the artist (only when it differs from the album artist), the
+//! rating (wide only) and the length as `m:ss`. In a playlist a [`Missing`](EntryStatus::Missing)
+//! entry is dimmed, with the path written in the playlist, and a [`Moved`](EntryStatus::Moved)
+//! one is marked. Offline, a track whose audio is not saved is dimmed too ([`Availability`]). A
+//! click on a row plays from it; the right-click menu has "play next" and "add to queue".
+//!
+//! Wide, each track's rating is five stars in its row; a click on one rates the track and does
+//! not play it. Narrow there is no room for them, so the right-click menu has a "Rating"
+//! submenu instead. Rating needs no audio, so offline every track can be rated, saved or not;
+//! a missing playlist entry cannot. The table only reports what the user asked for
+//! ([`TrackAction`]); the app turns it into a command, or a rating.
 
 use asteria_common_client::offline::OfflineHandle;
 use asteria_common_client::session::Session;
-use asteria_music_api::{Album, EntryStatus, MusicTrack, Playlist};
-use corundum_framework::egui::{self, Align2, Sense, vec2};
+use asteria_common_client::widgets::stars::{MAX_RATING, stars};
+use asteria_music_api::{Album, EntryStatus, MediaItem, MusicTrack, Playlist};
+use corundum_framework::egui::{self, Align, Align2, Layout, Sense, vec2};
 use corundum_framework::gui::tr;
 
 use crate::player::Quality;
@@ -21,6 +27,8 @@ pub enum TrackAction {
     Play(usize),
     PlayNext(usize),
     Append(usize),
+    /// Rate the row's track: 0 (none) to [`MAX_RATING`].
+    Rate(usize, i8),
 }
 
 /// Which tracks can be played now: every one while the server answers; offline, only those
@@ -122,28 +130,53 @@ const DISC_W: f32 = 44.0;
 const NUMBER_W: f32 = 36.0;
 const LENGTH_W: f32 = 56.0;
 const PAD: f32 = 6.0;
+/// A row's star, and the room around it (each side) and between two.
+const STAR: f32 = 12.0;
+const STAR_PAD: f32 = 1.0;
+const STAR_GAP: f32 = 2.0;
+/// The rating column: five stars, then a gap before the length.
+const RATING_W: f32 =
+    MAX_RATING as f32 * (STAR + 2.0 * STAR_PAD) + (MAX_RATING as f32 - 1.0) * STAR_GAP + PAD;
+
+/// What the table needs besides its rows.
+struct Context<'a> {
+    album_artist: Option<&'a str>,
+    available: &'a Availability,
+    ratings: &'a dyn Fn(&MediaItem) -> Option<i8>,
+    wide: bool,
+    font: egui::FontId,
+    row_h: f32,
+}
 
 /// Draws the table. `album_artist` is the album's artist, if the rows all belong to one album;
-/// `available` says which tracks can be played (asked only for the rows drawn). Returns what
-/// the user asked for this frame.
+/// `available` says which tracks can be played and `ratings` the rating a track shows (both
+/// asked only for the rows drawn). `wide` puts the stars in the rows; narrow, they are in the
+/// right-click menu. Returns what the user asked for this frame.
 pub fn show(
     ui: &mut egui::Ui,
     salt: impl egui::AsIdSalt,
     rows: &[Row<'_>],
     album_artist: Option<&str>,
     available: &Availability,
+    ratings: &dyn Fn(&MediaItem) -> Option<i8>,
+    wide: bool,
 ) -> Option<TrackAction> {
-    let font = egui::TextStyle::Body.resolve(ui.style());
-    let row_h = ui.text_style_height(&egui::TextStyle::Body) + 8.0;
+    let cx = Context {
+        album_artist,
+        available,
+        ratings,
+        wide,
+        font: egui::TextStyle::Body.resolve(ui.style()),
+        row_h: ui.text_style_height(&egui::TextStyle::Body) + 8.0,
+    };
     let mut action = None;
-    header(ui, &font);
+    header(ui, &cx);
     egui::ScrollArea::vertical()
         .id_salt(salt)
         .auto_shrink([false, false])
-        .show_rows(ui, row_h, rows.len(), |ui, range| {
+        .show_rows(ui, cx.row_h, rows.len(), |ui, range| {
             for index in range {
-                let row = &rows[index];
-                if let Some(a) = row_ui(ui, index, row, album_artist, available, &font, row_h) {
+                if let Some(a) = row_ui(ui, index, &rows[index], &cx) {
                     action = Some(a);
                 }
             }
@@ -151,10 +184,12 @@ pub fn show(
     action
 }
 
-/// The column rectangles of a row `rect` wide: disc, number, title, artist, length.
-fn columns(rect: egui::Rect) -> [egui::Rect; 5] {
+/// The column rectangles of a row `rect` wide: disc, number, title, artist, rating, length.
+/// Narrow (`wide` false) the rating's is empty.
+fn columns(rect: egui::Rect, wide: bool) -> [egui::Rect; 6] {
     let rect = rect.shrink2(vec2(PAD, 0.0));
-    let flexible = (rect.width() - DISC_W - NUMBER_W - LENGTH_W).max(0.0);
+    let rating_w = if wide { RATING_W } else { 0.0 };
+    let flexible = (rect.width() - DISC_W - NUMBER_W - rating_w - LENGTH_W).max(0.0);
     let title_w = flexible * 0.6;
     let mut x = rect.left();
     let mut next = |w: f32| {
@@ -167,14 +202,25 @@ fn columns(rect: egui::Rect) -> [egui::Rect; 5] {
         next(NUMBER_W),
         next(title_w),
         next(flexible - title_w),
+        next(rating_w),
         next(LENGTH_W),
     ]
 }
 
-fn header(ui: &mut egui::Ui, font: &egui::FontId) {
+/// The label of `rating` in the narrow rows' "Rating" submenu: a star for each, or "No rating".
+fn rating_label(ui: &egui::Ui, rating: i8) -> String {
+    if rating <= 0 {
+        tr!(ui, "asteria-music-tracks-rate-none")
+    } else {
+        "★".repeat(rating as usize)
+    }
+}
+
+fn header(ui: &mut egui::Ui, cx: &Context<'_>) {
+    let font = &cx.font;
     let (rect, _) =
         ui.allocate_exact_size(vec2(ui.available_width(), font.size + 8.0), Sense::hover());
-    let cols = columns(rect);
+    let cols = columns(rect, cx.wide);
     let color = ui.visuals().weak_text_color();
     let painter = ui.painter_at(rect);
     let keys = [
@@ -182,11 +228,15 @@ fn header(ui: &mut egui::Ui, font: &egui::FontId) {
         "asteria-music-tracks-number",
         "asteria-music-tracks-title",
         "asteria-music-tracks-artist",
+        "asteria-music-tracks-rate",
         "asteria-music-tracks-length",
     ];
     for (i, (col, key)) in cols.iter().zip(keys).enumerate() {
+        if col.width() <= 0.0 {
+            continue;
+        }
         let text = tr!(ui, key);
-        let (align, x) = if i == 4 {
+        let (align, x) = if i == 5 {
             (Align2::RIGHT_CENTER, col.right() - PAD)
         } else {
             (Align2::LEFT_CENTER, col.left())
@@ -202,18 +252,14 @@ fn header(ui: &mut egui::Ui, font: &egui::FontId) {
     ui.separator();
 }
 
-fn row_ui(
-    ui: &mut egui::Ui,
-    index: usize,
-    row: &Row<'_>,
-    album_artist: Option<&str>,
-    available: &Availability,
-    font: &egui::FontId,
-    row_h: f32,
-) -> Option<TrackAction> {
-    let saved = row.track.is_none_or(|t| available.can_play(t));
-    let can_play = playable(row) && saved;
-    let sense = if can_play {
+fn row_ui(ui: &mut egui::Ui, index: usize, row: &Row<'_>, cx: &Context<'_>) -> Option<TrackAction> {
+    let (font, row_h, album_artist) = (&cx.font, cx.row_h, cx.album_artist);
+    let saved = row.track.is_none_or(|t| cx.available.can_play(t));
+    // Rating needs no audio: every track found can be rated, saved or not.
+    let rateable = playable(row).then_some(row.track).flatten();
+    let can_play = rateable.is_some() && saved;
+    // Narrow, a track that cannot be played still has the menu, for its rating.
+    let sense = if can_play || (rateable.is_some() && !cx.wide) {
         Sense::click()
     } else {
         Sense::hover()
@@ -241,7 +287,7 @@ fn row_ui(
         } else {
             strong
         };
-        let cols = columns(rect);
+        let cols = columns(rect, cx.wide);
         let painter = ui.painter_at(rect);
         let text = |col: usize, s: String, color: egui::Color32, right: bool| {
             let (align, x) = if right {
@@ -265,7 +311,7 @@ fn row_ui(
                 text(1, n.to_string(), weak, false);
             }
             if let Some(ms) = tags.duration_ms {
-                text(4, format_duration(ms), weak, true);
+                text(5, format_duration(ms), weak, true);
             }
         }
         let mut shown_title = title.clone();
@@ -287,37 +333,66 @@ fn row_ui(
             _ => {}
         }
     }
-    if row.status == EntryStatus::Missing {
-        let path = row.raw_path.unwrap_or_default().to_string();
-        response.on_hover_text(tr!(ui, "asteria-music-tracks-missing-hover", path = path));
+    let Some(track) = rateable else {
+        if row.status == EntryStatus::Missing {
+            let path = row.raw_path.unwrap_or_default().to_string();
+            response.on_hover_text(tr!(ui, "asteria-music-tracks-missing-hover", path = path));
+        }
         return None;
+    };
+    let rating = (cx.ratings)(&track.item);
+    let mut action = None;
+    if cx.wide {
+        // Registered after the row, so a click on a star is the star's, not the row's.
+        let col = columns(rect, true)[4];
+        let mut stars_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(("asteria_music_track_stars", index))
+                .max_rect(col)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        stars_ui.spacing_mut().button_padding = vec2(STAR_PAD, STAR_PAD);
+        if let Some(r) = stars(&mut stars_ui, rating, STAR) {
+            action = Some(TrackAction::Rate(index, r));
+        }
+    }
+    if can_play && response.clicked() {
+        action = Some(TrackAction::Play(index));
+    }
+    // Wide, the menu has only what plays; a track that cannot be played has none.
+    if can_play || !cx.wide {
+        response.context_menu(|ui| {
+            if can_play {
+                if ui
+                    .button(tr!(ui, "asteria-music-tracks-play-next"))
+                    .clicked()
+                {
+                    action = Some(TrackAction::PlayNext(index));
+                    ui.close();
+                }
+                if ui.button(tr!(ui, "asteria-music-tracks-append")).clicked() {
+                    action = Some(TrackAction::Append(index));
+                    ui.close();
+                }
+            }
+            if !cx.wide {
+                ui.menu_button(tr!(ui, "asteria-music-tracks-rate"), |ui| {
+                    let set = rating.unwrap_or(0);
+                    for r in 0..=MAX_RATING {
+                        if ui.selectable_label(set == r, rating_label(ui, r)).clicked() {
+                            action = Some(TrackAction::Rate(index, r));
+                            ui.close();
+                        }
+                    }
+                });
+            }
+        });
     }
     if !saved {
         response.on_hover_text(tr!(ui, "asteria-music-offline-not-saved"));
-        return None;
+    } else if row.status == EntryStatus::Moved && response.hovered() {
+        response.on_hover_text(tr!(ui, "asteria-music-tracks-moved-hover"));
     }
-    if row.status == EntryStatus::Moved && response.hovered() {
-        response
-            .clone()
-            .on_hover_text(tr!(ui, "asteria-music-tracks-moved-hover"));
-    }
-    if !can_play {
-        return None;
-    }
-    let mut action = response.clicked().then_some(TrackAction::Play(index));
-    response.context_menu(|ui| {
-        if ui
-            .button(tr!(ui, "asteria-music-tracks-play-next"))
-            .clicked()
-        {
-            action = Some(TrackAction::PlayNext(index));
-            ui.close();
-        }
-        if ui.button(tr!(ui, "asteria-music-tracks-append")).clicked() {
-            action = Some(TrackAction::Append(index));
-            ui.close();
-        }
-    });
     action
 }
 
@@ -357,6 +432,21 @@ mod tests {
         let t = track(&["A"], None);
         assert!(Availability::All.can_play(&t));
         assert!(!Availability::Saved(None).can_play(&t));
+    }
+
+    #[test]
+    fn wide_rows_rate_between_the_artist_and_the_length_and_narrow_rows_do_not() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 30.0));
+        let wide = columns(rect, true);
+        assert_eq!(wide[4].width(), RATING_W);
+        assert_eq!(wide[3].right(), wide[4].left());
+        assert_eq!(wide[4].right(), wide[5].left());
+        // Five stars with their padding and gaps fit, with a gap left before the length.
+        let stars = 5.0 * (STAR + 2.0 * STAR_PAD) + 4.0 * STAR_GAP;
+        assert!(stars < RATING_W, "{stars} in {RATING_W}");
+        let narrow = columns(rect, false);
+        assert_eq!(narrow[4].width(), 0.0);
+        assert_eq!(narrow[5].right(), wide[5].right());
     }
 
     #[test]

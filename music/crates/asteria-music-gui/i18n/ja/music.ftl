@@ -45,6 +45,8 @@ asteria-music-tracks-moved-hover = このファイルは移動されていまし
 asteria-music-tracks-missing-hover = { $path } のファイルが見つかりません。
 asteria-music-tracks-play-next = 次に再生
 asteria-music-tracks-append = キューに追加
+asteria-music-tracks-rate = 評価
+asteria-music-tracks-rate-none = 評価なし
 
 # 再生バー。
 asteria-music-bar-previous = 前へ
@@ -78,3 +80,10 @@ asteria-music-side-nothing = 再生中の曲はありません。
 asteria-music-offline-save = オフライン用に保存
 asteria-music-offline-remove = オフラインから削除
 asteria-music-offline-not-saved = オフライン用に保存されていないため、サーバーなしでは再生できません。
+
+# 適用できなかった評価についてステータスバーが伝えること。
+asteria-music-rating-rejected = 評価を反映できませんでした（{ $reason }）
+asteria-music-rating-reason-not-found = 見つかりません
+asteria-music-rating-reason-read-only = 読み取り専用です
+asteria-music-rating-reason-invalid = 不正な値です
+asteria-music-rating-not-saved = 評価を保存できませんでした

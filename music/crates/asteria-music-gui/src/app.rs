@@ -7,22 +7,29 @@
 //! old server sends can reach the new screen. The [`Player`] does not belong to a connection;
 //! what the screens ask to play reaches it as [`Command`]s.
 //!
+//! A rating that cannot be applied (the server refused it, or it could not be kept) is told
+//! on the status bar for a while ([`notice`](MusicApp::notice)); narrow, where there is no
+//! status bar, at the foot of the screen.
+//!
 //! The servers are kept in `servers.toml`. It is read once, before the first frame; every
 //! change is written by a background thread, so the UI thread does no disk I/O.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use asteria_common_client::errors::{error_detail, error_text};
 use asteria_common_client::offline::OfflinePage;
 use asteria_common_client::profiles::{ProfileId, Profiles, ServerProfile, Token};
+use asteria_common_client::queue::Notice;
+use asteria_common_client::rpc::ClientError;
 use asteria_common_client::saver::Saver;
 use asteria_common_client::session::{SessionDirs, SessionState};
 use asteria_common_client::settings::ExtraSettingsPage;
 use asteria_common_client::settings::servers::{ServersChange, ServersPage};
 use asteria_common_client::widgets::offline_toggle::offline_status;
 use asteria_common_client::widgets::server_switcher::{ServerSwitcher, SwitcherAction};
-use asteria_music_api::{AlbumId, ArtistId, PlaylistId};
+use asteria_music_api::{AlbumId, ArtistId, PlaylistId, RejectReason};
 use corundum_framework::egui;
 use corundum_framework::gui::settings::{ListItem, SettingsLayout, SettingsSection};
 use corundum_framework::gui::{COMPACT_WIDTH, Destination, Shell, ShellApp, Side, icons, tr};
@@ -105,6 +112,8 @@ struct State {
     open_screen: Option<Screen>,
     /// Whether the shell lays out for a phone this frame (no status bar).
     compact: bool,
+    /// What the status bar tells about ratings, and since when (it goes after [`NOTICE_FOR`]).
+    notice: Option<(String, Instant)>,
 }
 
 impl MusicApp {
@@ -205,6 +214,7 @@ impl MusicApp {
             save_blocked,
             open_screen: None,
             compact: false,
+            notice: None,
         };
         state.connect(false);
         if state.profiles.servers.is_empty() {
@@ -401,6 +411,19 @@ impl MusicApp {
     pub fn servers_page_mut(&mut self) -> &mut ServersPage {
         &mut self.state.servers_page
     }
+
+    /// What the status bar says about a rating that could not be applied, while it does.
+    pub fn notice(&self) -> Option<&str> {
+        let (text, since) = self.state.notice.as_ref()?;
+        (since.elapsed() < NOTICE_FOR).then_some(text.as_str())
+    }
+
+    /// When the notice the status bar shows was set (a new one, even with the same text, sets
+    /// it again). For tests.
+    #[doc(hidden)]
+    pub fn notice_since(&self) -> Option<Instant> {
+        self.state.notice.as_ref().map(|(_, since)| *since)
+    }
 }
 
 impl State {
@@ -468,6 +491,15 @@ impl State {
         }
         if let Some(c) = &mut self.connection {
             c.poll(&self.ctx);
+            let notices: Vec<String> = c
+                .session
+                .take_notices()
+                .iter()
+                .map(|n| rating_notice(&self.ctx, n))
+                .collect();
+            if !notices.is_empty() {
+                self.notice = Some((notices.join(" "), Instant::now()));
+            }
         }
         self.send_endpoint();
         // Offline, the player plays only what is saved, and asks the server nothing.
@@ -613,14 +645,18 @@ impl State {
             // Offline, the saved copies answer the same requests.
             SessionState::Ready { .. } | SessionState::Offline { .. } => {
                 let mut command = None;
+                let wide = !self.compact;
                 egui::CentralPanel::default().show(ui, |ui| {
                     command = match screen {
-                        Screen::Albums => c.library.albums_ui(ui, &mut c.session),
-                        Screen::Artists => c.library.artists_ui(ui, &mut c.session),
-                        Screen::Playlists => c.library.playlists_ui(ui, &mut c.session),
+                        Screen::Albums => c.library.albums_ui(ui, &mut c.session, wide),
+                        Screen::Artists => c.library.artists_ui(ui, &mut c.session, wide),
+                        Screen::Playlists => c.library.playlists_ui(ui, &mut c.session, wide),
                         Screen::Queue | Screen::Settings => None,
                     };
                 });
+                if let Some(e) = c.library.take_rate_error() {
+                    self.rate_failed(&e);
+                }
                 if let Some(command) = command {
                     self.send(command);
                 }
@@ -630,6 +666,26 @@ impl State {
 
     fn send(&self, command: Command) {
         self.player.send(command);
+    }
+
+    /// Tells on the status bar that a rating could not be queued (there is nowhere to keep it).
+    fn rate_failed(&mut self, e: &ClientError) {
+        tracing::warn!(error = %e, "queueing a rating failed");
+        let text = tr!(self.ctx, "asteria-music-rating-not-saved");
+        self.notice = Some((text, Instant::now()));
+        self.ctx.request_repaint();
+    }
+
+    /// The notice about ratings, until it expires.
+    fn notice_ui(&mut self, ui: &mut egui::Ui) {
+        if let Some((text, since)) = &self.notice {
+            if let Some(left) = NOTICE_FOR.checked_sub(since.elapsed()) {
+                ui.colored_label(ui.visuals().warn_fg_color, text.as_str());
+                ui.ctx().request_repaint_after(left);
+            } else {
+                self.notice = None;
+            }
+        }
     }
 
     /// Once the session is ready (or offline, on the saved copies), tells the player which
@@ -786,6 +842,25 @@ impl State {
     }
 }
 
+/// The status-bar text for what the rating queue has to tell.
+fn rating_notice(ctx: &egui::Context, notice: &Notice) -> String {
+    match notice {
+        Notice::RatingRejected { reason, .. } => {
+            let key = match reason {
+                RejectReason::NotFound => "asteria-music-rating-reason-not-found",
+                RejectReason::ReadOnly => "asteria-music-rating-reason-read-only",
+                RejectReason::Invalid => "asteria-music-rating-reason-invalid",
+            };
+            let reason = tr!(ctx, key);
+            tr!(ctx, "asteria-music-rating-rejected", reason = reason)
+        }
+        Notice::RatingNotSaved { .. } => tr!(ctx, "asteria-music-rating-not-saved"),
+    }
+}
+
+/// How long the status bar keeps a notice.
+const NOTICE_FOR: Duration = Duration::from_secs(8);
+
 fn quality_of(settings: &PlaybackSettings) -> Quality {
     if settings.low_quality {
         Quality::Low
@@ -894,6 +969,11 @@ fn is_compact(ui: &egui::Ui) -> bool {
 impl ShellApp<Screen> for State {
     fn screen_ui(&mut self, ui: &mut egui::Ui, screen: Screen, _side: &mut Side) {
         self.bar_ui(ui);
+        // Narrow, there is no status bar to carry a rating's notice: it sits at the foot of
+        // the screen, above the playback bar.
+        if self.compact && self.notice.is_some() {
+            egui::Panel::bottom("music-notice").show(ui, |ui| self.notice_ui(ui));
+        }
         match screen {
             Screen::Albums | Screen::Artists | Screen::Playlists => self.library_ui(ui, screen),
             Screen::Queue => {
@@ -910,11 +990,27 @@ impl ShellApp<Screen> for State {
         }
     }
 
-    /// The side pane shows what is playing, whichever screen is open.
+    /// The side pane shows what is playing, whichever screen is open, and rates it. Once the
+    /// session has failed it does not rate (the rating would go to the old library's file);
+    /// offline it does.
     fn side_ui(&mut self, ui: &mut egui::Ui, _screen: Screen, _side: &mut Side) {
         let state = self.player.state();
+        let media = now_playing::current_media(&state);
+        let can_rate = self
+            .connection
+            .as_ref()
+            .is_some_and(|c| !matches!(c.session.state(), SessionState::Failed(_)));
+        let rating = media.zip(self.connection.as_ref());
+        let rating = rating.and_then(|(m, c)| c.session.rating_of(m));
         let images = self.connection.as_mut().map(|c| c.session.images());
-        now_playing::side(ui, &state, images);
+        let clicked = now_playing::side(ui, &state, images, rating, can_rate);
+        let result = match (clicked, media, self.connection.as_mut()) {
+            (Some(value), Some(media), Some(c)) => c.session.rate(&media.id, value),
+            _ => return,
+        };
+        if let Err(e) = result {
+            self.rate_failed(&e);
+        }
     }
 
     /// Wide, the status bar holds the switcher ([`status_ui`](Self::status_ui)); narrow
@@ -926,7 +1022,7 @@ impl ShellApp<Screen> for State {
         None
     }
 
-    /// The switcher, then how saving for offline goes.
+    /// The switcher, how saving for offline goes, then a rating's notice.
     fn status_ui(&mut self, ui: &mut egui::Ui) {
         self.switcher_ui(ui, false);
         offline_status(
@@ -936,6 +1032,7 @@ impl ShellApp<Screen> for State {
                 .as_ref()
                 .map_or(0, |c| c.session.pending_ratings()),
         );
+        self.notice_ui(ui);
     }
 }
 

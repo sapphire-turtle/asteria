@@ -14,11 +14,14 @@
 //!
 //! What is opened has "Save for offline" by its title, and the albums, artists and playlists
 //! listed have it in their right-click menu.
+//!
+//! A star clicked in a track's row rates it at once through the session's queue
+//! ([`Session::rate`]), online or offline; a rating that cannot be queued is kept for the app
+//! to show ([`take_rate_error`](LibraryState::take_rate_error)).
 
 use std::fmt::Debug;
 
 use asteria_common_client::errors::{error_detail, error_text};
-use asteria_common_client::images::ImageLoader;
 use asteria_common_client::offline::{OfflineHandle, PinTarget};
 use asteria_common_client::rpc::ClientError;
 use asteria_common_client::session::{Reply, Request, RequestId, Response, Session};
@@ -254,6 +257,8 @@ pub struct LibraryState {
     artist: Option<Detail<ArtistId, Artist>>,
     artist_album: Option<Detail<AlbumId, Album>>,
     playlist: Option<Detail<PlaylistId, Playlist>>,
+    /// Why the last rating could not be queued, until the app takes it.
+    rate_error: Option<ClientError>,
 }
 
 impl Default for LibraryState {
@@ -273,6 +278,7 @@ impl LibraryState {
             artist: None,
             artist_album: None,
             playlist: None,
+            rate_error: None,
         }
     }
 
@@ -491,8 +497,26 @@ impl LibraryState {
             .map(Command::Append)
     }
 
-    fn command(
-        &self,
+    /// The track at the row `index` of `list`, whether or not it can be played (a playlist's
+    /// `Missing` entry has none).
+    fn track(&self, list: TrackList, index: usize) -> Option<&MusicTrack> {
+        match list {
+            TrackList::Album => self.album()?.tracks.get(index),
+            TrackList::ArtistAlbum => self.artist_album()?.tracks.get(index),
+            TrackList::Playlist => self
+                .playlist()?
+                .entries
+                .get(index)
+                .filter(|e| e.status != EntryStatus::Missing)?
+                .track
+                .as_ref(),
+        }
+    }
+
+    /// Does what a row asked: a command for the player, or (for a rating) nothing to play.
+    fn act(
+        &mut self,
+        session: &mut Session,
         available: &Availability,
         list: TrackList,
         action: TrackAction,
@@ -501,17 +525,35 @@ impl LibraryState {
             TrackAction::Play(i) => self.play_from_in(available, list, i),
             TrackAction::PlayNext(i) => self.one(available, list, i).map(Command::PlayNext),
             TrackAction::Append(i) => self.one(available, list, i).map(Command::Append),
+            TrackAction::Rate(i, value) => {
+                let id = self.track(list, i)?.item.id.clone();
+                if let Err(e) = session.rate(&id, value) {
+                    self.rate_error = Some(e);
+                }
+                None
+            }
         }
+    }
+
+    /// Why a rating clicked since the last call could not be queued, if one could not.
+    pub fn take_rate_error(&mut self) -> Option<ClientError> {
+        self.rate_error.take()
     }
 
     // The screens.
 
-    /// The Albums screen: the cover grid, or the album opened. Returns what to play.
-    pub fn albums_ui(&mut self, ui: &mut egui::Ui, session: &mut Session) -> Option<Command> {
+    /// The Albums screen: the cover grid, or the album opened. `wide` puts the tracks' stars in
+    /// their rows ([`tracks::show`]). Returns what to play.
+    pub fn albums_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &mut Session,
+        wide: bool,
+    ) -> Option<Command> {
         let available = Availability::of(session);
         let offline = session.offline().cloned();
         if let Some(detail) = &self.album {
-            let out = album_page_ui(ui, detail, session.images(), offline.as_ref(), &available);
+            let out = album_page_ui(ui, detail, session, offline.as_ref(), &available, wide);
             if out.retry
                 && let Some(d) = &mut self.album
             {
@@ -519,7 +561,7 @@ impl LibraryState {
             }
             let command = out
                 .action
-                .and_then(|a| self.command(&available, TrackList::Album, a));
+                .and_then(|a| self.act(session, &available, TrackList::Album, a));
             if out.back {
                 self.close_album();
             }
@@ -552,12 +594,17 @@ impl LibraryState {
     }
 
     /// The Artists screen: the artists, or the artist opened with its albums (and one of
-    /// them opened).
-    pub fn artists_ui(&mut self, ui: &mut egui::Ui, session: &mut Session) -> Option<Command> {
+    /// them opened). `wide` as for [`albums_ui`](Self::albums_ui).
+    pub fn artists_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &mut Session,
+        wide: bool,
+    ) -> Option<Command> {
         let available = Availability::of(session);
         let offline = session.offline().cloned();
         if let Some(detail) = &self.artist_album {
-            let out = album_page_ui(ui, detail, session.images(), offline.as_ref(), &available);
+            let out = album_page_ui(ui, detail, session, offline.as_ref(), &available, wide);
             if out.retry
                 && let Some(d) = &mut self.artist_album
             {
@@ -565,7 +612,7 @@ impl LibraryState {
             }
             let command = out
                 .action
-                .and_then(|a| self.command(&available, TrackList::ArtistAlbum, a));
+                .and_then(|a| self.act(session, &available, TrackList::ArtistAlbum, a));
             if out.back {
                 self.close_artist_album();
             }
@@ -675,8 +722,14 @@ impl LibraryState {
         None
     }
 
-    /// The Playlists screen: the playlists, or the playlist opened with its tracks.
-    pub fn playlists_ui(&mut self, ui: &mut egui::Ui, session: &mut Session) -> Option<Command> {
+    /// The Playlists screen: the playlists, or the playlist opened with its tracks. `wide` as
+    /// for [`albums_ui`](Self::albums_ui).
+    pub fn playlists_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &mut Session,
+        wide: bool,
+    ) -> Option<Command> {
         let available = Availability::of(session);
         let offline = session.offline().cloned();
         if let Some(detail) = &self.playlist {
@@ -711,10 +764,13 @@ impl LibraryState {
                         &rows,
                         None,
                         &available,
+                        &|m| session.rating_of(m),
+                        wide,
                     );
                 }
             }
-            let command = action.and_then(|a| self.command(&available, TrackList::Playlist, a));
+            let command =
+                action.and_then(|a| self.act(session, &available, TrackList::Playlist, a));
             if back {
                 self.close_playlist();
             }
@@ -787,9 +843,10 @@ struct AlbumPageOut {
 fn album_page_ui(
     ui: &mut egui::Ui,
     detail: &Detail<AlbumId, Album>,
-    images: &mut ImageLoader,
+    session: &mut Session,
     offline: Option<&OfflineHandle>,
     available: &Availability,
+    wide: bool,
 ) -> AlbumPageOut {
     let mut out = AlbumPageOut {
         back: false,
@@ -807,7 +864,7 @@ fn album_page_ui(
     ui.horizontal(|ui| {
         let side = (ui.available_width() * 0.4).clamp(96.0, 200.0);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
-        paint_cover(ui, rect, summary, images);
+        paint_cover(ui, rect, summary, session.images());
         ui.vertical(|ui| {
             ui.heading(summary.title.as_str());
             let line = match summary.year {
@@ -836,6 +893,8 @@ fn album_page_ui(
         &rows,
         Some(summary.album_artist.as_str()),
         available,
+        &|m| session.rating_of(m),
+        wide,
     );
     out
 }
