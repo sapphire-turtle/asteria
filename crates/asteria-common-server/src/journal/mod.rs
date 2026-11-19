@@ -4,6 +4,7 @@
 pub mod files;
 pub mod map;
 mod prepare;
+pub mod sidecar;
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -64,6 +65,7 @@ pub(crate) fn undo_policy() -> UndoPolicy {
 /// Registers every operation the server runs.
 pub fn register_all(reg: &mut Registry<JournalCtx>, _ext: &dyn AppExtension) {
     files::register(reg);
+    sidecar::register(reg);
 }
 
 /// The label of a batch given none, by the kind of its first operation and how many

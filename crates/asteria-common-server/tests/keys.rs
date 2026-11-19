@@ -8,12 +8,12 @@ use std::fs;
 use std::time::Duration;
 
 use asteria_common_core::Library;
-use asteria_common_core::journal::OpKind;
 use asteria_common_server::keys::{KeyVerifier, Verdict};
 use asteria_common_server::{ServerConfig, default_config_path, load_and_migrate_in};
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use common::*;
+use corundum_framework::journal::Actor;
 use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
@@ -110,20 +110,8 @@ async fn every_key_acts_as_the_owner() {
     .await;
     let got = call(&e.app, &e.owner_token, "media.get", json!({"id": id})).await;
     assert_eq!(got["result"]["rating"], 4);
-    let write = e
-        .lib
-        .journal()
-        .unwrap()
-        .read_all()
-        .unwrap()
-        .into_iter()
-        .rev()
-        .find(|l| l.kind == OpKind::WriteSidecar)
-        .unwrap();
-    assert_eq!(
-        serde_json::to_value(write.actor).unwrap(),
-        json!({"user": e.lib.owner().to_string()})
-    );
+    let write = &e.state.journal().history(None, 1).unwrap()[0].begin;
+    assert_eq!(write.actor, Actor::person(e.lib.owner().to_string()));
 }
 
 /// A library and a config file of the older form, with a `[[token]]` per token in `tokens`.

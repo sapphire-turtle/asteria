@@ -9,6 +9,7 @@ use asteria_common_core::journal::Actor;
 use asteria_common_core::{Library, MediaKind};
 use asteria_common_server::journal::{JournalCtx, open_journal};
 use asteria_common_server::{AppExtension, Cache, ScanLoop, spawn_scan_loop, spawn_writer};
+use corundum_framework::journal::Origin;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -231,6 +232,7 @@ async fn moved_file_sidecar_is_relinked() {
     e.writer
         .update(
             Actor::User(e.lib.owner()),
+            Origin::new("test"),
             MediaUpdateParams {
                 id,
                 rating: Some(5),

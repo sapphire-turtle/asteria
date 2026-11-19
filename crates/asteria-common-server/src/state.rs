@@ -96,8 +96,8 @@ impl AppState {
     /// Sets how long `organize.apply` and `organize.undo` wait for a batch before they
     /// answer `running`. For tests.
     #[doc(hidden)]
-    pub fn set_organize_wait(&self, wait: std::time::Duration) {
-        self.writer.set_organize_wait(wait);
+    pub fn set_write_wait(&self, wait: std::time::Duration) {
+        self.writer.set_write_wait(wait);
     }
     /// The verifier of the library's API keys.
     pub fn keys(&self) -> &Arc<KeyVerifier> {

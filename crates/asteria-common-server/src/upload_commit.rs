@@ -1090,7 +1090,11 @@ mod tests {
         };
         let updated = tokio::time::timeout(
             Duration::from_secs(5),
-            writer.update(Actor::User(me), update),
+            writer.update(
+                Actor::User(me),
+                corundum_framework::journal::Origin::new("test"),
+                update,
+            ),
         )
         .await;
         release.send(()).unwrap();

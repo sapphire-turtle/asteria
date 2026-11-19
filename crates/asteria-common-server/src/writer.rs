@@ -11,35 +11,33 @@
 //! (a connection task still holding the app state), [`Writer::close`] refuses new jobs and
 //! lets the task end after the queued ones.
 
-use std::collections::BTreeSet;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use asteria_common_api::{
-    ItemId, MediaUpdateParams, OpResult, RatingOp, RejectReason, UploadCommitParams,
-    UploadCommitResult,
+    MediaUpdateParams, OpResult, RatingOp, RejectReason, UploadCommitParams, UploadCommitResult,
 };
-use asteria_common_core::hash::{ContentHash, HashScope};
 use asteria_common_core::journal::Actor;
-use asteria_common_core::{Error as FwError, Library, UserId};
+use asteria_common_core::{Library, UserId};
 use chrono::{DateTime, Utc};
 use corundum_framework::journal::{
-    BatchId, BatchRecords, JournalError, OpKind as _, Origin, Planned as Op,
+    BatchId, BatchRecords, JournalError, OpKind as _, Origin, Outcome, Planned as Op, Skip,
 };
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::cache::{Cache, ItemRecord, SidecarSnapshot, StoredHash};
+use crate::cache::{Cache, ItemRecord};
 use crate::error::ServerError;
 use crate::ext::AppExtension;
 use crate::hashing::{RelinkReport, relink_orphans};
 use crate::journal::files::{self, OrganizeTidy, TidyMove, TidyPlan};
 use crate::journal::map::actor_of;
+use crate::journal::sidecar::{
+    Fields, Rate, RateDone, RatePlan, RatingAt, WriteSidecar, WriteSidecarPlan,
+};
 use crate::journal::{ServerJournal, auto_label, wait_up_to};
 use crate::organize::{self, Batch, OpCtx, Planned, Target};
-use crate::scan::mtime_ns;
 use crate::upload::{UploadError, UploadStore};
 use crate::upload_commit::{Begun, Prepared, place, prepare_sealed, seal_group};
 
@@ -77,23 +75,14 @@ pub type OpOutcome = (String, Result<(bool, ItemRecord), RejectReason>);
 type ExecFn = Box<dyn FnOnce(&Arc<Library>, &Arc<Cache>) + Send>;
 
 enum Job {
-    Update {
-        actor: Actor,
-        params: MediaUpdateParams,
-        reply: oneshot::Sender<Result<ItemRecord, WriteError>>,
-    },
-    Ops {
-        actor: Actor,
-        ops: Vec<RatingOp>,
-        reply: oneshot::Sender<Result<Vec<OpOutcome>, WriteError>>,
-    },
     Relink {
         reply: oneshot::Sender<Result<RelinkReport, WriteError>>,
     },
     /// The second phase of an upload commit; the first ran outside the queue.
     Place {
         store: Arc<UploadStore>,
-        prepared: Prepared,
+        /// Boxed: it is much larger than the other jobs.
+        prepared: Box<Prepared>,
         reply: oneshot::Sender<Result<UploadCommitResult, UploadError>>,
     },
     /// Any other piece of work; it reports through a channel of its own.
@@ -113,12 +102,13 @@ pub(crate) enum BatchKind {
 pub struct Writer {
     tx: mpsc::Sender<Job>,
     library: Arc<Library>,
+    cache: Arc<Cache>,
     /// Runs and records the batches.
     journal: ServerJournal,
     /// Turns for the first phase of upload commits (`COMMIT_PREPARE_JOBS`).
     prepare_permits: Arc<Semaphore>,
-    /// How long `organize` waits for a batch.
-    organize_wait: Arc<Mutex<Duration>>,
+    /// How long a batch may take to start (and `organize` waits for it to end).
+    write_wait: Arc<Mutex<Duration>>,
 }
 
 /// Starts the writer task, which hands its batches to `journal`. Must be called inside a
@@ -132,26 +122,15 @@ pub fn spawn_writer(
     let writer = Writer {
         tx,
         library: library.clone(),
+        cache: cache.clone(),
         journal,
         prepare_permits: Arc::new(Semaphore::new(COMMIT_PREPARE_JOBS)),
-        organize_wait: Arc::new(Mutex::new(APPLY_WAIT)),
+        write_wait: Arc::new(Mutex::new(APPLY_WAIT)),
     };
     let handle = tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
             let (lib, cache) = (library.clone(), cache.clone());
             match job {
-                Job::Update {
-                    actor,
-                    params,
-                    reply,
-                } => {
-                    let r = run_blocking(move || do_update(&lib, &cache, actor, params)).await;
-                    let _ = reply.send(r);
-                }
-                Job::Ops { actor, ops, reply } => {
-                    let r = run_blocking(move || do_ops(&lib, &cache, actor, ops)).await;
-                    let _ = reply.send(r);
-                }
                 Job::Relink { reply } => {
                     let r = run_blocking(move || {
                         relink_orphans(&lib, &cache).map_err(|e| {
@@ -167,7 +146,7 @@ pub fn spawn_writer(
                     prepared,
                     reply,
                 } => {
-                    let r = run_blocking(move || place(&lib, &cache, &store, prepared)).await;
+                    let r = run_blocking(move || place(&lib, &cache, &store, *prepared)).await;
                     let _ = reply.send(r);
                 }
                 Job::Exec(f) => {
@@ -235,41 +214,205 @@ fn stopped() -> WriteError {
 }
 
 impl Writer {
-    /// Applies `params` to an item's sidecar; the journal records `actor`, and the rating
-    /// is that of the user `actor` acts as.
+    /// Applies `params` to an item's sidecar as one batch, recorded as `actor` from `origin`:
+    /// a `write_sidecar` for the tags, description and label, then a `rate` for the rating
+    /// (that of the user `actor` acts as). A batch the queue has not started within the wait
+    /// (`set_write_wait`) is `Busy` and never runs (§4.3); once started, it is waited for.
     pub async fn update(
         &self,
         actor: Actor,
+        origin: Origin,
         params: MediaUpdateParams,
     ) -> Result<ItemRecord, WriteError> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(Job::Update {
-                actor,
-                params,
-                reply,
+        validate(&params)?;
+        let deadline = Instant::now() + self.write_wait();
+        let user = organize::actor_user(actor);
+        let at_ms = Utc::now().timestamp_millis();
+        let (rec, b) = self
+            .run_batch(actor, origin, deadline, move |cache| {
+                let rec = cache
+                    .get_by_id(&params.id)
+                    .map_err(internal)?
+                    .ok_or(WriteError::NotFound)?;
+                if let Some(e) = &rec.sidecar_error {
+                    return Err(WriteError::ReadOnly(e.clone()));
+                }
+                let mut plans = Vec::new();
+                let set = Fields {
+                    subjects: params.subjects.map(|v| v.into_iter().collect()),
+                    hierarchical_subjects: params
+                        .hierarchical_subjects
+                        .map(|v| v.into_iter().collect()),
+                    description: params.description,
+                    label: params.label,
+                };
+                if !set.is_empty() {
+                    plans.push(Op::new::<WriteSidecar>(&WriteSidecarPlan {
+                        path: rec.path.clone(),
+                        set,
+                        expect: None,
+                    }));
+                }
+                if let Some(value) = params.rating {
+                    plans.push(Op::new::<Rate>(&RatePlan {
+                        path: rec.path.clone(),
+                        user,
+                        rating: Some(RatingAt {
+                            value,
+                            at_ms: Some(at_ms),
+                        }),
+                        expect: None,
+                    }));
+                }
+                Ok((rec, plans))
             })
-            .await
-            .map_err(|_| stopped())?;
-        rx.await.map_err(|_| stopped())?
+            .await?;
+        let skipped = b
+            .iter()
+            .flat_map(|b| &b.ops)
+            .find_map(|o| match &o.outcome {
+                Outcome::Skipped(skip) => Some(skip.clone()),
+                Outcome::Done(_) => None,
+            });
+        let cache = self.cache.clone();
+        blocking(move || {
+            if let Some(skip) = skipped {
+                return Err(match skip {
+                    Skip::NotFound => WriteError::NotFound,
+                    Skip::InvalidPath => WriteError::InvalidPath(rec.path),
+                    // The reason the cache has now: never a server path.
+                    Skip::Denied => WriteError::ReadOnly(
+                        cache
+                            .get_by_path(&rec.path)
+                            .map_err(internal)?
+                            .and_then(|r| r.sidecar_error)
+                            .unwrap_or_else(|| "malformed sidecar".into()),
+                    ),
+                    Skip::Exists => WriteError::Busy("a sidecar write is under way".into()),
+                    Skip::InvalidPlan(m) => WriteError::Invalid(m),
+                    other => WriteError::Internal(other.to_string()),
+                });
+            }
+            cache
+                .get_by_id(&rec.id)
+                .map_err(internal)?
+                .ok_or(WriteError::NotFound)
+        })
+        .await
     }
 
-    /// Applies rating operations in order, each as the rating `media.update` would set but
-    /// at the operation's own time (never later than now), so the newest one wins. A
-    /// refused operation (including one whose sidecar cannot be written) does not stop the
-    /// others; only a failure of the whole call (the cache) fails it, and the client sends
+    /// Applies rating operations in order as one batch of `rate`s, recorded as `actor` from
+    /// `origin`: each as the rating `media.update` would set but at the operation's own time
+    /// (never later than now), so the newest one wins. A refused operation (including one
+    /// whose sidecar cannot be written) does not stop the others; only a failure of the whole
+    /// call (the cache, or `Busy` as in [`Writer::update`]) fails it, and the client sends
     /// the whole batch again (a rating applied twice changes nothing).
     pub async fn apply_ops(
         &self,
         actor: Actor,
+        origin: Origin,
         ops: Vec<RatingOp>,
     ) -> Result<Vec<OpOutcome>, WriteError> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(Job::Ops { actor, ops, reply })
-            .await
-            .map_err(|_| stopped())?;
-        rx.await.map_err(|_| stopped())?
+        let deadline = Instant::now() + self.write_wait();
+        let user = organize::actor_user(actor);
+        let now = Utc::now();
+        let (planned, b) = self
+            .run_batch(actor, origin, deadline, move |cache| {
+                // Per operation: its plan, or why it is refused already.
+                let planned = ops
+                    .into_iter()
+                    .map(|op| {
+                        let plan = match parse_rating_op(&op, now) {
+                            Err(reason) => Err(reason),
+                            Ok(at) => match cache.get_by_id(&op.item).map_err(internal)? {
+                                None => Err(RejectReason::NotFound),
+                                Some(rec) if rec.sidecar_error.is_some() => {
+                                    Err(RejectReason::ReadOnly)
+                                }
+                                Some(rec) => Ok(RatePlan {
+                                    path: rec.path,
+                                    user,
+                                    rating: Some(RatingAt {
+                                        value: op.value,
+                                        at_ms: Some(at.timestamp_millis()),
+                                    }),
+                                    expect: None,
+                                }),
+                            },
+                        };
+                        Ok((op, plan))
+                    })
+                    .collect::<Result<Vec<_>, WriteError>>()?;
+                let plans = planned
+                    .iter()
+                    .filter_map(|(_, p)| p.as_ref().ok().map(Op::new::<Rate>))
+                    .collect();
+                Ok((planned, plans))
+            })
+            .await?;
+        let mut records = b.map(|b| b.ops).unwrap_or_default().into_iter();
+        let cache = self.cache.clone();
+        blocking(move || {
+            planned
+                .into_iter()
+                .map(|(op, plan)| {
+                    let outcome = match plan {
+                        Err(reason) => Err(reason),
+                        Ok(_) => match records.next().map(|r| r.outcome) {
+                            Some(Outcome::Done(done)) => {
+                                let changed = serde_json::from_value::<RateDone>(done)
+                                    .is_ok_and(|d| d.before != d.after);
+                                match cache.get_by_id(&op.item).map_err(internal)? {
+                                    Some(rec) => Ok((changed, rec)),
+                                    None => Err(RejectReason::NotFound),
+                                }
+                            }
+                            Some(Outcome::Skipped(skip)) => Err(reject_of(&skip)),
+                            None => {
+                                return Err(WriteError::Internal(
+                                    "a rating has no record in its batch".into(),
+                                ));
+                            }
+                        },
+                    };
+                    Ok((op.id, outcome))
+                })
+                .collect()
+        })
+        .await
+    }
+
+    /// Plans with `plan` on the queue, then runs the plans as one batch, labelled by its
+    /// first kind, and waits for it to end; no batch when there is nothing to run. A batch
+    /// the queue has not started by `deadline` is `Busy` and never runs.
+    async fn run_batch<T: Send + 'static>(
+        &self,
+        actor: Actor,
+        origin: Origin,
+        deadline: Instant,
+        plan: impl FnOnce(&Arc<Cache>) -> Result<(T, Vec<Op>), WriteError> + Send + 'static,
+    ) -> Result<(T, Option<BatchRecords>), WriteError> {
+        let actor = actor_of(actor);
+        let (found, id) = self
+            .start_job(
+                deadline,
+                move |j, cache| {
+                    let (found, plans) = plan(cache)?;
+                    let Some(first) = plans.first() else {
+                        return Ok((found, None));
+                    };
+                    let label = auto_label(&first.kind, plans.len());
+                    Ok((found, Some(j.submit(plans, &origin, &actor, label)?)))
+                },
+                |_, _| {},
+            )
+            .await?;
+        let Some(id) = id else {
+            return Ok((found, None));
+        };
+        let journal = self.journal.clone();
+        let b = blocking(move || Ok(journal.wait(id)?)).await?;
+        Ok((found, Some(b)))
     }
 
     /// Stops accepting jobs: later calls on any clone fail with "writer stopped", jobs
@@ -294,13 +437,14 @@ impl Writer {
             .map_err(|_| WriteError::Internal("write job failed".into()))
     }
 
-    /// Sets how long [`Writer::organize`] waits for a batch (tests use a short one).
-    pub(crate) fn set_organize_wait(&self, wait: Duration) {
-        *self.organize_wait.lock().unwrap_or_else(|p| p.into_inner()) = wait;
+    /// Sets how long a batch may take to start, and how long [`Writer::organize`] waits for
+    /// it to end (`APPLY_WAIT`; tests use a short one).
+    pub(crate) fn set_write_wait(&self, wait: Duration) {
+        *self.write_wait.lock().unwrap_or_else(|p| p.into_inner()) = wait;
     }
 
-    fn organize_wait(&self) -> Duration {
-        *self.organize_wait.lock().unwrap_or_else(|p| p.into_inner())
+    fn write_wait(&self) -> Duration {
+        *self.write_wait.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Runs a batch of moves and trashes in the Journal, closed by an `organize_tidy`, as
@@ -309,7 +453,7 @@ impl Writer {
     /// operation on the queue and touches nothing. The operations update the cache, so the
     /// caller need not rescan.
     ///
-    /// A batch that is not over after the wait (`set_organize_wait`) is answered with
+    /// A batch that is not over after the wait (`set_write_wait`) is answered with
     /// `running: true` and no results; it goes on, and `organize.status` reads its outcome
     /// from the Journal. One the queue has not even started by then (the queue is busy with
     /// an earlier batch) is `Busy` and never runs, as `media.update` is (§4.3). A request
@@ -327,7 +471,7 @@ impl Writer {
         if let BatchKind::DryRun = kind {
             return self.run_dry(ops, ext).await;
         }
-        let deadline = Instant::now() + self.organize_wait();
+        let deadline = Instant::now() + self.write_wait();
         let mut indices = Vec::new();
         let mut early = Vec::new();
         let mut plans = Vec::new();
@@ -388,7 +532,7 @@ impl Writer {
         ext: Arc<dyn AppExtension>,
         dry_run: bool,
     ) -> Result<Batch, WriteError> {
-        let deadline = Instant::now() + self.organize_wait();
+        let deadline = Instant::now() + self.write_wait();
         let actor = actor_of(actor);
         let (journal, checking) = (self.journal.clone(), actor.clone());
         let target = tokio::task::spawn_blocking(move || {
@@ -423,22 +567,39 @@ impl Writer {
         start: impl FnOnce(&ServerJournal) -> Result<BatchId, JournalError> + Send + 'static,
         ended: impl FnOnce(&Arc<Library>, &BatchRecords) + Send + 'static,
     ) -> Result<BatchId, WriteError> {
+        let ((), id) = self
+            .start_job(deadline, move |j, _| Ok(((), Some(start(j)?))), ended)
+            .await?;
+        id.ok_or_else(|| WriteError::Internal("the batch did not start".into()))
+    }
+
+    /// [`Writer::start_batch`] for a `start` that plans on the queue, with the cache as it is
+    /// then, and may find nothing to run: it gives what it found, and the batch's id if any.
+    async fn start_job<T: Send + 'static>(
+        &self,
+        deadline: Instant,
+        start: impl FnOnce(&ServerJournal, &Arc<Cache>) -> Result<(T, Option<BatchId>), WriteError>
+        + Send
+        + 'static,
+        ended: impl FnOnce(&Arc<Library>, &BatchRecords) + Send + 'static,
+    ) -> Result<(T, Option<BatchId>), WriteError> {
         let (started, rx) = oneshot::channel();
         let journal = self.journal.clone();
         let claim = Arc::new(Claim::default());
         let queue_claim = claim.clone();
-        let job = Box::new(move |lib: &Arc<Library>, _: &Arc<Cache>| {
+        let job = Box::new(move |lib: &Arc<Library>, cache: &Arc<Cache>| {
             if !queue_claim.take(Claim::RUN) {
                 return;
             }
-            let id = match start(&journal) {
-                Ok(id) => id,
+            let (found, id) = match start(&journal, cache) {
+                Ok(v) => v,
                 Err(e) => {
                     let _ = started.send(Err(e));
                     return;
                 }
             };
-            let _ = started.send(Ok(id));
+            let _ = started.send(Ok((found, id)));
+            let Some(id) = id else { return };
             match journal.wait(id) {
                 Ok(b) => ended(lib, &b),
                 Err(e) => tracing::error!(error = %e, batch = %id, "a batch failed"),
@@ -457,8 +618,7 @@ impl Writer {
             Err(_) => rx.await,
         };
         // A dropped sender means the job panicked.
-        let started = started.map_err(|_| WriteError::Internal("write job failed".into()))?;
-        Ok(started?)
+        started.map_err(|_| WriteError::Internal("write job failed".into()))?
     }
 
     /// The answer for the batch `id`: its results by `report` if it ends by `deadline`,
@@ -565,27 +725,12 @@ impl Writer {
         self.tx
             .send(Job::Place {
                 store,
-                prepared,
+                prepared: Box::new(prepared),
                 reply,
             })
             .await
             .map_err(|_| upload_stopped())?;
         rx.await.map_err(|_| upload_stopped())?
-    }
-}
-
-fn map_fw(e: FwError) -> WriteError {
-    match e {
-        FwError::MediaNotFound(_) => WriteError::NotFound,
-        FwError::InvalidPath(p) => WriteError::InvalidPath(p.display().to_string()),
-        FwError::MalformedSidecar { reason, .. } => WriteError::ReadOnly(reason),
-        e @ FwError::TmpExists(_) => WriteError::Busy(e.to_string()),
-        e @ FwError::InvalidRating(_) => WriteError::Invalid(e.to_string()),
-        e @ FwError::UnsafeSidecarWrite(_) => {
-            tracing::error!(error = %e, "unsafe sidecar write refused");
-            WriteError::Internal(e.to_string())
-        }
-        e => WriteError::Internal(e.to_string()),
     }
 }
 
@@ -623,113 +768,6 @@ fn validate(params: &MediaUpdateParams) -> Result<(), WriteError> {
     Ok(())
 }
 
-type Stamp = (u64, i128);
-
-fn stat(path: &Path) -> Option<Stamp> {
-    std::fs::metadata(path)
-        .ok()
-        .map(|m| (m.len(), mtime_ns(&m)))
-}
-
-/// The cached hash, usable only if the file's current (size, mtime) equal the ones it was
-/// computed for.
-fn usable_hash(rec: &ItemRecord, now: Option<Stamp>) -> Option<(ContentHash, HashScope)> {
-    let h: &StoredHash = rec.hash.as_ref()?;
-    if now != Some((h.size, h.mtime_ns)) {
-        return None;
-    }
-    Some((h.hash.parse().ok()?, h.scope.parse().ok()?))
-}
-
-/// The cached whole-file hash, under the same freshness rule as [`usable_hash`].
-fn usable_file_hash(rec: &ItemRecord, now: Option<Stamp>) -> Option<ContentHash> {
-    let h: &StoredHash = rec.hash.as_ref()?;
-    if now != Some((h.size, h.mtime_ns)) {
-        return None;
-    }
-    h.file_hash.parse().ok()
-}
-
-fn do_update(
-    library: &Library,
-    cache: &Cache,
-    actor: Actor,
-    params: MediaUpdateParams,
-) -> Result<ItemRecord, WriteError> {
-    validate(&params)?;
-    let user = organize::actor_user(actor);
-    let id: ItemId = params.id.clone();
-    let rec = cache
-        .get_by_id(&id)
-        .map_err(internal)?
-        .ok_or(WriteError::NotFound)?;
-    if let Some(e) = &rec.sidecar_error {
-        return Err(WriteError::ReadOnly(e.clone()));
-    }
-    let rel = Path::new(&rec.path);
-    let stamp = stat(&library.root().join(rel));
-    let hash = usable_hash(&rec, stamp);
-    let file_hash = usable_file_hash(&rec, stamp);
-    let owner = library.owner();
-
-    // One closure: one sidecar write, one journal entry, no rehash when `hash` is set.
-    let written = library.update_sidecar(rel, actor, |sc| {
-        if sc.content_hash.is_none() {
-            sc.content_hash = hash;
-        }
-        sc.file_hash = file_hash;
-        if let Some(v) = params.subjects {
-            sc.subjects = v.into_iter().collect::<BTreeSet<_>>();
-        }
-        if let Some(v) = params.hierarchical_subjects {
-            sc.hierarchical_subjects = v.into_iter().collect::<BTreeSet<_>>();
-        }
-        if let Some(v) = params.description {
-            sc.description = v;
-        }
-        if let Some(v) = params.label {
-            sc.label = v;
-        }
-        if let Some(value) = params.rating {
-            // Range was validated above.
-            let _ = sc.apply_rating(owner, user, value, Utc::now());
-        }
-    });
-    let written = match written {
-        Err(e @ (FwError::MediaNotFound(_) | FwError::InvalidPath(_))) => return Err(map_fw(e)),
-        other => other,
-    };
-    // Refresh from disk after any write attempt, best effort.
-    if let Err(e) = refresh_cache(library, cache, &rec) {
-        tracing::warn!(error = %e, path = %rec.path, "cache refresh after write failed");
-    }
-    written.map_err(map_fw)?;
-    cache
-        .get_by_id(&id)
-        .map_err(internal)?
-        .ok_or(WriteError::NotFound)
-}
-
-fn do_ops(
-    library: &Library,
-    cache: &Cache,
-    actor: Actor,
-    ops: Vec<RatingOp>,
-) -> Result<Vec<OpOutcome>, WriteError> {
-    let user = organize::actor_user(actor);
-    let owner = library.owner();
-    let now = Utc::now();
-    ops.into_iter()
-        .map(|op| {
-            let outcome = match parse_rating_op(&op, now) {
-                Ok(at) => do_rating(library, cache, actor, owner, user, &op.item, op.value, at),
-                Err(reason) => Ok(Err(reason)),
-            };
-            outcome.map(|o| (op.id, o))
-        })
-        .collect()
-}
-
 /// The time of `op`, held back to `now`; or why the operation is invalid.
 fn parse_rating_op(op: &RatingOp, now: DateTime<Utc>) -> Result<DateTime<Utc>, RejectReason> {
     if !(-1..=5).contains(&op.value) {
@@ -739,76 +777,19 @@ fn parse_rating_op(op: &RatingOp, now: DateTime<Utc>) -> Result<DateTime<Utc>, R
     Ok(at.with_timezone(&Utc).min(now))
 }
 
-/// One rating, written like [`do_update`] writes one: a single sidecar write, hash fields
-/// set the same way. The outer error (the cache failed) fails the whole call; the inner one
-/// refuses this operation, as does a sidecar that cannot be written.
-#[allow(clippy::too_many_arguments)]
-fn do_rating(
-    library: &Library,
-    cache: &Cache,
-    actor: Actor,
-    owner: UserId,
-    user: UserId,
-    id: &ItemId,
-    value: i8,
-    at: DateTime<Utc>,
-) -> Result<Result<(bool, ItemRecord), RejectReason>, WriteError> {
-    let Some(rec) = cache.get_by_id(id).map_err(internal)? else {
-        return Ok(Err(RejectReason::NotFound));
-    };
-    if rec.sidecar_error.is_some() {
-        return Ok(Err(RejectReason::ReadOnly));
-    }
-    let rel = Path::new(&rec.path);
-    let stamp = stat(&library.root().join(rel));
-    let hash = usable_hash(&rec, stamp);
-    let file_hash = usable_file_hash(&rec, stamp);
-    let mut changed = false;
-    let written = library.update_sidecar(rel, actor, |sc| {
-        if sc.content_hash.is_none() {
-            sc.content_hash = hash;
-        }
-        sc.file_hash = file_hash;
-        // The value's range was checked before.
-        changed = sc.apply_rating(owner, user, value, at).unwrap_or(false);
-    });
-    if let Err(FwError::MediaNotFound(_)) = written {
-        return Ok(Err(RejectReason::NotFound));
-    }
-    if let Err(e) = refresh_cache(library, cache, &rec) {
-        tracing::warn!(error = %e, path = %rec.path, "cache refresh after write failed");
-    }
-    if let Err(e) = written {
-        // This item's sidecar cannot be written (broken since the scan, or an I/O error):
-        // the operation is refused, and the others still go.
-        match e {
-            FwError::UnsafeSidecarWrite(_) => {
-                tracing::error!(error = %e, path = %rec.path, "unsafe sidecar write refused");
-            }
-            _ => tracing::warn!(error = %e, path = %rec.path, "cannot write a rating"),
-        }
-        return Ok(Err(RejectReason::ReadOnly));
-    }
-    match cache.get_by_id(id).map_err(internal)? {
-        Some(rec) => Ok(Ok((changed, rec))),
-        None => Ok(Err(RejectReason::NotFound)),
+/// Why a `rate` the Journal skipped is refused: a sidecar that cannot be written makes the
+/// item read-only.
+fn reject_of(skip: &Skip) -> RejectReason {
+    match skip {
+        Skip::NotFound => RejectReason::NotFound,
+        Skip::InvalidPlan(_) => RejectReason::Invalid,
+        _ => RejectReason::ReadOnly,
     }
 }
 
-fn refresh_cache(library: &Library, cache: &Cache, rec: &ItemRecord) -> Result<(), ServerError> {
-    let rel = Path::new(&rec.path);
-    // The cache's StoredHash is filled only by hash_pending, never from the sidecar.
-    match library.read_sidecar(rel) {
-        Ok(Some(sc)) => {
-            cache.set_sidecar(&rec.path, SidecarSnapshot::from(&sc), None)?;
-        }
-        Ok(None) => {
-            cache.set_sidecar(&rec.path, SidecarSnapshot::default(), None)?;
-        }
-        Err(FwError::MalformedSidecar { reason, .. }) => {
-            cache.set_sidecar(&rec.path, rec.sidecar.clone(), Some(reason))?;
-        }
-        Err(e) => return Err(e.into()),
-    }
-    Ok(())
+/// Runs blocking work (the cache, the Journal) off the async threads.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, WriteError> + Send + 'static,
+) -> Result<T, WriteError> {
+    run_blocking(f).await
 }

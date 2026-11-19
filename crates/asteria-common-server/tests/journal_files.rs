@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use asteria_common_api::codes;
-use asteria_common_core::journal::Actor as CoreActor;
 use asteria_common_core::{Library, MediaKind};
 use asteria_common_server::journal::files::{
     Expect, Move, MoveDone, MovePlan, OrganizeTidy, TidyMove, TidyPlan, Trash, TrashPlan,
@@ -88,7 +87,7 @@ fn env_ext(ext: Arc<dyn AppExtension>) -> Env {
     let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
     fs::write(root.join("a.jpg"), "photo a").unwrap();
     fs::write(root.join("b.jpg"), "photo b").unwrap();
-    lib.update_sidecar(Path::new("a.jpg"), CoreActor::User(lib.owner()), |sc| {
+    lib.update_sidecar(Path::new("a.jpg"), |sc| {
         sc.subjects.insert("x".into());
     })
     .unwrap();

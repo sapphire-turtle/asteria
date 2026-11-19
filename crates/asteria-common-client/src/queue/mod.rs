@@ -862,7 +862,9 @@ impl Sender {
     }
 
     /// One `ops.apply`. Every answered operation is settled; one left unanswered, or a file
-    /// that cannot record the answers, is an `Err`, so the rest goes again after a wait.
+    /// that cannot record the answers, is an `Err`, so the rest goes again after a wait. So
+    /// is an error answer for the whole call, `BUSY` among them (a long batch holds the
+    /// server's writes): nothing is refused or noticed.
     fn apply(&mut self, batch: &[QueuedRating]) -> Result<(), ClientError> {
         let params = OpsApplyParams {
             ops: batch
@@ -907,7 +909,7 @@ impl Sender {
 
     /// One rating with `media.update`, for a server without `ops.apply`. An error answer
     /// refuses this rating (`NOT_FOUND`, `READ_ONLY` and `INVALID_PARAMS` as themselves, any
-    /// other as read-only); only a failed exchange is an `Err`.
+    /// other but `BUSY` as read-only); a `BUSY` answer and a failed exchange are an `Err`.
     fn update(&mut self, op: &QueuedRating) -> Result<(), ClientError> {
         let params = MediaUpdateParams {
             id: op.item.clone(),
@@ -925,6 +927,9 @@ impl Sender {
             Err(ClientError::Rpc { code, .. }) if code == codes::INVALID_PARAMS => {
                 Outcome::Rejected(RejectReason::Invalid)
             }
+            // The server's writes are held up (a long batch): this rating and the rest wait
+            // and go again.
+            Err(e @ ClientError::Rpc { code, .. }) if code == codes::BUSY => return Err(e),
             // The server answered for this item alone: refused, so the others still go.
             Err(ClientError::Rpc { code, message }) => {
                 tracing::warn!(code, %message, "the server refused a rating");

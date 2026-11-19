@@ -673,7 +673,7 @@ impl AppExtension for Gate {
 async fn a_long_batch_answers_running_then_status_finishes() {
     let gate = Arc::new(Gate::default());
     let e = common::env_ext(gate.clone());
-    e.state.set_organize_wait(Duration::from_millis(50));
+    e.state.set_write_wait(Duration::from_millis(50));
     gate.set(true);
     let v = apply(&e, vec![mv(&e, "a.jpg", "c.jpg")], false, None).await;
     assert_eq!(v["result"]["running"], true, "{v}");
@@ -706,7 +706,7 @@ async fn a_long_batch_answers_running_then_status_finishes() {
 async fn an_apply_that_cannot_start_in_time_is_busy_and_never_runs() {
     let gate = Arc::new(Gate::default());
     let e = common::env_ext(gate.clone());
-    e.state.set_organize_wait(Duration::from_millis(50));
+    e.state.set_write_wait(Duration::from_millis(50));
     gate.set(true);
     let first = apply(&e, vec![mv(&e, "a.jpg", "c.jpg")], false, None).await;
     assert_eq!(first["result"]["running"], true, "{first}");

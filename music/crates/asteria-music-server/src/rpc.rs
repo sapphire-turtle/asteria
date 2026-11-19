@@ -308,7 +308,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    use asteria_common_core::journal::Actor;
     use asteria_common_core::{Library, MediaKind};
     use asteria_common_server::{
         AppExtension, Cache, ExtContext, ThumbSource, hash_pending, item_id_for, scan,
@@ -560,7 +559,6 @@ mod tests {
                 owner,
                 4,
                 chrono::Utc::now(),
-                Actor::User(owner),
             )
             .unwrap();
         e.scan();

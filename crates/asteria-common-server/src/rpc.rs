@@ -288,7 +288,11 @@ async fn dispatch(
         }
         MEDIA_UPDATE => {
             let p: MediaUpdateParams = params(p)?;
-            let rec = state.writer().update(actor, p).await.map_err(write_err)?;
+            let rec = state
+                .writer()
+                .update(actor, origin, p)
+                .await
+                .map_err(write_err)?;
             to_value(media_item(rec, user, owner))
         }
         OPS_APPLY => {
@@ -301,7 +305,7 @@ async fn dispatch(
             }
             let outcomes = state
                 .writer()
-                .apply_ops(actor, p.ops)
+                .apply_ops(actor, origin, p.ops)
                 .await
                 .map_err(write_err)?;
             let results = outcomes

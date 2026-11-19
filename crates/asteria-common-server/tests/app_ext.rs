@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 use asteria_common_api::{RpcError, codes};
-use asteria_common_core::journal::Actor;
 use asteria_common_core::{Library, MediaKind};
 use asteria_common_server::{
     AppExtension, CACHE_SCHEMA, Cache, ExtContext, rpc_error, scan, scan_cancellable,
@@ -118,9 +117,8 @@ fn a_sidecar_only_change_does_not_extract() {
     let e = env();
     e.red("a.jpg");
     e.scan();
-    let owner = e.lib.owner();
     e.lib
-        .update_sidecar(Path::new("a.jpg"), Actor::User(owner), |sc| {
+        .update_sidecar(Path::new("a.jpg"), |sc| {
             sc.description = Some("hello".into());
         })
         .unwrap();
@@ -625,7 +623,7 @@ async fn finished_status(e: &common::Env, id: &str) -> Value {
 async fn a_slow_batch_returns_running_and_finishes() {
     let slow = Arc::new(Slow::default());
     let e = common::env_ext(slow.clone());
-    e.state.set_organize_wait(Duration::from_millis(100));
+    e.state.set_write_wait(Duration::from_millis(100));
     slow.close();
     let v = move_a_to_c(&e).await;
     let r = &v["result"];
@@ -662,7 +660,7 @@ async fn blocked_undo(e: &common::Env, slow: &Slow) -> (String, Value) {
     let of = first["result"]["batch_id"].as_str().unwrap().to_string();
 
     slow.close();
-    e.state.set_organize_wait(Duration::from_millis(100));
+    e.state.set_write_wait(Duration::from_millis(100));
     let v = common::call(
         &e.app,
         &e.owner_token,

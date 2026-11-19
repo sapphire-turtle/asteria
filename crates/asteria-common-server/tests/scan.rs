@@ -219,7 +219,6 @@ fn large_tree_scan_is_reasonable() {
 
 #[test]
 fn sidecar_only_edit_is_an_update() {
-    use asteria_common_core::journal::Actor;
     let e = env();
     red(&e.root.join("a.jpg"));
     run(&e);
@@ -231,9 +230,8 @@ fn sidecar_only_edit_is_an_update() {
             .sidecar
             .has_sidecar
     );
-    let owner = e.lib.owner();
     e.lib
-        .update_sidecar(Path::new("a.jpg"), Actor::User(owner), |sc| {
+        .update_sidecar(Path::new("a.jpg"), |sc| {
             sc.description = Some("hello".into());
         })
         .unwrap();

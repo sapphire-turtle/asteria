@@ -51,7 +51,7 @@ fn red(to: &Path) {
 fn rate(e: &Env, rel: &str, v: i8) {
     let owner = e.lib.owner();
     e.lib
-        .set_rating(Path::new(rel), owner, v, Utc::now(), Actor::User(owner))
+        .set_rating(Path::new(rel), owner, v, Utc::now())
         .unwrap();
 }
 

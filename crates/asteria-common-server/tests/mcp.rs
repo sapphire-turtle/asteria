@@ -2,7 +2,6 @@
 
 mod common;
 
-use asteria_common_core::journal::{JournalEntry, OpKind};
 use asteria_common_server::router_with_shutdown;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -48,18 +47,6 @@ fn text(r: &CallToolResult) -> &str {
 fn ok_json(r: &CallToolResult) -> Value {
     assert_ne!(r.is_error, Some(true), "tool error: {}", text(r));
     serde_json::from_str(text(r)).unwrap()
-}
-
-fn journal(e: &Env) -> Vec<JournalEntry> {
-    e.lib.journal().unwrap().read_all().unwrap()
-}
-
-fn actor(entry: &JournalEntry) -> Value {
-    serde_json::to_value(entry.actor).unwrap()
-}
-
-fn agent(e: &Env) -> Value {
-    json!({"agent": e.lib.owner().to_string()})
 }
 
 /// The batches of the corundum journal, newest first.
@@ -108,14 +95,13 @@ async fn media_update_is_recorded_as_the_agent() {
     assert_eq!(ok_json(&r)["rating"], 4);
     let got = call(&e.app, &e.owner_token, "media.get", json!({"id": id})).await;
     assert_eq!(got["result"]["rating"], 4);
-    let last_write = |e: &Env| {
-        journal(e)
-            .into_iter()
-            .rev()
-            .find(|l| l.kind == OpKind::WriteSidecar)
-            .unwrap()
-    };
-    assert_eq!(actor(&last_write(&e)), agent(&e));
+    let last = &batches(&e)[0].begin;
+    assert_eq!(last.actor, agent_actor(&e));
+    assert!(
+        last.origin.as_str().starts_with("mcp:"),
+        "{:?}",
+        last.origin
+    );
 
     call(
         &e.app,
@@ -124,9 +110,12 @@ async fn media_update_is_recorded_as_the_agent() {
         json!({"id": id, "rating": 4}),
     )
     .await;
-    assert_eq!(
-        actor(&last_write(&e)),
-        json!({"user": e.lib.owner().to_string()})
+    let last = &batches(&e)[0].begin;
+    assert_eq!(last.actor, Actor::person(e.lib.owner().to_string()));
+    assert!(
+        last.origin.as_str().starts_with("key:"),
+        "{:?}",
+        last.origin
     );
     client.cancel().await.unwrap();
 }
@@ -147,12 +136,7 @@ async fn media_update_with_another_key_acts_for_the_owner() {
     };
     assert_eq!(rating(&e.other_token).await, 2);
     assert_eq!(rating(&e.owner_token).await, 2);
-    let write = journal(&e)
-        .into_iter()
-        .rev()
-        .find(|l| l.kind == OpKind::WriteSidecar)
-        .unwrap();
-    assert_eq!(actor(&write), agent(&e));
+    assert_eq!(batches(&e)[0].begin.actor, agent_actor(&e));
     client.cancel().await.unwrap();
 }
 

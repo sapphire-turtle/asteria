@@ -867,7 +867,7 @@ mod tests {
             let cache = Cache::open(&dir.path().join("c"), &lib.config().id).unwrap();
             std::fs::write(root.join("a.jpg"), "photo a").unwrap();
             std::fs::write(root.join("b.jpg"), "photo b").unwrap();
-            lib.update_sidecar(Path::new("a.jpg"), Actor::User(lib.owner()), |sc| {
+            lib.update_sidecar(Path::new("a.jpg"), |sc| {
                 sc.subjects.insert("x".into());
             })
             .unwrap();
