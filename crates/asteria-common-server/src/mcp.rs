@@ -10,8 +10,8 @@ use asteria_common_api::{
     ORGANIZE_APPLY, ORGANIZE_HISTORY, ORGANIZE_STATUS, ORGANIZE_UNDO, SERVER_INFO, UPLOAD_ABORT,
     UPLOAD_BEGIN, UPLOAD_CHECK, UPLOAD_COMMIT, UPLOAD_STATUS,
 };
+use asteria_common_core::Actor;
 use asteria_common_core::UserId;
-use asteria_common_core::journal::Actor;
 use axum::http::request::Parts;
 use base64::Engine as _;
 use corundum_framework::journal::Origin;

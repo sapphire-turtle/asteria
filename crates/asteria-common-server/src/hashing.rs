@@ -9,8 +9,8 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use asteria_common_core::Actor;
 use asteria_common_core::hash::{ContentHash, HashScope, content_hash, file_hash};
-use asteria_common_core::journal::Actor;
 use asteria_common_core::paths::{is_sidecar, media_path_for_sidecar, sidecar_path_for};
 use asteria_common_core::{Error as FwError, Library, Sidecar};
 use corundum_framework::journal::{OpKind as _, Outcome, Planned, Skip};

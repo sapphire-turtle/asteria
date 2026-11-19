@@ -16,8 +16,8 @@ use asteria_common_api::{
     BatchSummary, ItemId, MAX_LABEL_CHARS, MAX_OPS, OpResult, OpStatus, OrganizeAction,
     OrganizeHistory, OrganizeOp, OrganizeStatus, RpcError, SkipReason, codes,
 };
+use asteria_common_core::Actor;
 use asteria_common_core::hash::file_hash;
-use asteria_common_core::journal::{Actor, OpId};
 use asteria_common_core::paths::{META_DIR, TRASH_DIR, sidecar_path_for, trash_rel};
 use asteria_common_core::upload_path::validate_inbox_path;
 use asteria_common_core::{Error as FwError, Library, classify};
@@ -318,7 +318,7 @@ pub(crate) fn apply(ctx: &OpCtx, op: &PlannedOp) -> Result<Done, SkipReason> {
     let tag = GrainId::random();
     let to = match &op.to {
         Target::Path(p) => p.clone(),
-        Target::Trash(id) => trash_rel(&OpId(*id), &op.from),
+        Target::Trash(id) => trash_rel(&id.to_string(), &op.from),
     };
     let from_abs = root.join(&op.from);
     let to_abs = root.join(&to);

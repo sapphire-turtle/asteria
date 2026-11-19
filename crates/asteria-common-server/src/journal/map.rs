@@ -1,8 +1,8 @@
 //! Between asteria's types and corundum's journal: actors, origins, skips and errors.
 
 use asteria_common_api::{RpcError, SkipReason, codes};
+use asteria_common_core::Actor as CoreActor;
 use asteria_common_core::UserId;
-use asteria_common_core::journal::Actor as CoreActor;
 use corundum_framework::journal::{Actor, JournalError, Origin, Skip};
 use corundum_framework::keys::KeyId;
 

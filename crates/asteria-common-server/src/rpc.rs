@@ -14,9 +14,9 @@ use asteria_common_api::{
     UPLOAD_STATUS, UploadBeginParams, UploadCheckParams, UploadCheckResult, UploadCommitParams,
     UploadCommitResult, UploadSessionParams, codes,
 };
+use asteria_common_core::Actor;
 use asteria_common_core::UserId;
 use asteria_common_core::hash::ContentHash;
-use asteria_common_core::journal::Actor;
 use axum::Extension;
 use axum::Json;
 use axum::body::Bytes;

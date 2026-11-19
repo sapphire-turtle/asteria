@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use asteria_common_api::{ItemId, MediaUpdateParams, OpKind as RatingKind, RatingOp};
-use asteria_common_core::journal::Actor as CoreActor;
+use asteria_common_core::Actor as CoreActor;
 use asteria_common_core::{Library, MediaKind};
 use asteria_common_server::journal::sidecar::{Rate, RateDone, RatePlan, RatingAt};
 use asteria_common_server::journal::{JournalCtx, ServerJournal, open_journal};

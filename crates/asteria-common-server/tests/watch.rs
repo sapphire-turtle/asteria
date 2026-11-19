@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use asteria_common_api::MediaUpdateParams;
-use asteria_common_core::journal::Actor;
+use asteria_common_core::Actor;
 use asteria_common_core::{Library, MediaKind};
 use asteria_common_server::journal::{JournalCtx, open_journal};
 use asteria_common_server::{AppExtension, Cache, ScanLoop, spawn_scan_loop, spawn_writer};

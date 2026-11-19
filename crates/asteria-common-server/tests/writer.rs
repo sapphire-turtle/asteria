@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use asteria_common_api::{ItemId, MediaUpdateParams, codes};
-use asteria_common_core::journal::Actor;
+use asteria_common_core::Actor;
 use asteria_common_core::{Library, MediaKind, UserId};
 use asteria_common_server::journal::{JournalCtx, ServerJournal, open_journal};
 use asteria_common_server::{

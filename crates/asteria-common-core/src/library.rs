@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::fsutil::atomic_write;
 use crate::ids::{LibraryId, UserId};
-use crate::journal::{JOURNAL_DIR, Journal};
 use crate::paths::META_DIR;
 
 const FORMAT: u32 = 1;
@@ -163,8 +162,7 @@ impl Library {
         self.users.user.iter().find(|u| u.name == name)
     }
 
-    /// Sets the directory this instance keeps its own state in. Writes that journal (sidecar
-    /// updates) fail with [`Error::NoStateDir`] until it is set.
+    /// Sets the directory this instance keeps its own state in.
     pub fn with_state_dir(mut self, dir: impl Into<PathBuf>) -> Library {
         self.state_dir = Some(dir.into());
         self
@@ -172,12 +170,5 @@ impl Library {
 
     pub fn state_dir(&self) -> Option<&Path> {
         self.state_dir.as_deref()
-    }
-
-    /// This instance's old-format journal, `<state dir>/journal-v1/`; corundum's own journal
-    /// is `<state dir>/journal/`.
-    pub fn journal(&self) -> Result<Journal> {
-        let dir = self.state_dir.as_ref().ok_or(Error::NoStateDir)?;
-        Ok(Journal::new(dir.join(JOURNAL_DIR)))
     }
 }

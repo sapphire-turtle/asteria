@@ -17,7 +17,7 @@ use std::time::Duration;
 use asteria_common_api::{
     MediaUpdateParams, OpResult, RatingOp, RejectReason, UploadCommitParams, UploadCommitResult,
 };
-use asteria_common_core::journal::Actor;
+use asteria_common_core::Actor;
 use asteria_common_core::{Library, UserId};
 use chrono::{DateTime, Utc};
 use corundum_framework::journal::{

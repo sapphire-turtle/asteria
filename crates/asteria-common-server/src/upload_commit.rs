@@ -19,9 +19,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use asteria_common_api::{PlacedFile, UploadCommitParams, UploadCommitResult, UploadWarning};
+use asteria_common_core::Actor;
 use asteria_common_core::fsutil::tmp_path_for;
 use asteria_common_core::hash::{ContentHash, HashOutcome, HashScope, content_hash, file_hash};
-use asteria_common_core::journal::Actor;
 use asteria_common_core::paths::{media_path_for_sidecar, sidecar_path_for};
 use asteria_common_core::upload_path::validate_inbox_path;
 use asteria_common_core::{Error as FwError, Library, Sidecar, UserId};

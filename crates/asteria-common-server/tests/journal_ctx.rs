@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use asteria_common_api::{SkipReason, codes};
-use asteria_common_core::journal::Actor;
+use asteria_common_core::Actor;
 use asteria_common_core::{Library, UserId};
 use asteria_common_server::Cache;
 use asteria_common_server::journal::map::{
