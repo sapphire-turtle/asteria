@@ -28,6 +28,7 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant is unmaintained as a standalone crate (merged into zbus 6). Reached via eframe > egui-winit > accesskit_winit > accesskit_unix (Linux screen reader support), whose latest release still pins zbus ^5.19 and atspi ^0.29. Drop when accesskit_unix moves to zbus 6." },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names is unmaintained as a standalone crate (merged into zbus 6). Same path and reason as RUSTSEC-2026-0370." },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is unmaintained as a standalone crate (merged into zbus 6). Same path and reason as RUSTSEC-2026-0370." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, with no vulnerability. asteria-common-core, -server, -client and music-server use it for timestamps; moving to jiff is its own change. Drop when that lands." },
 ]
 
 [licenses]
