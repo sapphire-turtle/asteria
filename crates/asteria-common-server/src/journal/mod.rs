@@ -28,9 +28,6 @@ pub struct JournalCtx {
 
 pub type ServerJournal = Journal<JournalCtx>;
 
-/// How many of an origin's newest batches can be undone.
-const UNDO_BATCHES: usize = 1000;
-
 /// How often `wait_up_to` looks at the batch.
 const POLL: Duration = Duration::from_millis(50);
 
@@ -48,14 +45,19 @@ pub fn open_journal(ctx: JournalCtx, clock: Option<Clock>) -> Result<ServerJourn
     let mut registry = Registry::new();
     register_all(&mut registry, ctx.ext.as_ref());
     let config = JournalConfig {
-        policy: UndoPolicy {
-            max_batches: UNDO_BATCHES,
-            max_age: UNDO_WINDOW,
-        },
+        policy: undo_policy(),
         now,
         ..JournalConfig::default()
     };
     Ok(Journal::new(registry, ctx, store, config))
+}
+
+/// How far back undo reaches: the 30-day window, with no limit on the count.
+pub(crate) fn undo_policy() -> UndoPolicy {
+    UndoPolicy {
+        max_batches: usize::MAX,
+        max_age: UNDO_WINDOW,
+    }
 }
 
 /// Registers every operation the server runs; each task adds its own.
@@ -84,5 +86,17 @@ pub async fn wait_up_to<C: Send + Sync + 'static>(
             return Ok(None);
         }
         tokio::time::sleep(POLL.min(left)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_undo_policy_is_the_window_with_no_count_limit() {
+        let p = undo_policy();
+        assert_eq!(p.max_batches, usize::MAX);
+        assert_eq!(p.max_age, UNDO_WINDOW);
     }
 }

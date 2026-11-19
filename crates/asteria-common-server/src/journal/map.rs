@@ -39,6 +39,7 @@ pub fn origin_scan() -> Origin {
     Origin::new("scan")
 }
 
+/// `Io` gets a fixed message, because `SkipReason` carries no text.
 pub fn skip_of(r: SkipReason) -> Skip {
     match r {
         SkipReason::Missing => Skip::NotFound,
