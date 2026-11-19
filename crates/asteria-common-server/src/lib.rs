@@ -11,6 +11,7 @@ pub mod ext;
 mod fsutil;
 pub mod hashing;
 mod inprocess_image;
+pub mod journal;
 pub mod local;
 mod mcp;
 mod media_http;
