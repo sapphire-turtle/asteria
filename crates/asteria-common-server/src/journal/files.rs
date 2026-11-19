@@ -789,8 +789,6 @@ mod tests {
         })
     }
 
-    /// A batch that stops after its second of three moves, as a crash would leave it, is
-    /// listed as not complete once the store is opened again, and its done moves undo.
     #[test]
     fn a_tidy_plan_recorded_before_request_indices_still_loads() {
         let user = UserId(GrainId::random());
@@ -800,6 +798,8 @@ mod tests {
         assert_eq!(plan.moves.len(), 1);
     }
 
+    /// A batch that stops after its second of three moves, as a crash would leave it, is
+    /// listed as not complete once the store is opened again, and its done moves undo.
     #[test]
     fn an_interrupted_batch_is_listed_and_undoable() {
         let dir = tempfile::tempdir().unwrap();
