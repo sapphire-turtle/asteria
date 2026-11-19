@@ -1,12 +1,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
-use asteria_common_core::journal::{Actor, OpKind};
 use asteria_common_core::{Library, MediaKind};
+use asteria_common_server::journal::{JournalCtx, ServerJournal, open_journal};
 use asteria_common_server::{AppExtension, Cache, hash_pending, relink_orphans, scan};
 use chrono::Utc;
+use corundum_framework::journal::{Actor, BatchRecords, Origin, Outcome};
 
 struct Photos;
 impl AppExtension for Photos {
@@ -24,24 +26,53 @@ fn fixture(name: &str) -> PathBuf {
 struct Env {
     _dir: tempfile::TempDir,
     root: PathBuf,
-    lib: Library,
-    cache: Cache,
+    lib: Arc<Library>,
+    cache: Arc<Cache>,
+    journal: ServerJournal,
 }
 
 fn env() -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("lib");
     fs::create_dir(&root).unwrap();
-    let lib = Library::init(&root, "owner")
-        .unwrap()
-        .with_state_dir(dir.path().join("state"));
-    let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
+    let lib = Arc::new(
+        Library::init(&root, "owner")
+            .unwrap()
+            .with_state_dir(dir.path().join("state")),
+    );
+    let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
+    let journal = open_journal(
+        JournalCtx {
+            library: lib.clone(),
+            cache: cache.clone(),
+            ext: Arc::new(Photos),
+        },
+        None,
+    )
+    .unwrap();
     Env {
         _dir: dir,
         root,
         lib,
         cache,
+        journal,
     }
+}
+
+/// The relink batches, oldest first, with their operations.
+fn relink_batches(e: &Env) -> Vec<BatchRecords> {
+    let mut out: Vec<BatchRecords> = e
+        .journal
+        .history(None, 1000)
+        .unwrap()
+        .into_iter()
+        .map(|s| e.journal.status(s.begin.batch_id).unwrap())
+        .filter(|b| {
+            !b.summary.begin.is_compensation() && b.ops.iter().any(|o| o.kind == "relink_sidecar")
+        })
+        .collect();
+    out.reverse();
+    out
 }
 
 fn red(to: &Path) {
@@ -151,7 +182,7 @@ fn relinks_unique_match() {
     scan_all(&e);
     hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
 
-    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache, &e.journal).unwrap();
     assert_eq!(
         r.relinked,
         vec![("red.jpg.xmp".to_string(), "sub/renamed.jpg".to_string())]
@@ -169,20 +200,64 @@ fn relinks_unique_match() {
     assert!(rec.sidecar.has_sidecar);
     assert_eq!(rec.sidecar.owner_rating, Some(4));
 
-    let entries: Vec<_> = e
-        .lib
-        .journal()
-        .unwrap()
-        .read_all()
-        .unwrap()
-        .into_iter()
-        .filter(|j| j.kind == OpKind::RelinkSidecar)
-        .collect();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].before["path"], "red.jpg.xmp");
-    assert_eq!(entries[0].after["path"], "sub/renamed.jpg.xmp");
-    assert_eq!(entries[0].actor, Actor::User(e.lib.owner()));
-    assert!(entries[0].plan_id.is_none());
+    // One batch from the scan, by the owner as a person.
+    let batches = relink_batches(&e);
+    assert_eq!(batches.len(), 1);
+    let b = &batches[0];
+    assert_eq!(b.summary.begin.origin, Origin::new("scan"));
+    assert_eq!(
+        b.summary.begin.actor,
+        Actor::person(e.lib.owner().to_string())
+    );
+    assert_eq!(b.summary.begin.label.as_deref(), Some("Relink 1 sidecars"));
+    assert_eq!(b.ops.len(), 1);
+    let want = serde_json::json!({"from": "red.jpg.xmp", "to": "sub/renamed.jpg.xmp"});
+    assert_eq!(b.ops[0].plan, want);
+    assert_eq!(b.ops[0].outcome, Outcome::Done(want));
+}
+
+/// Undoing a relink moves the sidecar back where it was; the item it left has none again.
+#[test]
+fn a_relink_can_be_undone() {
+    let e = env();
+    red(&e.root.join("red.jpg"));
+    rate(&e, "red.jpg", 4);
+    fs::rename(e.root.join("red.jpg"), e.root.join("renamed.jpg")).unwrap();
+    scan_all(&e);
+    hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache, &e.journal).unwrap();
+    assert_eq!(r.relinked.len(), 1);
+
+    let id = relink_batches(&e)[0].summary.begin.batch_id;
+    let owner = Actor::person(e.lib.owner().to_string());
+    let u = e
+        .journal
+        .undo_batch(id, &Origin::new("scan"), &owner)
+        .unwrap();
+    let undone = e.journal.wait(u).unwrap();
+    assert_eq!(undone.summary.done, 1, "{undone:?}");
+    assert_eq!(
+        undone.ops[0].outcome,
+        Outcome::Done(serde_json::json!({"from": "renamed.jpg.xmp", "to": "red.jpg.xmp"}))
+    );
+    assert!(e.root.join("red.jpg.xmp").exists());
+    assert!(!e.root.join("renamed.jpg.xmp").exists());
+    let rec = e.cache.get_by_path("renamed.jpg").unwrap().unwrap();
+    assert!(!rec.sidecar.has_sidecar);
+    assert_eq!(rec.sidecar.owner_rating, None);
+
+    // A sidecar in the way: the redo is skipped as a move would be.
+    fs::write(e.root.join("renamed.jpg.xmp"), "someone else's").unwrap();
+    let r = e
+        .journal
+        .undo_batch(u, &Origin::new("scan"), &owner)
+        .unwrap();
+    let redone = e.journal.wait(r).unwrap();
+    assert_eq!(
+        redone.ops[0].outcome,
+        Outcome::Skipped(corundum_framework::journal::Skip::Exists)
+    );
+    assert!(e.root.join("red.jpg.xmp").exists());
 }
 
 #[test]
@@ -194,7 +269,7 @@ fn ambiguous_match_is_not_moved() {
     red(&e.root.join("two.jpg"));
     scan_all(&e);
     hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
-    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache, &e.journal).unwrap();
     assert!(r.relinked.is_empty());
     assert_eq!(r.ambiguous, vec!["red.jpg.xmp".to_string()]);
     assert!(e.root.join("red.jpg.xmp").exists());
@@ -211,7 +286,7 @@ fn unmatched_and_malformed_are_not_moved() {
     fs::write(e.root.join("other.jpg"), b"not an image at all").unwrap();
     scan_all(&e);
     hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
-    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache, &e.journal).unwrap();
     assert!(r.relinked.is_empty() && r.ambiguous.is_empty());
     let mut u = r.unmatched.clone();
     u.sort();
@@ -230,7 +305,7 @@ fn target_with_existing_sidecar_is_not_overwritten() {
     fs::write(e.root.join("new.jpg.xmp"), b"existing").unwrap();
     scan_all(&e);
     hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
-    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache, &e.journal).unwrap();
     assert!(r.relinked.is_empty() && r.ambiguous.is_empty() && r.unmatched.is_empty());
     assert_eq!(r.conflicts, vec!["red.jpg.xmp".to_string()]);
     assert_eq!(fs::read(e.root.join("new.jpg.xmp")).unwrap(), b"existing");
@@ -244,7 +319,7 @@ fn hidden_and_meta_dirs_are_ignored() {
     fs::write(e.root.join(".hidden/x.jpg.xmp"), b"x").unwrap();
     fs::write(e.root.join(".asteria/y.jpg.xmp"), b"x").unwrap();
     scan_all(&e);
-    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache, &e.journal).unwrap();
     assert!(r.relinked.is_empty() && r.ambiguous.is_empty() && r.unmatched.is_empty());
 }
 
@@ -257,7 +332,7 @@ fn two_orphans_one_target_are_both_ambiguous() {
     fs::rename(e.root.join("a.jpg"), e.root.join("new.jpg")).unwrap();
     scan_all(&e);
     hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
-    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache, &e.journal).unwrap();
     assert!(r.relinked.is_empty() && r.conflicts.is_empty());
     let mut a = r.ambiguous.clone();
     a.sort();
@@ -281,7 +356,7 @@ fn target_modified_after_hashing_is_not_moved() {
     f.set_modified(SystemTime::now() + Duration::from_secs(100))
         .unwrap();
     drop(f);
-    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache, &e.journal).unwrap();
     assert!(r.relinked.is_empty());
     assert_eq!(r.conflicts, vec!["red.jpg.xmp".to_string()]);
     assert!(e.root.join("red.jpg.xmp").exists());
@@ -299,23 +374,16 @@ fn interrupted_relink_is_completed() {
     fs::hard_link(e.root.join("red.jpg.xmp"), e.root.join("new.jpg.xmp")).unwrap();
     scan_all(&e);
     hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
-    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache, &e.journal).unwrap();
     assert_eq!(
         r.relinked,
         vec![("red.jpg.xmp".to_string(), "new.jpg".to_string())]
     );
     assert!(!e.root.join("red.jpg.xmp").exists());
     assert!(e.root.join("new.jpg.xmp").exists());
-    let n = e
-        .lib
-        .journal()
-        .unwrap()
-        .read_all()
-        .unwrap()
-        .iter()
-        .filter(|j| j.kind == OpKind::RelinkSidecar)
-        .count();
-    assert_eq!(n, 1);
+    let batches = relink_batches(&e);
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].summary.done, 1);
 }
 
 struct Music;
@@ -367,7 +435,7 @@ fn duplicate_with_sidecar_is_not_a_candidate() {
     scan_music(&e);
     hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
 
-    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache, &e.journal).unwrap();
     assert_eq!(
         r.relinked,
         vec![("a/x.flac.xmp".to_string(), "c/x.flac".to_string())]
@@ -387,7 +455,7 @@ fn file_hash_breaks_the_tie() {
     scan_music(&e);
     hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
 
-    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache, &e.journal).unwrap();
     assert_eq!(
         r.relinked,
         vec![("b/x.flac.xmp".to_string(), "c/x.flac".to_string())]
@@ -404,7 +472,7 @@ fn identical_copies_stay_ambiguous() {
     flac(&e.root.join("c/x.flac"));
     scan_music(&e);
     hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
-    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache, &e.journal).unwrap();
     assert!(r.relinked.is_empty());
     assert_eq!(r.ambiguous, vec!["a/x.flac.xmp".to_string()]);
     assert!(e.root.join("a/x.flac.xmp").exists());
@@ -426,7 +494,7 @@ fn no_file_hash_falls_back_to_ambiguous() {
     flac_titled(&e.root.join("c/x.flac"), "other");
     scan_music(&e);
     hash_pending(&e.lib, &e.cache, &no_cancel()).unwrap();
-    let r = relink_orphans(&e.lib, &e.cache).unwrap();
+    let r = relink_orphans(&e.lib, &e.cache, &e.journal).unwrap();
     assert!(r.relinked.is_empty());
     assert_eq!(r.ambiguous, vec!["a/x.flac.xmp".to_string()]);
 }

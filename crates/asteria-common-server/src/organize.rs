@@ -852,8 +852,8 @@ mod tests {
 
     struct Env {
         _dir: tempfile::TempDir,
-        lib: Library,
-        cache: Cache,
+        lib: std::sync::Arc<Library>,
+        cache: std::sync::Arc<Cache>,
     }
 
     impl Env {
@@ -874,8 +874,8 @@ mod tests {
             scan(&lib, &cache, &All).unwrap();
             Env {
                 _dir: dir,
-                lib,
-                cache,
+                lib: std::sync::Arc::new(lib),
+                cache: std::sync::Arc::new(cache),
             }
         }
 
@@ -1119,7 +1119,16 @@ mod tests {
         assert!(e.path("a.jpg.xmp").exists() && !e.path("sub/c.jpg.xmp").exists());
         scan(&e.lib, &e.cache, &All).unwrap();
         crate::hashing::hash_pending(&e.lib, &e.cache, &Default::default()).unwrap();
-        relink_orphans(&e.lib, &e.cache).unwrap();
+        let journal = crate::journal::open_journal(
+            crate::journal::JournalCtx {
+                library: e.lib.clone(),
+                cache: e.cache.clone(),
+                ext: std::sync::Arc::new(All),
+            },
+            None,
+        )
+        .unwrap();
+        relink_orphans(&e.lib, &e.cache, &journal).unwrap();
         assert!(e.path("sub/c.jpg.xmp").exists() && !e.path("a.jpg.xmp").exists());
     }
 

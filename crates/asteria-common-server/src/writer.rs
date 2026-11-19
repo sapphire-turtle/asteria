@@ -1,9 +1,9 @@
 //! The single per-library write queue. Every write to original files (sidecar edits,
 //! orphan relinks, placing upload commits and organize batches) goes through one task that
 //! runs jobs one at a time on the blocking pool, then refreshes the cache. An upload commit
-//! hashes and stages its files before it joins the queue (see [`crate::upload_commit`]). An
-//! organize job hands its batch to the Journal and waits for it to end, so the jobs behind it
-//! wait too (§4.3).
+//! hashes and stages its files before it joins the queue (see [`crate::upload_commit`]). Each
+//! job hands its batch to the Journal and waits for it to end, so the jobs behind it wait too
+//! (§4.3).
 //!
 //! Shutdown: [`spawn_writer`] returns the [`Writer`] and the task's `JoinHandle`. Once
 //! every `Writer` clone is dropped the task finishes the queued jobs and ends, so
@@ -83,6 +83,7 @@ enum Job {
         store: Arc<UploadStore>,
         /// Boxed: it is much larger than the other jobs.
         prepared: Box<Prepared>,
+        origin: Origin,
         reply: oneshot::Sender<Result<UploadCommitResult, UploadError>>,
     },
     /// Any other piece of work; it reports through a channel of its own.
@@ -119,6 +120,7 @@ pub fn spawn_writer(
     journal: ServerJournal,
 ) -> (Writer, JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<Job>(QUEUE);
+    let queue_journal = journal.clone();
     let writer = Writer {
         tx,
         library: library.clone(),
@@ -129,11 +131,11 @@ pub fn spawn_writer(
     };
     let handle = tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let (lib, cache) = (library.clone(), cache.clone());
+            let (lib, cache, journal) = (library.clone(), cache.clone(), queue_journal.clone());
             match job {
                 Job::Relink { reply } => {
                     let r = run_blocking(move || {
-                        relink_orphans(&lib, &cache).map_err(|e| {
+                        relink_orphans(&lib, &cache, &journal).map_err(|e| {
                             tracing::error!(error = %e, "relink failed");
                             WriteError::Internal(e.to_string())
                         })
@@ -144,9 +146,13 @@ pub fn spawn_writer(
                 Job::Place {
                     store,
                     prepared,
+                    origin,
                     reply,
                 } => {
-                    let r = run_blocking(move || place(&lib, &cache, &store, *prepared)).await;
+                    let r = run_blocking(move || {
+                        place(&lib, &cache, &journal, &store, &origin, *prepared)
+                    })
+                    .await;
                     let _ = reply.send(r);
                 }
                 Job::Exec(f) => {
@@ -666,6 +672,8 @@ impl Writer {
         })
     }
 
+    /// Moves orphaned sidecars to their items (see [`crate::hashing::relink_orphans`]): one
+    /// batch from the scan, which this job waits for.
     pub async fn relink_orphans(&self) -> Result<RelinkReport, WriteError> {
         let (reply, rx) = oneshot::channel();
         self.tx
@@ -678,8 +686,8 @@ impl Writer {
     /// Places a group of finished upload sessions under `Inbox/` (see
     /// [`crate::upload_commit`]). The sessions are checked, hashed and staged first, on the
     /// blocking pool but outside the queue (at most `COMMIT_PREPARE_JOBS` commits at once),
-    /// so other writes go on meanwhile; only the renames wait their turn. Does not rescan;
-    /// the caller asks for that.
+    /// so other writes go on meanwhile; only the renames wait their turn, as one batch of the
+    /// Journal by `user` from `origin`. Does not rescan; the caller asks for that.
     ///
     /// The commit runs in a task of its own: once started it finishes, and leaves its
     /// tombstones, even when the caller stops waiting (a client that timed out). A repeated
@@ -689,10 +697,12 @@ impl Writer {
         &self,
         store: Arc<UploadStore>,
         user: UserId,
+        origin: Origin,
         params: UploadCommitParams,
     ) -> Result<UploadCommitResult, UploadError> {
         let writer = self.clone();
-        let task = tokio::spawn(async move { writer.run_commit(store, user, params).await });
+        let task =
+            tokio::spawn(async move { writer.run_commit(store, user, origin, params).await });
         task.await.unwrap_or_else(|e| {
             tracing::error!(error = %e, "upload commit task failed");
             Err(UploadError::job_failed())
@@ -703,6 +713,7 @@ impl Writer {
         &self,
         store: Arc<UploadStore>,
         user: UserId,
+        origin: Origin,
         params: UploadCommitParams,
     ) -> Result<UploadCommitResult, UploadError> {
         let upload_stopped = || UploadError::Io("writer stopped".into());
@@ -726,6 +737,7 @@ impl Writer {
             .send(Job::Place {
                 store,
                 prepared: Box::new(prepared),
+                origin,
                 reply,
             })
             .await

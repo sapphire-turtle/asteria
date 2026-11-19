@@ -383,7 +383,7 @@ async fn dispatch(
             let p: UploadCommitParams = params(p)?;
             let result = state
                 .writer()
-                .commit_upload(state.uploads().clone(), user, p)
+                .commit_upload(state.uploads().clone(), user, origin, p)
                 .await
                 .map_err(upload_err)?;
             if matches!(result, UploadCommitResult::Placed { .. }) {

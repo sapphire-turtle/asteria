@@ -5,8 +5,8 @@
 //!   and stages each file in the group's folder: a hard link, or a synced copy when the
 //!   sessions are on another filesystem than the library. All outside the queue;
 //! - [`place`] runs in the write queue ([`crate::writer::Writer::commit_upload`]): it checks
-//!   for duplicates again, numbers, renames the staged files into place, journals them and
-//!   leaves the tombstones.
+//!   for duplicates again, numbers, has the Journal rename the staged files into place (one
+//!   batch of `upload`s, see [`crate::journal::files`]) and leaves the tombstones.
 //!
 //! The seals are held from the start of `prepare` to the end of `place`. Staged files that
 //! were not placed (a failure, or duplicates found) are removed. The caller asks for a
@@ -20,16 +20,21 @@ use std::sync::Arc;
 use asteria_common_api::{PlacedFile, UploadCommitParams, UploadCommitResult, UploadWarning};
 use asteria_common_core::fsutil::tmp_path_for;
 use asteria_common_core::hash::{HashOutcome, HashScope, content_hash, file_hash};
-use asteria_common_core::journal::{Actor, JournalEntry, OpId, OpKind};
+use asteria_common_core::journal::Actor;
 use asteria_common_core::paths::{media_path_for_sidecar, sidecar_path_for};
 use asteria_common_core::upload_path::validate_inbox_path;
 use asteria_common_core::{Error as FwError, Library, Sidecar, UserId};
-use chrono::Utc;
-use grain_id::GrainId;
+use corundum_framework::journal::{
+    Actor as JournalActor, BatchId, JournalError, OpKind as _, Origin, Outcome, Planned,
+};
 
 use crate::cache::Cache;
 use crate::error::ServerError;
-use crate::fsutil::{DirError, create_dirs_inside, move_no_clobber, stage, sync_dir};
+use crate::fsutil::{DirError, create_dirs_inside, stage, sync_dir};
+use crate::journal::files::{Upload, UploadPlan};
+use crate::journal::map::actor_of;
+use crate::journal::{ServerJournal, auto_label};
+use crate::scan::rel_string;
 use crate::upload::{Committed, SealGuard, UploadError, UploadStore};
 
 /// Library-relative folder that every upload lands in.
@@ -145,30 +150,21 @@ pub enum Prepare {
     Ready(Prepared),
 }
 
-/// Places the group `params.files` under `Inbox/`: [`prepare`], then [`place`]. See spec §4.7
+/// Places the group `params.files` under `Inbox/`: [`prepare`], then [`place`], journaled in
+/// `journal` (which runs over `library` and `cache`) as `user` from `origin`. See spec §4.7
 /// for the steps.
 pub fn commit(
     library: &Library,
     cache: &Cache,
+    journal: &ServerJournal,
     store: &Arc<UploadStore>,
     user: UserId,
+    origin: &Origin,
     params: UploadCommitParams,
-) -> Result<UploadCommitResult, UploadError> {
-    commit_with(library, cache, store, user, params, &mut |_| {})
-}
-
-/// [`commit`] with a hook called right before each file is moved to `target`.
-fn commit_with(
-    library: &Library,
-    cache: &Cache,
-    store: &Arc<UploadStore>,
-    user: UserId,
-    params: UploadCommitParams,
-    before_place: &mut dyn FnMut(&Path),
 ) -> Result<UploadCommitResult, UploadError> {
     match prepare(library, store, user, params)? {
         Prepare::Answered(result) => Ok(result),
-        Prepare::Ready(p) => place_with(library, cache, store, p, before_place),
+        Prepare::Ready(p) => place(library, cache, journal, store, origin, p),
     }
 }
 
@@ -307,23 +303,17 @@ pub fn prepare_sealed(
 
 /// The second phase of a commit, in the write queue: unless duplicates are allowed, looks
 /// for the payloads in the library (again: it may have changed since the client's check),
-/// then numbers the files, renames them into place, journals them and turns their sessions
-/// into tombstones. Blocking; the seals are released when it returns.
+/// then numbers the files, has `journal` rename them into place as one batch of `upload`s by
+/// the committing user from `origin`, waits for it, and turns their sessions into tombstones.
+/// A group the batch could not place whole is taken back out by undoing the batch. Blocking;
+/// the seals are released when it returns.
 pub fn place(
     library: &Library,
     cache: &Cache,
+    journal: &ServerJournal,
     store: &UploadStore,
+    origin: &Origin,
     prepared: Prepared,
-) -> Result<UploadCommitResult, UploadError> {
-    place_with(library, cache, store, prepared, &mut |_| {})
-}
-
-fn place_with(
-    library: &Library,
-    cache: &Cache,
-    store: &UploadStore,
-    prepared: Prepared,
-    before_place: &mut dyn FnMut(&Path),
 ) -> Result<UploadCommitResult, UploadError> {
     let Prepared {
         user,
@@ -334,8 +324,6 @@ fn place_with(
         dropped,
         mut staging,
     } = prepared;
-    // Before anything is placed: a commit that cannot be journaled is not made.
-    let journal = library.journal().map_err(fw)?;
     if !params.allow_duplicate {
         let mut existing = BTreeSet::new();
         for o in kept.iter().filter_map(|i| i.content.as_ref()) {
@@ -359,47 +347,62 @@ fn place_with(
         format!("{INBOX}/{folder}")
     };
     let n = free_number(&dir, &kept)?;
-    let mut placed: Vec<(&Item, PathBuf, String)> = Vec::with_capacity(kept.len());
-    for item in &kept {
-        let name = target_name(&item.name, n);
-        let target = dir.join(&name);
-        let rel = format!("{rel_dir}/{name}");
-        before_place(&target);
-        if let Err(e) = move_no_clobber(&item.staged, &target) {
-            tracing::warn!(path = %rel, error = %e, "could not place upload; rolling back the group");
-            roll_back(&placed);
-            return Err(UploadError::Io(format!("could not place {rel}: {e}")));
+    let placed: Vec<(&Item, String)> = kept
+        .iter()
+        .map(|item| (item, format!("{rel_dir}/{}", target_name(&item.name, n))))
+        .collect();
+    // The media first: an undo goes backwards, so it trashes each sidecar before its media,
+    // which would otherwise take the sidecar along.
+    let mut order: Vec<&(&Item, String)> = placed.iter().collect();
+    order.sort_by_key(|(item, _)| item.content.is_none());
+    let plans = order
+        .iter()
+        .map(|(item, to)| {
+            let staged = rel_string(library.root(), &item.staged).ok_or_else(|| {
+                UploadError::Io(format!(
+                    "could not place {to}: the staged name is not UTF-8"
+                ))
+            })?;
+            Ok(Planned::new::<Upload>(&UploadPlan::Place {
+                staged,
+                to: to.clone(),
+                session: item.session.clone(),
+            }))
+        })
+        .collect::<Result<Vec<_>, UploadError>>()?;
+    let actor = actor_of(Actor::User(user));
+    let label = auto_label(Upload::KIND, plans.len());
+    let id = journal
+        .submit(plans, origin, &actor, label)
+        .map_err(journal_error)?;
+    let batch = journal.wait(id).map_err(journal_error)?;
+    let failed = order
+        .iter()
+        .zip(&batch.ops)
+        .find_map(|((_, to), op)| match &op.outcome {
+            Outcome::Skipped(skip) => Some((to, skip)),
+            Outcome::Done(_) => None,
+        });
+    if let Some((to, skip)) = failed {
+        tracing::warn!(path = %to, %skip, "could not place upload; rolling back the group");
+        if batch.summary.done > 0 {
+            roll_back(journal, id, origin, &actor);
         }
-        placed.push((item, target, rel));
+        return Err(UploadError::Io(format!("could not place {to}: {skip}")));
     }
     staging.keep_folders();
     // The renames are on disk before the sessions' data, the files' other copy, goes.
     sync_dir(&dir);
-    for (item, _, rel) in &placed {
+    for (item, rel) in &placed {
         if let Err(e) = fs::remove_file(&item.data) {
             tracing::warn!(path = %rel, error = %e, "could not remove a placed upload's data");
         }
     }
 
-    for (item, _, rel) in &placed {
-        let entry = JournalEntry {
-            op_id: OpId(GrainId::random()),
-            plan_id: None,
-            actor: Actor::User(user),
-            at: Utc::now(),
-            kind: OpKind::Upload,
-            before: serde_json::json!({ "session": item.session }),
-            after: serde_json::json!({ "path": rel }),
-        };
-        // The file is in place already; failing the commit now would only invite a retry.
-        if let Err(e) = journal.append(&entry) {
-            tracing::error!(path = %rel, error = %e, "could not journal an upload");
-        }
-    }
     let result = UploadCommitResult::Placed {
         files: placed
             .iter()
-            .map(|(item, _, rel)| PlacedFile {
+            .map(|(item, rel)| PlacedFile {
                 session: item.session.clone(),
                 path: rel.clone(),
             })
@@ -411,7 +414,7 @@ fn place_with(
         sessions: sorted_sessions(&params),
         result: result.clone(),
     };
-    for session in placed.iter().map(|(i, _, _)| &i.session).chain(&dropped) {
+    for session in placed.iter().map(|(i, _)| &i.session).chain(&dropped) {
         if let Err(e) = store.mark_committed(session, &committed) {
             // A repeated commit writes it, from the group's other tombstones; with none at
             // all it finds the session without its data (NotFound).
@@ -557,13 +560,30 @@ fn free_number(dir: &Path, items: &[Item]) -> Result<u32, UploadError> {
         .ok_or_else(|| UploadError::Invalid("too many files with these names".into()))
 }
 
-/// Takes the placed files back out of the library. Their content is still in the sessions
-/// (a staged file is a link or a copy), so they are only removed; the [`Staging`] then
-/// removes the folders made for the group.
-fn roll_back(placed: &[(&Item, PathBuf, String)]) {
-    for (_, target, rel) in placed.iter().rev() {
-        if let Err(e) = fs::remove_file(target) {
-            tracing::error!(path = %rel, error = %e, "could not take back a placed upload");
+/// Takes the placed files of the batch `id` back out of the library, into the trash, by
+/// undoing it; then the [`Staging`] removes the folders made for the group. Their content is
+/// still in the sessions, so a retry places them again.
+fn roll_back(journal: &ServerJournal, id: BatchId, origin: &Origin, actor: &JournalActor) {
+    let undone = journal
+        .undo_batch(id, origin, actor)
+        .and_then(|u| journal.wait(u));
+    match undone {
+        Ok(b) if b.summary.skipped == 0 => {}
+        Ok(b) => {
+            tracing::error!(batch = %id, skipped = b.summary.skipped, "could not take back every placed upload");
+        }
+        Err(e) => {
+            tracing::error!(batch = %id, error = %e, "could not take back the placed uploads")
+        }
+    }
+}
+
+fn journal_error(e: JournalError) -> UploadError {
+    match e {
+        JournalError::Busy => UploadError::Busy("the journal is busy".into()),
+        e => {
+            tracing::error!(error = %e, "the journal failed an upload commit");
+            UploadError::Io(e.to_string())
         }
     }
 }
@@ -577,11 +597,52 @@ fn server(e: ServerError) -> UploadError {
     UploadError::Io(e.to_string())
 }
 
-/// Lets a test stop a commit right before it hashes a given session.
+/// Lets a test stop a commit right before it hashes a given session, or act right before a
+/// file is renamed into place (on the Journal's thread).
 #[cfg(test)]
-mod hold {
+pub(crate) mod hold {
+    use std::path::{Path, PathBuf};
     use std::sync::mpsc::{Receiver, Sender};
     use std::sync::{Arc, Mutex};
+
+    type PlaceHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+    /// The hooks, by the library root they act below.
+    static PLACE_HOOKS: Mutex<Vec<(PathBuf, PlaceHook)>> = Mutex::new(Vec::new());
+
+    /// Removes its library's hook when dropped.
+    pub struct PlaceHookGuard(PathBuf);
+
+    impl Drop for PlaceHookGuard {
+        fn drop(&mut self) {
+            PLACE_HOOKS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .retain(|(root, _)| root != &self.0);
+        }
+    }
+
+    /// Calls `f` with each target below `root` right before a file is placed there.
+    pub fn on_place(root: &Path, f: impl Fn(&Path) + Send + Sync + 'static) -> PlaceHookGuard {
+        PLACE_HOOKS
+            .lock()
+            .unwrap()
+            .push((root.to_path_buf(), Arc::new(f)));
+        PlaceHookGuard(root.to_path_buf())
+    }
+
+    pub fn before_place(target: &Path) {
+        let hooks: Vec<PlaceHook> = PLACE_HOOKS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|(root, _)| target.starts_with(root))
+            .map(|(_, f)| f.clone())
+            .collect();
+        for f in hooks {
+            f(target);
+        }
+    }
 
     pub struct Hold {
         pub session: String,
@@ -609,11 +670,12 @@ mod tests {
     use super::*;
     use asteria_common_api::UploadFile;
 
-    /// A writer over the library, with a journal of its own.
-    fn writer_for(
-        lib: &Arc<Library>,
-        cache: &Arc<Cache>,
-    ) -> (crate::Writer, tokio::task::JoinHandle<()>) {
+    fn origin() -> Origin {
+        Origin::new("test")
+    }
+
+    /// The library's journal, as the server opens it.
+    fn journal_for(lib: &Arc<Library>, cache: &Arc<Cache>) -> ServerJournal {
         struct Media;
         impl crate::AppExtension for Media {
             fn accepts(&self, kind: asteria_common_core::MediaKind) -> bool {
@@ -628,8 +690,15 @@ mod tests {
             cache: cache.clone(),
             ext: Arc::new(Media),
         };
-        let journal = crate::journal::open_journal(ctx, None).unwrap();
-        crate::spawn_writer(lib.clone(), cache.clone(), journal)
+        crate::journal::open_journal(ctx, None).unwrap()
+    }
+
+    /// A writer over the library, with its journal.
+    fn writer_for(
+        lib: &Arc<Library>,
+        cache: &Arc<Cache>,
+    ) -> (crate::Writer, tokio::task::JoinHandle<()>) {
+        crate::spawn_writer(lib.clone(), cache.clone(), journal_for(lib, cache))
     }
 
     #[test]
@@ -653,10 +722,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         fs::create_dir(&root).unwrap();
-        let lib = Library::init(&root, "owner")
-            .unwrap()
-            .with_state_dir(dir.path().join("state"));
-        let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
+        let lib = Arc::new(
+            Library::init(&root, "owner")
+                .unwrap()
+                .with_state_dir(dir.path().join("state")),
+        );
+        let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
+        let journal = journal_for(&lib, &cache);
         let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
         let me = lib.owner();
         let upload = |bytes: &[u8]| {
@@ -684,12 +756,21 @@ mod tests {
             allow_duplicate: false,
         };
         // Someone takes the second name after numbering chose it.
-        let mut hook = |target: &Path| {
+        let hook = hold::on_place(lib.root(), |target: &Path| {
             if target.ends_with("IMG_0001.MOV") {
                 fs::create_dir(target).unwrap();
             }
-        };
-        let r = commit_with(&lib, &cache, &store, me, params.clone(), &mut hook);
+        });
+        let r = commit(
+            &lib,
+            &cache,
+            &journal,
+            &store,
+            me,
+            &origin(),
+            params.clone(),
+        );
+        drop(hook);
         assert!(matches!(r, Err(UploadError::Io(_))), "{r:?}");
         assert!(!root.join("Inbox/a/b/IMG_0001.HEIC").exists());
         // Both sessions are whole again, so the client can retry.
@@ -701,7 +782,7 @@ mod tests {
             b"heic bytes"
         );
         // Only the squatter's directory is left; the retry numbers around it.
-        let r = commit(&lib, &cache, &store, me, params).unwrap();
+        let r = commit(&lib, &cache, &journal, &store, me, &origin(), params).unwrap();
         let UploadCommitResult::Placed { files, .. } = r else {
             panic!("{r:?}")
         };
@@ -715,10 +796,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         fs::create_dir(&root).unwrap();
-        let lib = Library::init(&root, "owner")
-            .unwrap()
-            .with_state_dir(dir.path().join("state"));
-        let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
+        let lib = Arc::new(
+            Library::init(&root, "owner")
+                .unwrap()
+                .with_state_dir(dir.path().join("state")),
+        );
+        let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
+        let journal = journal_for(&lib, &cache);
         let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
         let me = lib.owner();
         let upload = |bytes: &[u8]| {
@@ -747,7 +831,15 @@ mod tests {
             allow_duplicate: false,
         };
         let r = crate::fsutil::test_hook::cross_device(|| {
-            commit(&lib, &cache, &store, me, params.clone())
+            commit(
+                &lib,
+                &cache,
+                &journal,
+                &store,
+                me,
+                &origin(),
+                params.clone(),
+            )
         })
         .unwrap();
         assert!(matches!(r, UploadCommitResult::Placed { .. }), "{r:?}");
@@ -767,7 +859,10 @@ mod tests {
         inbox.sort();
         assert_eq!(inbox, ["IMG_0001.HEIC", "IMG_0001.MOV"]);
         // A repeated commit gets the same answer from the tombstones.
-        assert_eq!(commit(&lib, &cache, &store, me, params).unwrap(), r);
+        assert_eq!(
+            commit(&lib, &cache, &journal, &store, me, &origin(), params).unwrap(),
+            r
+        );
     }
 
     #[test]
@@ -775,10 +870,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         fs::create_dir(&root).unwrap();
-        let lib = Library::init(&root, "owner")
-            .unwrap()
-            .with_state_dir(dir.path().join("state"));
-        let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
+        let lib = Arc::new(
+            Library::init(&root, "owner")
+                .unwrap()
+                .with_state_dir(dir.path().join("state")),
+        );
+        let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
+        let journal = journal_for(&lib, &cache);
         let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
         let me = lib.owner();
         let upload = |bytes: &[u8]| {
@@ -815,13 +913,13 @@ mod tests {
             allow_duplicate: false,
         };
         // Someone takes the second name after numbering chose it.
-        let mut hook = |target: &Path| {
+        let _hook = hold::on_place(lib.root(), |target: &Path| {
             if target.ends_with("IMG_0001.MOV") {
                 fs::write(target, b"theirs").unwrap();
             }
-        };
+        });
         let r = crate::fsutil::test_hook::cross_device(|| {
-            commit_with(&lib, &cache, &store, me, params, &mut hook)
+            commit(&lib, &cache, &journal, &store, me, &origin(), params)
         });
         assert!(matches!(r, Err(UploadError::Io(_))), "{r:?}");
         let inbox: Vec<_> = fs::read_dir(root.join("Inbox"))
@@ -848,10 +946,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         fs::create_dir(&root).unwrap();
-        let lib = Library::init(&root, "owner")
-            .unwrap()
-            .with_state_dir(dir.path().join("state"));
-        let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
+        let lib = Arc::new(
+            Library::init(&root, "owner")
+                .unwrap()
+                .with_state_dir(dir.path().join("state")),
+        );
+        let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
+        let journal = journal_for(&lib, &cache);
         let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
         let me = lib.owner();
         let upload = |bytes: &[u8]| {
@@ -879,12 +980,13 @@ mod tests {
             allow_duplicate: false,
         };
         // The second file's staged copy vanishes before it is renamed into place.
-        let mut hook = |target: &Path| {
+        let staged_mov = mov.clone();
+        let _hook = hold::on_place(lib.root(), move |target: &Path| {
             if target.ends_with("IMG_0001.MOV") {
-                fs::remove_file(tmp_path_for(&target.parent().unwrap().join(&mov))).unwrap();
+                fs::remove_file(tmp_path_for(&target.parent().unwrap().join(&staged_mov))).unwrap();
             }
-        };
-        let r = commit_with(&lib, &cache, &store, me, params, &mut hook);
+        });
+        let r = commit(&lib, &cache, &journal, &store, me, &origin(), params);
         assert!(matches!(r, Err(UploadError::Io(_))), "{r:?}");
         assert!(store.completed(me, &heic).is_ok());
         assert!(!root.join("Inbox").exists());
@@ -899,10 +1001,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         fs::create_dir(&root).unwrap();
-        let lib = Library::init(&root, "owner")
-            .unwrap()
-            .with_state_dir(dir.path().join("state"));
-        let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
+        let lib = Arc::new(
+            Library::init(&root, "owner")
+                .unwrap()
+                .with_state_dir(dir.path().join("state")),
+        );
+        let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
+        let journal = journal_for(&lib, &cache);
         let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
         let me = lib.owner();
         let outside = dir.path().join("outside");
@@ -923,7 +1028,7 @@ mod tests {
                 allow_duplicate: false,
             };
             (
-                commit_with(&lib, &cache, &store, me, params, &mut |_: &Path| {}),
+                commit(&lib, &cache, &journal, &store, me, &origin(), params),
                 s,
             )
         };
@@ -956,10 +1061,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         fs::create_dir(&root).unwrap();
-        let lib = Library::init(&root, "owner")
-            .unwrap()
-            .with_state_dir(dir.path().join("state"));
-        let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
+        let lib = Arc::new(
+            Library::init(&root, "owner")
+                .unwrap()
+                .with_state_dir(dir.path().join("state")),
+        );
+        let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
+        let journal = journal_for(&lib, &cache);
         let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
         let me = lib.owner();
         let upload = |bytes: &[u8]| {
@@ -987,17 +1095,35 @@ mod tests {
             ],
             allow_duplicate: false,
         };
-        let mut hook = |target: &Path| {
-            for (s, body) in [(&jpg, &b"jpeg bytes"[..]), (&xmp, &b"<not xmp"[..])] {
-                let chunk = store.put_chunk(me, s, 0, body);
-                assert!(matches!(chunk, Err(UploadError::Busy(_))), "{chunk:?}");
-                assert!(matches!(store.abort(me, s), Err(UploadError::Busy(_))));
-            }
-            // Then fail the move.
-            fs::write(target, b"squatter").unwrap();
+        // What the hook found, as it runs on the Journal's thread.
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook = {
+            let (store, seen) = (store.clone(), seen.clone());
+            let sessions = [
+                (jpg.clone(), &b"jpeg bytes"[..]),
+                (xmp.clone(), &b"<not xmp"[..]),
+            ];
+            hold::on_place(lib.root(), move |target: &Path| {
+                for (s, body) in &sessions {
+                    let chunk = store.put_chunk(me, s, 0, body);
+                    let abort = store.abort(me, s);
+                    seen.lock().unwrap().push(format!("{chunk:?} {abort:?}"));
+                }
+                // Then fail the move.
+                fs::write(target, b"squatter").unwrap();
+            })
         };
-        let r = commit_with(&lib, &cache, &store, me, params, &mut hook);
+        let r = commit(&lib, &cache, &journal, &store, me, &origin(), params);
+        drop(hook);
         assert!(matches!(r, Err(UploadError::Io(_))), "{r:?}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        for s in seen.iter() {
+            assert!(
+                s.starts_with("Err(Busy(") && s.contains(" Err(Busy("),
+                "{s}"
+            );
+        }
         // Unsealed again, and the dropped sidecar's session survives the failed commit.
         for s in [&jpg, &xmp] {
             assert!(store.completed(me, s).is_ok(), "{s}");
@@ -1072,7 +1198,7 @@ mod tests {
                 }],
                 allow_duplicate: false,
             };
-            tokio::spawn(async move { writer.commit_upload(store, me, params).await })
+            tokio::spawn(async move { writer.commit_upload(store, me, origin(), params).await })
         };
         tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(20)))
             .await
@@ -1152,7 +1278,7 @@ mod tests {
         }));
         let request = {
             let (writer, store, params) = (writer.clone(), store.clone(), params.clone());
-            tokio::spawn(async move { writer.commit_upload(store, me, params).await })
+            tokio::spawn(async move { writer.commit_upload(store, me, origin(), params).await })
         };
         tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(20)))
             .await
@@ -1163,7 +1289,7 @@ mod tests {
         assert!(request.await.unwrap_err().is_cancelled());
         // Meanwhile a repeated commit finds the sessions busy.
         let again = writer
-            .commit_upload(store.clone(), me, params.clone())
+            .commit_upload(store.clone(), me, origin(), params.clone())
             .await;
         assert!(matches!(again, Err(UploadError::Busy(_))), "{again:?}");
         release.send(()).unwrap();
@@ -1180,7 +1306,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let r = writer
-            .commit_upload(store.clone(), me, params)
+            .commit_upload(store.clone(), me, origin(), params)
             .await
             .unwrap();
         let UploadCommitResult::Placed { files, .. } = r else {
@@ -1201,10 +1327,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("lib");
         fs::create_dir(&root).unwrap();
-        let lib = Library::init(&root, "owner")
-            .unwrap()
-            .with_state_dir(dir.path().join("state"));
-        let cache = Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap();
+        let lib = Arc::new(
+            Library::init(&root, "owner")
+                .unwrap()
+                .with_state_dir(dir.path().join("state")),
+        );
+        let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
+        let journal = journal_for(&lib, &cache);
         let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
         let me = lib.owner();
         let tmp = dir.path().join("hash-me");
@@ -1250,7 +1379,7 @@ mod tests {
         fs::write(root.join("Inbox/old.jpg"), b"jpeg bytes").unwrap();
         crate::scan(&lib, &cache, &AllMedia).unwrap();
         crate::hash_pending(&lib, &cache, &std::sync::atomic::AtomicBool::new(false)).unwrap();
-        let r = commit(&lib, &cache, &store, me, params).unwrap();
+        let r = commit(&lib, &cache, &journal, &store, me, &origin(), params).unwrap();
         assert!(matches!(r, UploadCommitResult::Duplicate { .. }), "{r:?}");
         assert_eq!(names(&root.join("Inbox")), ["old.jpg"]);
         assert!(store.completed(me, &s).is_ok());
