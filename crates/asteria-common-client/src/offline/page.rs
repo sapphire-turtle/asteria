@@ -4,7 +4,7 @@ use corundum_framework::egui;
 use corundum_framework::gui::tr;
 
 use super::{LIMIT_CHOICES_GIB, OfflineHandle, SyncPhase};
-use crate::widgets::offline_toggle::{size_text, state_text};
+use crate::widgets::offline_toggle::{pending_ratings_text, size_text, state_text};
 
 /// The "Offline" settings page. It keeps only what the user is in the middle of (the
 /// confirmation of "Delete all"); everything else is read from the handle every frame.
@@ -18,8 +18,14 @@ impl OfflinePage {
         OfflinePage::default()
     }
 
-    /// `handle` is `None` before the app has a library to keep offline.
-    pub fn ui(&mut self, ui: &mut egui::Ui, handle: Option<&OfflineHandle>) {
+    /// `handle` is `None` before the app has a library to keep offline. `pending_ratings` is
+    /// how many ratings the server has not settled yet.
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        handle: Option<&OfflineHandle>,
+        pending_ratings: usize,
+    ) {
         let Some(handle) = handle else {
             self.confirm_clear = false;
             ui.weak(tr!(ui, "asteria-common-client-offline-needs-server"));
@@ -68,6 +74,9 @@ impl OfflinePage {
                 ));
             }
             SyncPhase::Idle => {}
+        }
+        if pending_ratings > 0 {
+            ui.label(pending_ratings_text(ui, pending_ratings));
         }
         if progress.unsavable > 0 {
             ui.weak(tr!(

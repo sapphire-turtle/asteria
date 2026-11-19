@@ -39,11 +39,6 @@ asteria-photos-detail-save-failed = The change could not be saved: { $reason }
 asteria-photos-detail-saving = Saving...
 asteria-photos-detail-rating = Rating
 asteria-photos-detail-rating-none = Not rated
-asteria-photos-detail-rating-set = { $stars ->
-    [one] Rate 1 star
-   *[other] Rate { $stars } stars
-}
-asteria-photos-detail-rating-clear = Clear the rating
 asteria-photos-detail-label = Color label
 asteria-photos-detail-label-none = None
 asteria-photos-detail-label-red = Red

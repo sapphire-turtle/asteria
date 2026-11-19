@@ -292,3 +292,175 @@ fn a_failed_next_page_is_reported_and_retried() {
     });
     assert!(app.connection().unwrap().library().error().is_none());
 }
+
+const WIDE: egui::Vec2 = egui::vec2(1000.0, 700.0);
+const NARROW: egui::Vec2 = egui::vec2(380.0, 700.0);
+
+/// The app on a stub that answers `ops.apply`, with the album `al1` open and drawn at `size`;
+/// the player's settings come with it, to wait on.
+fn open_album_at(
+    size: egui::Vec2,
+) -> (
+    Fixture,
+    egui::Context,
+    MusicApp,
+    asteria_music_gui::player::OpenerSettings,
+    Seen,
+) {
+    open_album_with(size, |_| {})
+}
+
+/// As [`open_album_at`], with the app's paths changed by `paths` first.
+fn open_album_with(
+    size: egui::Vec2,
+    paths: impl FnOnce(&mut asteria_music_gui::app::AppPaths),
+) -> (
+    Fixture,
+    egui::Context,
+    MusicApp,
+    asteria_music_gui::player::OpenerSettings,
+    Seen,
+) {
+    let (addr, seen) = Music::default().serve();
+    let (mut fx, _) = fixture(&[("A", addr)], 0);
+    paths(&mut fx.paths);
+    let ctx = egui::Context::default();
+    let (player, settings, _, _) = player_with_fakes(&ctx);
+    let mut app = MusicApp::new(fx.paths.clone(), &ctx, player, settings.clone());
+    // Handing the player its endpoint resets it: wait for that before anything is queued.
+    run_until(&ctx, &mut app, "the endpoint", |_| {
+        settings.endpoint().is_some()
+    });
+    app.open_album(AlbumId("al1".into()));
+    run_until(&ctx, &mut app, "the album", |a| {
+        a.connection().unwrap().library().album().is_some()
+    });
+    for _ in 0..3 {
+        frame_sized(&ctx, &mut app, size);
+    }
+    (fx, ctx, app, settings, seen)
+}
+
+/// The rating ops the stub received, as (item, value).
+fn rated(seen: &Seen) -> Vec<(String, i64)> {
+    calls(seen, "ops.apply")
+        .iter()
+        .flat_map(|p| p["ops"].as_array().unwrap().clone())
+        .map(|op| {
+            (
+                op["item"].as_str().unwrap().to_string(),
+                op["value"].as_i64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn wait_rated(seen: &Seen, want: (&str, i64)) {
+    wait_until("the rating to reach the server", || {
+        rated(seen).contains(&(want.0.to_string(), want.1))
+    });
+}
+
+#[test]
+fn a_star_in_a_row_rates_without_playing() {
+    let (_fx, ctx, mut app, _, seen) = open_album_at(WIDE);
+    // Nothing plays, so the side pane has no stars: these are the rows', 5 to a row.
+    let stars = star_centres(&ctx, &mut app, WIDE);
+    assert_eq!(stars.len(), 4 * 5, "{stars:?}");
+    click_at(&ctx, &mut app, WIDE, stars[2], egui::PointerButton::Primary);
+    frame_sized(&ctx, &mut app, WIDE);
+    wait_rated(&seen, ("al1-t0", 3));
+    assert_eq!(rated(&seen), [("al1-t0".to_string(), 3)]);
+    // Long enough for a play command to have reached the player.
+    for _ in 0..10 {
+        frame_sized(&ctx, &mut app, WIDE);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(app.player().state().queue.is_empty());
+    assert_eq!(app.notice(), None);
+}
+
+#[test]
+fn narrow_rows_rate_from_the_menu() {
+    let (_fx, ctx, mut app, _, seen) = open_album_at(NARROW);
+    assert!(star_centres(&ctx, &mut app, NARROW).is_empty());
+    let row = widget_centre(&ctx, &mut app, NARROW, "al1-t0");
+    click_at(&ctx, &mut app, NARROW, row, egui::PointerButton::Secondary);
+    frame_sized(&ctx, &mut app, NARROW);
+    let menu = widget_centre(&ctx, &mut app, NARROW, "Rating");
+    click_at(&ctx, &mut app, NARROW, menu, egui::PointerButton::Primary);
+    frame_sized(&ctx, &mut app, NARROW);
+    let two = widget_centre(&ctx, &mut app, NARROW, "★★");
+    click_at(&ctx, &mut app, NARROW, two, egui::PointerButton::Primary);
+    frame_sized(&ctx, &mut app, NARROW);
+    wait_rated(&seen, ("al1-t0", 2));
+    assert_eq!(rated(&seen), [("al1-t0".to_string(), 2)]);
+    // The choice closes the menu.
+    assert!(widgets(&ctx, &mut app, NARROW, |l| l == "Rating").is_empty());
+}
+
+#[test]
+fn the_side_pane_rates_the_current_track() {
+    let (_fx, ctx, mut app, _, seen) = open_album_at(WIDE);
+    app.play_from(TrackList::Album, 0);
+    run_until(&ctx, &mut app, "the track to be current", |a| {
+        a.player().state().current.is_some()
+    });
+    // The queue has no stars of its own: these are the side pane's.
+    app.open_screen(Screen::Queue);
+    frame_sized(&ctx, &mut app, WIDE);
+    let stars = star_centres(&ctx, &mut app, WIDE);
+    assert_eq!(stars.len(), 5, "{stars:?}");
+    click_at(&ctx, &mut app, WIDE, stars[4], egui::PointerButton::Primary);
+    frame_sized(&ctx, &mut app, WIDE);
+    wait_rated(&seen, ("al1-t0", 5));
+    assert_eq!(rated(&seen), [("al1-t0".to_string(), 5)]);
+}
+
+#[test]
+fn a_rating_with_nowhere_to_keep_it_is_told() {
+    // Without a data directory there is no queue to keep a rating in.
+    let (_fx, ctx, mut app, _, seen) = open_album_with(WIDE, |p| p.data = None);
+    let stars = star_centres(&ctx, &mut app, WIDE);
+    click_at(&ctx, &mut app, WIDE, stars[0], egui::PointerButton::Primary);
+    frame_sized(&ctx, &mut app, WIDE);
+    assert_eq!(app.notice(), Some("Could not save a rating"));
+    assert!(rated(&seen).is_empty());
+}
+
+#[test]
+fn a_click_between_two_stars_neither_rates_nor_plays() {
+    let (_fx, ctx, mut app, _, seen) = open_album_at(WIDE);
+    let stars = star_centres(&ctx, &mut app, WIDE);
+    // Halfway between the first two stars of row 0: the gap, not a star.
+    let gap = egui::pos2((stars[0].x + stars[1].x) / 2.0, stars[0].y);
+    click_at(&ctx, &mut app, WIDE, gap, egui::PointerButton::Primary);
+    for _ in 0..10 {
+        frame_sized(&ctx, &mut app, WIDE);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(app.player().state().queue.is_empty());
+    assert!(rated(&seen).is_empty());
+}
+
+#[test]
+fn narrow_a_notice_is_told_at_the_foot() {
+    let (_fx, ctx, mut app, _, _) = open_album_with(NARROW, |p| p.data = None);
+    let row = widget_centre(&ctx, &mut app, NARROW, "al1-t0");
+    click_at(&ctx, &mut app, NARROW, row, egui::PointerButton::Secondary);
+    frame_sized(&ctx, &mut app, NARROW);
+    let menu = widget_centre(&ctx, &mut app, NARROW, "Rating");
+    click_at(&ctx, &mut app, NARROW, menu, egui::PointerButton::Primary);
+    frame_sized(&ctx, &mut app, NARROW);
+    let one = widget_centre(&ctx, &mut app, NARROW, "★");
+    click_at(&ctx, &mut app, NARROW, one, egui::PointerButton::Primary);
+    frame_sized(&ctx, &mut app, NARROW);
+    assert_eq!(app.notice(), Some("Could not save a rating"));
+    let at: Vec<egui::Pos2> = widgets(&ctx, &mut app, NARROW, |l| l == "Could not save a rating")
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    assert!(!at.is_empty(), "the notice is drawn");
+    // Narrow there is no status bar: the notice sits at the foot of the screen.
+    assert!(at.iter().all(|p| p.y > 350.0), "{at:?}");
+}

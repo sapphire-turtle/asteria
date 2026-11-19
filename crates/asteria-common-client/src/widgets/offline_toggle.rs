@@ -29,6 +29,11 @@ pub fn state_text(ui: &egui::Ui, status: PinStatus, phase: &SyncPhase) -> String
     }
 }
 
+/// "3 ratings not sent yet".
+pub fn pending_ratings_text(ui: &egui::Ui, count: usize) -> String {
+    tr!(ui, "asteria-common-client-ratings-pending", count = count)
+}
+
 /// "Save for offline" for what `target` names; once saved, its state (and the estimated
 /// size, when the server has answered) and a click takes it away again. Disabled while there
 /// is no `handle` (no data directory, or not connected yet).
@@ -76,8 +81,11 @@ pub fn saved_mark(ui: &mut egui::Ui) {
 }
 
 /// The status bar's text about the sync: the progress while saving, and why it stopped when it
-/// did. Nothing otherwise.
-pub fn offline_status(ui: &mut egui::Ui, handle: Option<&OfflineHandle>) {
+/// did, then how many ratings are not sent yet (even without a `handle`). Nothing otherwise.
+pub fn offline_status(ui: &mut egui::Ui, handle: Option<&OfflineHandle>, pending_ratings: usize) {
+    if pending_ratings > 0 {
+        ui.label(pending_ratings_text(ui, pending_ratings));
+    }
     let Some(handle) = handle else {
         return;
     };

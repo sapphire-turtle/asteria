@@ -1,5 +1,6 @@
 //! What the asteria client apps share: server profiles, the RPC client and the thumbnail cache.
 
+mod claim;
 pub mod errors;
 mod fsutil;
 pub mod i18n;
@@ -7,6 +8,7 @@ pub mod images;
 pub mod media_cache;
 pub mod offline;
 pub mod profiles;
+pub mod queue;
 pub mod rpc;
 pub mod saver;
 pub mod session;

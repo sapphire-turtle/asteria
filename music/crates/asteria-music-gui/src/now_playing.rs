@@ -5,9 +5,12 @@
 //! It draws nothing for an empty queue. It only reports what the user asked for
 //! ([`BarAction`]); the app turns that into a [`Command`](crate::player::Command).
 //!
-//! The side pane beside every screen shows the same track, larger ([`side`]).
+//! The side pane beside every screen shows the same track, larger, with its rating to click
+//! ([`side`]).
 
 use asteria_common_client::images::{ImageLoader, Preset};
+use asteria_common_client::widgets::stars::stars;
+use asteria_music_api::MediaItem;
 use corundum_framework::egui::{self, Align, Layout, Sense, vec2};
 use corundum_framework::gui::{icons, tr};
 
@@ -20,6 +23,8 @@ const COVER_COMPACT: f32 = 36.0;
 const ICON: f32 = 20.0;
 /// The largest the side pane draws the cover.
 const COVER_SIDE: f32 = 240.0;
+/// The side pane's stars.
+const STAR_SIDE: f32 = 18.0;
 
 /// What the user asked of the bar.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,12 +94,24 @@ pub(crate) fn side_text(state: &PlayerState) -> Option<(&str, &str, &str)> {
     current(state).map(|e| (e.title.as_str(), e.artist.as_str(), e.album.as_str()))
 }
 
-/// Fills the side pane: the current track's cover, title, artists and album, or a word that
-/// nothing is playing.
-pub(crate) fn side(ui: &mut egui::Ui, state: &PlayerState, images: Option<&mut ImageLoader>) {
+/// The current track's item, the one the side pane rates.
+pub(crate) fn current_media(state: &PlayerState) -> Option<&MediaItem> {
+    current(state).map(|e| &e.media)
+}
+
+/// Fills the side pane: the current track's cover, title, artists, album and `rating` as
+/// stars, or a word that nothing is playing. Returns the rating a click on a star asks for;
+/// with `can_rate` false the stars are drawn disabled and never do.
+pub(crate) fn side(
+    ui: &mut egui::Ui,
+    state: &PlayerState,
+    images: Option<&mut ImageLoader>,
+    rating: Option<i8>,
+    can_rate: bool,
+) -> Option<i8> {
     let Some((title, artist, album)) = side_text(state) else {
         ui.weak(tr!(ui, "asteria-music-side-nothing"));
-        return;
+        return None;
     };
     let size = ui.available_width().min(COVER_SIDE);
     cover(ui, state, images, size);
@@ -106,6 +123,9 @@ pub(crate) fn side(ui: &mut egui::Ui, state: &PlayerState, images: Option<&mut I
     if !album.is_empty() {
         ui.weak(album);
     }
+    ui.add_space(4.0);
+    ui.add_enabled_ui(can_rate, |ui| stars(ui, rating, STAR_SIDE))
+        .inner
 }
 
 fn current(state: &PlayerState) -> Option<&crate::player::QueueEntry> {
@@ -279,6 +299,75 @@ mod tests {
         b.album = "Album".into();
         let s = state(vec![entry("a"), b], Some(1));
         assert_eq!(side_text(&s), Some(("b", "Artist", "Album")));
+    }
+
+    /// Draws the side pane for `s` with nothing rated, clicking at `click` if given; returns
+    /// the stars' centres and what the pane returned.
+    fn side_frame(
+        ctx: &egui::Context,
+        s: &PlayerState,
+        can_rate: bool,
+        events: Vec<egui::Event>,
+    ) -> (Vec<egui::Pos2>, Option<i8>) {
+        let mut clicked = None;
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(300.0, 500.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| clicked = side(ui, s, None, None, can_rate),
+        );
+        // There is no renderer to hand the texture uploads to.
+        out.textures_delta.clear();
+        let mut stars: Vec<egui::Pos2> = out
+            .platform_output
+            .accesskit_update
+            .map(|u| u.nodes)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, n)| n.label().is_some_and(|l| l.starts_with("Rate ")))
+            .filter_map(|(_, n)| n.bounds())
+            .map(|b| egui::pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32))
+            .collect();
+        stars.sort_by(|a, b| a.x.total_cmp(&b.x));
+        (stars, clicked)
+    }
+
+    /// Whether a click on the side pane's third star asks for a rating.
+    fn third_star_rates(can_rate: bool) -> Option<i8> {
+        let ctx = egui::Context::default();
+        crate::i18n::register(&ctx);
+        ctx.enable_accesskit();
+        let s = state(vec![entry("a")], Some(0));
+        let (stars, _) = side_frame(&ctx, &s, can_rate, vec![]);
+        assert_eq!(stars.len(), 5, "{stars:?}");
+        let at = stars[2];
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut clicked = None;
+        for events in [
+            vec![egui::Event::PointerMoved(at)],
+            vec![press(true)],
+            vec![press(false)],
+        ] {
+            clicked = clicked.or(side_frame(&ctx, &s, can_rate, events).1);
+        }
+        clicked
+    }
+
+    #[test]
+    fn the_side_pane_rates_only_when_it_may() {
+        assert_eq!(third_star_rates(true), Some(3));
+        // Once the session has failed, the stars are there but do nothing.
+        assert_eq!(third_star_rates(false), None);
     }
 
     #[test]

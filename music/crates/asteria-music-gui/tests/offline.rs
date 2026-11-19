@@ -119,3 +119,29 @@ fn unsaved_tracks_are_skipped_when_queued_offline() {
     let titles: Vec<&str> = state.queue.iter().map(|e| e.title.as_str()).collect();
     assert_eq!(titles, ["al1-t0", "al1-t2", "al1-t3"]);
 }
+
+#[test]
+fn rating_offline_counts_as_pending() {
+    let fx = save_album_then_lose_the_server();
+    let (ctx, mut app, _) = open_app(&fx);
+    offline(&ctx, &mut app);
+    app.open_album(AlbumId("al1".into()));
+    run_until(&ctx, &mut app, "the album", |a| {
+        a.connection().unwrap().library().album().is_some()
+    });
+    let size = egui::vec2(1000.0, 700.0);
+    for _ in 0..3 {
+        frame_sized(&ctx, &mut app, size);
+    }
+    // Every track has its stars, the one whose audio is not saved (the second) too.
+    let stars = star_centres(&ctx, &mut app, size);
+    assert_eq!(stars.len(), 4 * 5, "{stars:?}");
+    click_at(&ctx, &mut app, size, stars[5], egui::PointerButton::Primary);
+    frame_sized(&ctx, &mut app, size);
+    let session = app.connection().unwrap().session();
+    assert_eq!(session.pending_ratings(), 1);
+    let status = widgets(&ctx, &mut app, size, |l| l == "1 rating not sent yet");
+    // The status bar's label (its text run comes along with the same words).
+    assert!(!status.is_empty());
+    assert_eq!(app.notice(), None);
+}

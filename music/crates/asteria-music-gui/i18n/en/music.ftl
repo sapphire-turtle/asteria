@@ -51,6 +51,8 @@ asteria-music-tracks-moved-hover = This file was moved; it was found at its new 
 asteria-music-tracks-missing-hover = No file was found for { $path }.
 asteria-music-tracks-play-next = Play next
 asteria-music-tracks-append = Add to queue
+asteria-music-tracks-rate = Rating
+asteria-music-tracks-rate-none = No rating
 
 # The playback bar.
 asteria-music-bar-previous = Previous

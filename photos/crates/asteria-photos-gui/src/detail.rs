@@ -7,13 +7,18 @@
 //! that comes after is never applied (the session drops it, and nothing here waits for it
 //! any more).
 //!
-//! The pane shows the server's values only: an edit changes nothing on screen until the
-//! server returns the updated [`MediaItem`], which then replaces the item in the listing.
-//! While an edit is on its way, its editor is disabled. If it fails, the editor is usable
-//! again and still shows the server's value.
+//! Ratings show at once: a click on a star goes to the session's operation queue
+//! ([`Session::rate`]), which the pane then reads back ([`Session::rating_of`]) until the
+//! server settles it. A rating is never disabled for "sending", works offline, and a
+//! refusal comes back as a notice (see the app), not as an editor error. The other fields
+//! show the server's values only: an edit changes nothing on screen until the server returns
+//! the updated [`MediaItem`], which then replaces the item in the listing. While such an
+//! edit is on its way, its editor is disabled, and offline all of them are. If it fails,
+//! the editor is usable again and still shows the server's value.
 //!
 //! - **Rating**: clicking a star sets that many stars; clicking the star of the rating
-//!   already set clears it to 0 ([`rating_after_click`]).
+//!   already set clears it to 0 ([`rating_after_click`](asteria_common_client::widgets::stars::rating_after_click)).
+//!   Not offered once the session has failed (it would queue into the old library's file).
 //! - **Description**: saved when the field loses focus, or when another item is selected
 //!   (or the folder changes) with text typed but not yet saved. There is no Save button.
 //! - **Read-only items** (`read_only_reason`, or a `READ_ONLY` answer): the reason shows in
@@ -29,24 +34,23 @@ use asteria_common_api::{ItemId, MediaItem, MediaKind, MediaUpdateParams, codes}
 use asteria_common_client::errors::{error_detail, error_text};
 use asteria_common_client::images::{ImageState, Preset};
 use asteria_common_client::rpc::ClientError;
-use asteria_common_client::session::{Reply, Request, RequestId, Response, Session};
+use asteria_common_client::session::{Reply, Request, RequestId, Response, Session, SessionState};
+use asteria_common_client::widgets::stars::stars;
 use corundum_framework::egui;
 use corundum_framework::gui::theme::{self, Swatch, Tone};
 use corundum_framework::gui::{icons, tr};
 
 /// How long an edit the server answered `BUSY` waits before it is sent again (once).
 pub const BUSY_RETRY_DELAY: Duration = Duration::from_millis(500);
-/// The most stars.
-pub const MAX_RATING: i8 = 5;
 /// The colour labels offered, as written to `xmp:Label` (Lightroom's names).
 pub const LABELS: [&str; 5] = ["Red", "Yellow", "Green", "Blue", "Purple"];
 /// The preview's greatest height in the pane.
 const PREVIEW_HEIGHT: f32 = 280.0;
 
-/// A metadata field the pane edits. Each is sent, and disabled while sending, on its own.
+/// A metadata field the pane sends as `media.update` (the rating goes through the queue).
+/// Each is sent, and disabled while sending, on its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
-    Rating,
     Label,
     /// `dc:subject`.
     Subjects,
@@ -58,8 +62,6 @@ pub enum Field {
 /// One change to an item's metadata: the field's new value, whole.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
-    /// 0 (none) to [`MAX_RATING`].
-    Rating(i8),
     /// `None` removes the label.
     Label(Option<String>),
     Subjects(Vec<String>),
@@ -71,7 +73,6 @@ pub enum Edit {
 impl Edit {
     pub fn field(&self) -> Field {
         match self {
-            Edit::Rating(_) => Field::Rating,
             Edit::Label(_) => Field::Label,
             Edit::Subjects(_) => Field::Subjects,
             Edit::HierarchicalSubjects(_) => Field::HierarchicalSubjects,
@@ -89,7 +90,6 @@ impl Edit {
             label: None,
         };
         match self.clone() {
-            Edit::Rating(r) => p.rating = Some(r),
             Edit::Label(l) => p.label = Some(l),
             Edit::Subjects(s) => p.subjects = Some(s),
             Edit::HierarchicalSubjects(s) => p.hierarchical_subjects = Some(s),
@@ -97,12 +97,6 @@ impl Edit {
         }
         p
     }
-}
-
-/// The rating a click on star `star` (1 to 5) makes: that many stars, or none when it is
-/// the rating already set.
-pub fn rating_after_click(current: Option<i8>, star: i8) -> i8 {
-    if current == Some(star) { 0 } else { star }
 }
 
 /// Why the last edit of an item was not saved.
@@ -308,11 +302,29 @@ impl Edits {
 pub struct DetailView<'a> {
     item: &'a MediaItem,
     edits: &'a Edits,
+    rating: Option<i8>,
+    offline: bool,
 }
 
 impl<'a> DetailView<'a> {
-    pub(crate) fn new(item: &'a MediaItem, edits: &'a Edits) -> DetailView<'a> {
-        DetailView { item, edits }
+    pub(crate) fn new(item: &'a MediaItem, edits: &'a Edits, session: &Session) -> DetailView<'a> {
+        DetailView {
+            item,
+            edits,
+            rating: session.rating_of(item),
+            offline: session.is_offline(),
+        }
+    }
+
+    /// The rating the stars show: the queue's unconfirmed value, else the server's.
+    pub fn rating(&self) -> Option<i8> {
+        self.rating
+    }
+
+    /// Whether the editors of the fields sent as `media.update` are usable: not offline
+    /// (the stars are, offline too).
+    pub fn metadata_editors_enabled(&self) -> bool {
+        !self.offline
     }
 
     /// The item, as the server last returned it.
@@ -392,7 +404,7 @@ pub(crate) fn ui(
         });
     ui.separator();
 
-    let view = DetailView::new(item, edits);
+    let view = DetailView::new(item, edits, session);
     if let Some(reason) = view.read_only_reason() {
         ui.colored_label(
             ui.visuals().warn_fg_color,
@@ -404,7 +416,7 @@ pub(crate) fn ui(
             reason = reason
         ));
         ui.add_space(4.0);
-        values_ui(ui, item);
+        values_ui(ui, item, view.rating());
         return open;
     }
     if let Some(e) = view.error() {
@@ -461,13 +473,13 @@ fn preview_ui(ui: &mut egui::Ui, item: &MediaItem, session: &mut Session, preset
 }
 
 /// The metadata as text, for a read-only item.
-fn values_ui(ui: &mut egui::Ui, item: &MediaItem) {
+fn values_ui(ui: &mut egui::Ui, item: &MediaItem, rating: Option<i8>) {
     egui::Grid::new(("asteria_photos_detail_values", &item.id.0))
         .num_columns(2)
         .spacing([12.0, 4.0])
         .show(ui, |ui| {
             ui.weak(tr!(ui, "asteria-photos-detail-rating"));
-            match item.rating.filter(|r| *r > 0) {
+            match rating.filter(|r| *r > 0) {
                 Some(r) => {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
@@ -513,14 +525,13 @@ fn editors_ui(ui: &mut egui::Ui, item: &MediaItem, edits: &mut Edits, session: &
         edits.inputs = Some(Inputs::new(item));
     }
     let mut edit: Option<Edit> = None;
+    let metadata_enabled = DetailView::new(item, edits, session).metadata_editors_enabled();
     let [
-        rating_busy,
         label_busy,
         subjects_busy,
         hierarchical_busy,
         description_busy,
     ] = [
-        Field::Rating,
         Field::Label,
         Field::Subjects,
         Field::HierarchicalSubjects,
@@ -529,15 +540,21 @@ fn editors_ui(ui: &mut egui::Ui, item: &MediaItem, edits: &mut Edits, session: &
     .map(|f| edits.is_sending(&item.id, f));
 
     ui.weak(tr!(ui, "asteria-photos-detail-rating"));
-    ui.add_enabled_ui(!rating_busy, |ui| {
-        if let Some(r) = stars_ui(ui, item.rating) {
-            edit = Some(Edit::Rating(r));
-        }
-    });
+    // Offline the stars stay usable (the queue keeps the rating); once the session has
+    // failed they are not, as the rating would go to the old library's file.
+    let failed = matches!(session.state(), SessionState::Failed(_));
+    let clicked = ui
+        .add_enabled_ui(!failed, |ui| stars(ui, session.rating_of(item), 18.0))
+        .inner;
+    if let Some(r) = clicked
+        && let Err(e) = session.rate(&item.id, r)
+    {
+        edits.error = Some((item.id.clone(), EditError::Failed(e)));
+    }
     ui.add_space(4.0);
 
     ui.weak(tr!(ui, "asteria-photos-detail-label"));
-    ui.add_enabled_ui(!label_busy, |ui| {
+    ui.add_enabled_ui(metadata_enabled && !label_busy, |ui| {
         if let Some(l) = label_ui(ui, item) {
             edit = Some(Edit::Label(l));
         }
@@ -546,7 +563,7 @@ fn editors_ui(ui: &mut egui::Ui, item: &MediaItem, edits: &mut Edits, session: &
 
     let inputs = edits.inputs.as_mut().expect("set above");
     ui.weak(tr!(ui, "asteria-photos-detail-subjects"));
-    ui.add_enabled_ui(!subjects_busy, |ui| {
+    ui.add_enabled_ui(metadata_enabled && !subjects_busy, |ui| {
         let hint = tr!(ui, "asteria-photos-detail-subjects-add");
         if let Some(tags) = tags_ui(ui, "subjects", &item.subjects, &mut inputs.subject, hint) {
             edit = Some(Edit::Subjects(tags));
@@ -555,7 +572,7 @@ fn editors_ui(ui: &mut egui::Ui, item: &MediaItem, edits: &mut Edits, session: &
     ui.add_space(4.0);
 
     ui.weak(tr!(ui, "asteria-photos-detail-hierarchical"));
-    ui.add_enabled_ui(!hierarchical_busy, |ui| {
+    ui.add_enabled_ui(metadata_enabled && !hierarchical_busy, |ui| {
         let hint = tr!(ui, "asteria-photos-detail-hierarchical-add");
         let current = &item.hierarchical_subjects;
         if let Some(tags) = tags_ui(ui, "hierarchical", current, &mut inputs.hierarchical, hint) {
@@ -572,7 +589,7 @@ fn editors_ui(ui: &mut egui::Ui, item: &MediaItem, edits: &mut Edits, session: &
         inputs.description = server_text;
     }
     let response = ui.add_enabled(
-        !description_busy,
+        metadata_enabled && !description_busy,
         egui::TextEdit::multiline(&mut inputs.description)
             .id_salt(("asteria_photos_description", &item.id.0))
             .hint_text(tr!(ui, "asteria-photos-detail-description-hint"))
@@ -586,40 +603,6 @@ fn editors_ui(ui: &mut egui::Ui, item: &MediaItem, edits: &mut Edits, session: &
     if let Some(edit) = edit {
         edits.send(session, item, edit);
     }
-}
-
-/// Five stars; returns the rating a click asks for.
-fn stars_ui(ui: &mut egui::Ui, rating: Option<i8>) -> Option<i8> {
-    let set = rating.unwrap_or(0);
-    let mut clicked = None;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        for star in 1..=MAX_RATING {
-            let (tone, swatch) = if star <= set {
-                (Tone::Text, Swatch::Yellow)
-            } else {
-                (Tone::Border, Swatch::Neutral)
-            };
-            let image = icons::image_as(ui, icons::star(), 18.0, tone, swatch);
-            let hover = if rating == Some(star) {
-                tr!(ui, "asteria-photos-detail-rating-clear")
-            } else {
-                tr!(
-                    ui,
-                    "asteria-photos-detail-rating-set",
-                    stars = i64::from(star)
-                )
-            };
-            if ui
-                .add(egui::Button::image(image).frame(false))
-                .on_hover_text(hover)
-                .clicked()
-            {
-                clicked = Some(rating_after_click(rating, star));
-            }
-        }
-    });
-    clicked
 }
 
 /// The colour label menu, with the current label's colour beside it; returns the label
@@ -829,8 +812,8 @@ mod tests {
     #[test]
     fn each_edit_sends_its_field_only() {
         let id = ItemId("x".into());
-        let p = Edit::Rating(3).params(&id);
-        assert_eq!((p.rating, p.label.clone()), (Some(3), None));
+        let p = Edit::Label(Some("Red".into())).params(&id);
+        assert_eq!((p.rating, p.label), (None, Some(Some("Red".into()))));
         let p = Edit::Label(None).params(&id);
         assert_eq!((p.rating, p.label), (None, Some(None)));
         let p = Edit::Description(Some("d".into())).params(&id);

@@ -20,7 +20,9 @@
 //! nothing selected, an arrow selects the first item.
 //!
 //! A cell the caller marks [`dimmed`](ThumbGrid::dimmed) (offline, an item with no saved copy to
-//! show) is drawn faded and is never reported as opened; it can still be selected. The Lucide icons need `corundum_framework::gui::icons::install_loaders(ctx)` once;
+//! show) is drawn faded and is never reported as opened; it can still be selected. The star
+//! badge shows the caller's [`rating`](ThumbGrid::rating) of an item if given (such as
+//! [`Session::rating_of`](crate::session::Session::rating_of)), else the item's own. The Lucide icons need `corundum_framework::gui::icons::install_loaders(ctx)` once;
 //! the shell does it.
 
 use asteria_common_api::{ItemId, MediaItem, MediaKind};
@@ -64,12 +66,16 @@ pub struct ThumbGridResponse {
     pub last_visible: Option<usize>,
 }
 
+/// The rating a cell's badge shows, given its item.
+pub type RatingOf<'a> = dyn Fn(&MediaItem) -> Option<i8> + 'a;
+
 pub struct ThumbGrid<'a> {
     items: &'a [MediaItem],
     cell: f32,
     selected: Option<ItemId>,
     id_salt: egui::IdSalt,
     dimmed: Option<&'a dyn Fn(&MediaItem) -> bool>,
+    rating: Option<&'a RatingOf<'a>>,
 }
 
 /// What the grid remembers between frames, to scroll a moved selection into view.
@@ -87,6 +93,7 @@ impl<'a> ThumbGrid<'a> {
             selected: None,
             id_salt: egui::IdSalt::new("asteria-thumb-grid"),
             dimmed: None,
+            rating: None,
         }
     }
 
@@ -111,6 +118,14 @@ impl<'a> ThumbGrid<'a> {
     /// every visible item every frame, so it must be cheap.
     pub fn dimmed(mut self, dimmed: &'a dyn Fn(&MediaItem) -> bool) -> Self {
         self.dimmed = Some(dimmed);
+        self
+    }
+
+    /// The rating each item's badge shows, in place of `item.rating` (such as one the user
+    /// just made, not yet in the listing). Asked of every visible item every frame, so it
+    /// must be cheap.
+    pub fn rating(mut self, rating: &'a RatingOf<'a>) -> Self {
+        self.rating = Some(rating);
         self
     }
 
@@ -212,7 +227,8 @@ impl<'a> ThumbGrid<'a> {
                     for item in &self.items[start..end] {
                         let is_selected = selected.as_ref() == Some(&item.id);
                         let dimmed = self.is_dimmed(item);
-                        let r = draw_cell(ui, item, cell, is_selected, dimmed, source);
+                        let rating = self.rating.map_or(item.rating, |f| f(item));
+                        let r = draw_cell(ui, item, rating, cell, is_selected, dimmed, source);
                         if r.clicked() {
                             resp.clicked = Some(item.id.clone());
                             if !is_selected {
@@ -255,6 +271,7 @@ fn lock() -> egui::ImageSource<'static> {
 fn draw_cell(
     ui: &mut egui::Ui,
     item: &MediaItem,
+    rating: Option<i8>,
     cell: f32,
     selected: bool,
     dimmed: bool,
@@ -340,7 +357,7 @@ fn draw_cell(
             ));
         }
     }
-    if let Some(stars) = item.rating.filter(|r| *r > 0).map(|r| r.min(MAX_STARS)) {
+    if let Some(stars) = rating.filter(|r| *r > 0).map(|r| r.min(MAX_STARS)) {
         let star = icon_size * 0.8;
         let width = star * f32::from(stars as u8);
         let bar = Rect::from_min_size(

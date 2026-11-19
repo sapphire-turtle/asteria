@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Instant;
 
 use asteria_common_api::{
-    ClientInfo, FOLDER_LIST, FolderListParams, FolderListing, LIBRARY_INFO, LIBRARY_RESCAN,
+    ClientInfo, FOLDER_LIST, FolderListParams, FolderListing, ItemId, LIBRARY_INFO, LIBRARY_RESCAN,
     LibraryInfo, MEDIA_GET, MEDIA_UPDATE, MediaGetParams, MediaItem, MediaUpdateParams,
     SERVER_INFO, ServerInfo, check_handshake,
 };
@@ -23,6 +23,7 @@ use crate::offline::{
     KnownLibraries, OfflineCatalog, OfflineHandle, OfflineStore, RECONNECT_EVERY,
 };
 use crate::profiles::{ProfileId, ServerProfile, Token};
+use crate::queue::{Notice, OpQueue, QueueConfig};
 use crate::rpc::{ClientError, RpcClient};
 use crate::upload::queue::queue_path;
 use crate::upload::{EngineConfig, Uploads};
@@ -150,9 +151,23 @@ pub(crate) fn note_health<T>(health: &Mutex<Option<ClientError>>, result: &Resul
 pub struct SessionDirs {
     /// Root of the thumbnail caches ([`MediaCache`], one per library).
     pub cache: Option<PathBuf>,
-    /// Root of the app's data; the upload queues live in its `uploads/` directory, the offline
-    /// copies in `offline/`.
+    /// Root of the app's data; the upload queues live in its `uploads/` directory, the rating
+    /// queues in `queue/`, the offline copies in `offline/`.
     pub data: Option<PathBuf>,
+}
+
+/// What [`Session::rating_of`] reads; from [`Session::ratings`].
+#[derive(Clone)]
+pub struct Ratings(Arc<OnceLock<OpQueue>>);
+
+impl Ratings {
+    /// [`Session::rating_of`].
+    pub fn of(&self, item: &MediaItem) -> Option<i8> {
+        self.0
+            .get()
+            .and_then(|ops| ops.rating(&item.id))
+            .or(item.rating)
+    }
 }
 
 /// The `{}` sent as the params of methods that take none.
@@ -179,6 +194,12 @@ pub struct Session {
     ctx: egui::Context,
     events_tx: mpsc::Sender<Stamped>,
     events: mpsc::Receiver<Stamped>,
+    /// Filled by the handshake job once the library id is known (online or offline), if a data
+    /// root was given. Declared before `worker` so that it is dropped first, and [`Drop`] stops
+    /// it before either. The worker's drop sets `cancelled` right after, which ends the queue's
+    /// thread too; the explicit stop only wakes it at once, even while a job on the worker
+    /// still holds the queue.
+    ops: Arc<OnceLock<OpQueue>>,
     /// `None` if the worker could not be started; the session is then `Failed`.
     worker: Option<Worker>,
     gate: Arc<Mutex<Gate>>,
@@ -229,10 +250,13 @@ impl Session {
     ///   short-lived thread of its own (not the request worker, not the UI thread);
     /// - with `dirs.data`, starts the upload engine on the library's queue there (it loads
     ///   the queue on its own thread, once a previous session on the library has let go of
-    ///   it; see [`UploadsState::Starting`](crate::upload::UploadsState::Starting)).
+    ///   it; see [`UploadsState::Starting`](crate::upload::UploadsState::Starting)), and the
+    ///   rating queue of the library and profile under its `queue/` directory
+    ///   ([`ops`](Self::ops)).
     ///
-    /// Both are available, from [`media_cache`](Self::media_cache) and
-    /// [`uploads`](Self::uploads), by the time the state is [`SessionState::Ready`].
+    /// They are available, from [`media_cache`](Self::media_cache),
+    /// [`uploads`](Self::uploads) and [`ops`](Self::ops), by the time the state is
+    /// [`SessionState::Ready`].
     pub fn open_with_dirs(
         profile: &ServerProfile,
         client: ClientInfo,
@@ -248,6 +272,8 @@ impl Session {
     ///   ([`KnownLibraries`]);
     /// - once the library id is known, the library's [`OfflineHandle`] starts
     ///   ([`offline`](Self::offline)); it syncs while the server answers;
+    /// - the rating queue ([`ops`](Self::ops)) starts offline too: a rating made offline is
+    ///   kept under `dirs.data` and sent once the server answers again;
     /// - a handshake that cannot reach the server, for a profile with a recorded library that
     ///   has something kept offline (a pin), ends in [`SessionState::Offline`] instead of
     ///   `Failed`;
@@ -267,6 +293,7 @@ impl Session {
         let cache = Arc::new(OnceLock::new());
         let uploads = Arc::new(OnceLock::new());
         let offline = Arc::new(OnceLock::new());
+        let ops = Arc::new(OnceLock::new());
         let health: Health = Arc::new(Mutex::new(None));
         let images = ImageLoader::new(
             ctx.clone(),
@@ -286,6 +313,7 @@ impl Session {
             ctx,
             events_tx,
             events,
+            ops,
             worker: None,
             gate,
             health,
@@ -319,6 +347,7 @@ impl Session {
                     cache: session.cache.clone(),
                     uploads: session.uploads.clone(),
                     offline: session.offline.clone(),
+                    ops: session.ops.clone(),
                 });
                 session.worker = Some(worker);
                 session.handshake = Some(handshake.clone());
@@ -365,6 +394,51 @@ impl Session {
     /// session is dropped.
     pub fn offline(&self) -> Option<&OfflineHandle> {
         self.offline.get()
+    }
+
+    /// This library's rating queue for this profile, once the library id is known (online, or
+    /// offline from the record), if a data root was given to
+    /// [`open_with_dirs`](Self::open_with_dirs). It stops when the session is dropped; what it
+    /// has not sent stays on disk for the next session of the profile on the library.
+    pub fn ops(&self) -> Option<&OpQueue> {
+        self.ops.get()
+    }
+
+    /// Queues `value` (0 to 5; photos may also send -1) for `item`. Err(ClientError::Offline) when
+    /// the session has no queue: no data root, or the library id is not known yet.
+    ///
+    /// Shown by [`rating_of`](Self::rating_of) at once, saved and sent on the queue's thread,
+    /// online or offline: a server that cannot be reached gets it once it answers again.
+    pub fn rate(&mut self, item: &ItemId, value: i8) -> Result<(), ClientError> {
+        let ops = self.ops.get().ok_or(ClientError::Offline)?;
+        ops.rate(item.clone(), value);
+        Ok(())
+    }
+
+    /// The rating to draw: the queue's unconfirmed value, else `item.rating`.
+    pub fn rating_of(&self, item: &MediaItem) -> Option<i8> {
+        self.ratings().of(item)
+    }
+
+    /// [`rating_of`](Self::rating_of) apart from the session, to ask while the session is
+    /// borrowed for something else (a grid drawn with its [`images`](Self::images)). Meant
+    /// for one frame: it keeps the session's queue alive.
+    pub fn ratings(&self) -> Ratings {
+        Ratings(self.ops.clone())
+    }
+
+    /// Ratings not settled by the server yet, one per item; 0 without a queue.
+    pub fn pending_ratings(&self) -> usize {
+        self.ops.get().map_or(0, OpQueue::pending)
+    }
+
+    /// What the queue has to tell about ratings since the last call (refused, or not saved),
+    /// oldest first.
+    pub fn take_notices(&mut self) -> Vec<Notice> {
+        self.ops
+            .get()
+            .map(OpQueue::take_notices)
+            .unwrap_or_default()
     }
 
     /// Whether what is on screen comes from the saved copies: the session is
@@ -491,6 +565,16 @@ impl Session {
                 }
             }
         }
+        // The rating queue found the server serving another library: the session fails as a
+        // `library.info` reply would make it.
+        if matches!(self.state, SessionState::Ready { .. })
+            && matches!(
+                &*lock_gate(&self.gate),
+                Gate::Closed(ClientError::LibraryChanged)
+            )
+        {
+            self.state = SessionState::Failed(ClientError::LibraryChanged);
+        }
         // Lets image requests through (or fails them) once the handshake has settled.
         self.images.poll();
         // Read after the replies: the worker records a request's outcome before sending it.
@@ -517,7 +601,8 @@ impl Session {
         self.last_handshake = Instant::now();
     }
 
-    /// Tells the offline sync when the server starts or stops answering.
+    /// Tells the offline sync when the server starts or stops answering, and the rating queue
+    /// when it starts again.
     fn tell_sync(&mut self) {
         let online = match &self.state {
             SessionState::Ready { library }
@@ -533,6 +618,11 @@ impl Session {
         self.sync_online = online.is_some();
         if let Some(handle) = self.offline.get() {
             handle.set_online(online);
+        }
+        if self.sync_online
+            && let Some(ops) = self.ops.get()
+        {
+            ops.wake();
         }
     }
 
@@ -613,9 +703,15 @@ impl Session {
 
 impl Drop for Session {
     /// Stops the offline sync at once: it must not go on talking to a server the app left.
+    /// Stops the rating queue too, before the worker goes: a job still holding the handshake
+    /// would otherwise keep the queue alive. Returns once every rating made is in the queue
+    /// file (a send in flight is not waited for), so quitting the app loses none.
     fn drop(&mut self) {
         if let Some(handle) = self.offline.get() {
             handle.stop();
+        }
+        if let Some(ops) = self.ops.get() {
+            ops.stop();
         }
     }
 }
@@ -637,6 +733,7 @@ struct Handshake {
     cache: Arc<OnceLock<Arc<MediaCache>>>,
     uploads: Arc<OnceLock<Uploads>>,
     offline: Arc<OnceLock<OfflineHandle>>,
+    ops: Arc<OnceLock<OpQueue>>,
 }
 
 impl Handshake {
@@ -673,6 +770,7 @@ impl Handshake {
                     // Thumbnails come from the saved copies, then from the temporary cache.
                     self.open_cache(&library.library_id);
                     self.start_offline(&library.library_id);
+                    self.start_ops(&library.library_id);
                     let gate = Gate::Offline {
                         library: library.clone(),
                     };
@@ -692,6 +790,7 @@ impl Handshake {
     fn connected(&self, library: &LibraryInfo) {
         *self.health.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.open_cache(&library.library_id);
+        self.start_ops(&library.library_id);
         if let (None, Some(root)) = (self.uploads.get(), &self.dirs.data) {
             match queue_path(root, &library.library_id, &self.profile.to_string()) {
                 Some(path) => {
@@ -715,6 +814,32 @@ impl Handshake {
             }
             self.start_offline(&library.library_id);
         }
+    }
+
+    /// Starts the rating queue of the library and profile, the first time the library id is
+    /// known, if a data root was given. It sends only while the gate is open.
+    fn start_ops(&self, library_id: &str) {
+        let (None, Some(root)) = (self.ops.get(), &self.dirs.data) else {
+            return;
+        };
+        // A dropped session starts nothing: its `Drop` has already stopped what there was.
+        if self.cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(path) = crate::queue::queue_path(root, library_id, &self.profile.to_string())
+        else {
+            tracing::warn!("library or profile id is not a safe file name");
+            return;
+        };
+        let _ = self.ops.set(OpQueue::start(QueueConfig {
+            url: self.url.clone(),
+            token: self.token.clone(),
+            ctx: self.ctx.clone(),
+            gate: self.gate.clone(),
+            health: self.health.clone(),
+            cancelled: self.cancelled.clone(),
+            path,
+        }));
     }
 
     /// Opens the library's thumbnail cache (and trims it), the first time its id is known.

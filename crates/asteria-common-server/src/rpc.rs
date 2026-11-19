@@ -5,10 +5,11 @@ use std::sync::atomic::Ordering;
 
 use asteria_common_api::{
     ExistingMedia, FOLDER_LIST, FolderListParams, FolderListing, HISTORY_DEFAULT_LIMIT,
-    HISTORY_MAX_LIMIT, ItemId, LIBRARY_INFO, LIBRARY_RESCAN, LibraryInfo, MEDIA_GET, MEDIA_UPDATE,
-    MediaGetParams, MediaItem, MediaUpdateParams, ORGANIZE_APPLY, ORGANIZE_HISTORY,
-    ORGANIZE_STATUS, ORGANIZE_UNDO, OpStatus, OrganizeApplyParams, OrganizeHistoryParams,
-    OrganizeResult, OrganizeStatus, OrganizeStatusParams, OrganizeUndoParams, RpcError, RpcOutcome,
+    HISTORY_MAX_LIMIT, ItemId, LIBRARY_INFO, LIBRARY_RESCAN, LibraryInfo, MAX_RATING_OPS,
+    MEDIA_GET, MEDIA_UPDATE, MediaGetParams, MediaItem, MediaUpdateParams, OPS_APPLY,
+    ORGANIZE_APPLY, ORGANIZE_HISTORY, ORGANIZE_STATUS, ORGANIZE_UNDO, OpStatus, OpsApplyParams,
+    OpsApplyResult, OrganizeApplyParams, OrganizeHistoryParams, OrganizeResult, OrganizeStatus,
+    OrganizeStatusParams, OrganizeUndoParams, RatingOpResult, RatingOpStatus, RpcError, RpcOutcome,
     RpcResponse, SERVER_INFO, ServerInfo, UPLOAD_ABORT, UPLOAD_BEGIN, UPLOAD_CHECK, UPLOAD_COMMIT,
     UPLOAD_STATUS, UploadBeginParams, UploadCheckParams, UploadCheckResult, UploadCommitParams,
     UploadCommitResult, UploadSessionParams, codes,
@@ -264,6 +265,42 @@ async fn dispatch(
             let p: MediaUpdateParams = params(p)?;
             let rec = state.writer().update(actor, p).await.map_err(write_err)?;
             to_value(media_item(rec, user, owner))
+        }
+        OPS_APPLY => {
+            let p: OpsApplyParams = params(p)?;
+            if p.ops.len() > MAX_RATING_OPS {
+                return Err(rpc_error(
+                    codes::INVALID_PARAMS,
+                    format!("at most {MAX_RATING_OPS} operations per call"),
+                ));
+            }
+            let outcomes = state
+                .writer()
+                .apply_ops(actor, p.ops)
+                .await
+                .map_err(write_err)?;
+            let results = outcomes
+                .into_iter()
+                .map(|(id, o)| match o {
+                    Ok((changed, rec)) => RatingOpResult {
+                        id,
+                        status: if changed {
+                            RatingOpStatus::Applied
+                        } else {
+                            RatingOpStatus::Superseded
+                        },
+                        item: Some(media_item(rec, user, owner)),
+                        reason: None,
+                    },
+                    Err(reason) => RatingOpResult {
+                        id,
+                        status: RatingOpStatus::Rejected,
+                        item: None,
+                        reason: Some(reason),
+                    },
+                })
+                .collect();
+            to_value(OpsApplyResult { results })
         }
         UPLOAD_CHECK => {
             let p: UploadCheckParams = params(p)?;

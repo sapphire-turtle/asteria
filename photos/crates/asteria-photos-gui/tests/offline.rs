@@ -291,3 +291,28 @@ fn low_quality_against_an_older_server_shows_preview() {
         "{asked:?}"
     );
 }
+
+#[test]
+fn stars_work_offline() {
+    let (fx, item) = save_inbox_then_lose_the_server(library(false));
+    let (ctx, mut app) = open_offline(&fx);
+    open_and_find(&ctx, &mut app, "Inbox", "Inbox/a.jpg");
+    app.select(&item.id);
+    for _ in 0..5 {
+        frame(&ctx, &mut app);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let view = app.detail().unwrap();
+    assert_eq!(view.rating(), None);
+    // The other editors wait for the server; the stars do not.
+    assert!(view.editors_shown());
+    assert!(!view.metadata_editors_enabled());
+
+    let stars = star_centres(&ctx, &mut app);
+    click_at(&ctx, &mut app, stars[1]);
+    frame(&ctx, &mut app);
+    let session = app.connection().unwrap().session();
+    assert_eq!(session.pending_ratings(), 1);
+    assert_eq!(app.detail().unwrap().rating(), Some(2));
+    assert_eq!(app.notice(), None);
+}

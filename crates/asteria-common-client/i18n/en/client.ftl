@@ -5,6 +5,20 @@ asteria-common-client-grid-failed = The thumbnail could not be loaded: { $reason
 asteria-common-client-grid-video = Video
 asteria-common-client-grid-read-only = Read-only: { $reason }
 asteria-common-client-grid-rating = Rated { $stars } of 5
+asteria-common-client-rating-set = { $stars ->
+    [one] Rate 1 star
+   *[other] Rate { $stars } stars
+}
+asteria-common-client-rating-clear = Clear the rating
+asteria-common-client-ratings-pending = { $count ->
+    [one] 1 rating
+   *[other] { $count } ratings
+} not sent yet
+asteria-common-client-rating-rejected = Could not apply a rating ({ $reason })
+asteria-common-client-rating-reason-not-found = not found
+asteria-common-client-rating-reason-read-only = read-only
+asteria-common-client-rating-reason-invalid = invalid
+asteria-common-client-rating-not-saved = Could not save a rating
 
 # The servers settings page.
 asteria-common-client-servers-title = Servers

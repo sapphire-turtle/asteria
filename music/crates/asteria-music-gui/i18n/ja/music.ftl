@@ -45,6 +45,8 @@ asteria-music-tracks-moved-hover = このファイルは移動されていまし
 asteria-music-tracks-missing-hover = { $path } のファイルが見つかりません。
 asteria-music-tracks-play-next = 次に再生
 asteria-music-tracks-append = キューに追加
+asteria-music-tracks-rate = 評価
+asteria-music-tracks-rate-none = 評価なし
 
 # 再生バー。
 asteria-music-bar-previous = 前へ

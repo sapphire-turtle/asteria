@@ -3,18 +3,19 @@
 
 mod support;
 
-use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use asteria_common_api::{ItemId, MediaItem, codes};
 use asteria_photos_gui::PhotosApp;
-use asteria_photos_gui::detail::{BUSY_RETRY_DELAY, Edit, EditError, Field, rating_after_click};
+use asteria_photos_gui::detail::{BUSY_RETRY_DELAY, Edit, EditError, Field};
 use corundum_framework::egui;
 use serde_json::{Value, json};
 
-use support::common::{StubResponse, library_info, photos_server_info, serve};
+use support::common::ops::{Calls, all_applied};
+use support::common::{DEADLINE, StubResponse, library_info, photos_server_info, serve};
 use support::server::TestServer;
 use support::*;
 
@@ -43,7 +44,7 @@ fn sending(app: &PhotosApp, field: Field) -> bool {
 }
 
 #[test]
-fn rating_edit_roundtrips() {
+fn label_edit_roundtrips() {
     let server = TestServer::start(&["a.jpg"], |_| {});
     let (_fx, ctx, mut app) = open_real(&server, 1);
     let id = listed(&app, "a.jpg").id.clone();
@@ -52,50 +53,38 @@ fn rating_edit_roundtrips() {
     let view = app.detail().expect("the selected item's detail");
     assert_eq!(view.item().id, id);
     assert!(view.editors_shown());
+    assert!(view.metadata_editors_enabled());
     assert_eq!(view.read_only_reason(), None);
 
-    // The fourth star.
-    assert!(app.edit(Edit::Rating(rating_after_click(None, 4))));
-    // Its editor is disabled while the change is on its way; another click is not sent.
-    assert!(sending(&app, Field::Rating));
-    assert!(!sending(&app, Field::Label));
-    assert!(!app.edit(Edit::Rating(2)));
+    assert!(app.edit(Edit::Label(Some("Blue".into()))));
+    // Its editor is disabled while the change is on its way; another edit is not sent.
+    assert!(sending(&app, Field::Label));
+    assert!(!sending(&app, Field::Subjects));
+    assert!(!app.edit(Edit::Label(Some("Red".into()))));
     run_until(
         &ctx,
         &mut app,
         "the server's answer",
         |_| {},
-        |app| !sending(app, Field::Rating),
+        |app| !sending(app, Field::Label),
     );
     // The listing holds the item the server returned.
-    assert_eq!(listed(&app, "a.jpg").rating, Some(4));
+    assert_eq!(listed(&app, "a.jpg").label.as_deref(), Some("Blue"));
     assert_eq!(app.detail().unwrap().error(), None);
-    // The sidecar on disk has it as xmp:Rating.
+    // The sidecar on disk has it as xmp:Label.
     let xmp = std::fs::read_to_string(server.root.join("a.jpg.xmp")).unwrap();
-    assert!(xmp.contains("Rating=\"4\""), "{xmp}");
-    let sc = server
-        .lib
-        .read_sidecar(Path::new("a.jpg"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(sc.rating.unwrap().value, 4);
+    assert!(xmp.contains("Blue"), "{xmp}");
 
-    // Clicking the current star again clears the rating.
-    assert!(app.edit(Edit::Rating(rating_after_click(Some(4), 4))));
+    // Clearing it.
+    assert!(app.edit(Edit::Label(None)));
     run_until(
         &ctx,
         &mut app,
-        "the cleared rating",
+        "the cleared label",
         |_| {},
-        |app| !sending(app, Field::Rating),
+        |app| !sending(app, Field::Label),
     );
-    assert_eq!(listed(&app, "a.jpg").rating.unwrap_or(0), 0);
-    let sc = server
-        .lib
-        .read_sidecar(Path::new("a.jpg"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(sc.rating.unwrap().value, 0);
+    assert_eq!(listed(&app, "a.jpg").label, None);
 
     // Tags and the description go the same way.
     assert!(app.edit(Edit::Subjects(vec!["cat".into()])));
@@ -126,8 +115,8 @@ fn read_only_item_shows_reason_and_no_editors() {
     let view = app.detail().unwrap();
     assert!(view.read_only_reason().is_some_and(|r| !r.is_empty()));
     assert!(!view.editors_shown());
-    assert!(!app.edit(Edit::Rating(3)));
-    assert!(!sending(&app, Field::Rating));
+    assert!(!app.edit(Edit::Label(Some("Red".into()))));
+    assert!(!sending(&app, Field::Label));
     assert_eq!(
         std::fs::read(server.root.join("a.jpg.xmp")).unwrap(),
         b"<not xml"
@@ -140,13 +129,13 @@ fn read_only_item_shows_reason_and_no_editors() {
     frame(&ctx, &mut app);
     assert!(app.detail().unwrap().editors_shown());
     std::fs::write(server.root.join("b.jpg.xmp"), "<not xml").unwrap();
-    assert!(app.edit(Edit::Rating(3)));
+    assert!(app.edit(Edit::Label(Some("Red".into()))));
     run_until(
         &ctx,
         &mut app,
         "the server's refusal",
         |_| {},
-        |app| !sending(app, Field::Rating),
+        |app| !sending(app, Field::Label),
     );
     let view = app.detail().unwrap();
     assert!(view.read_only_reason().is_some_and(|r| !r.is_empty()));
@@ -195,8 +184,8 @@ fn answer_with(id: u64, answer: Value, params: Value) -> StubResponse {
             .header("content-type", "application/json");
     }
     let mut item = item("x");
-    if let Some(r) = params.get("rating") {
-        item["rating"] = r.clone();
+    if let Some(l) = params.get("label") {
+        item["label"] = l.clone();
     }
     StubResponse::rpc_result(id, item)
 }
@@ -221,17 +210,17 @@ fn busy_is_retried_once() {
     // Busy, then done: sent again once, after a short wait, and the editor waits with it.
     let (addr, updates) = update_stub(vec![json!(codes::BUSY), json!("ok")]);
     let (_fx, ctx, mut app) = open_stub(addr);
-    assert!(app.edit(Edit::Rating(5)));
+    assert!(app.edit(Edit::Label(Some("Red".into()))));
     run_until(
         &ctx,
         &mut app,
         "the retried update",
         |app| {
             // Still sending until the retry's answer is in.
-            let done = listed(app, "x.jpg").rating == Some(5);
-            assert_eq!(sending(app, Field::Rating), !done);
+            let done = listed(app, "x.jpg").label.as_deref() == Some("Red");
+            assert_eq!(sending(app, Field::Label), !done);
         },
-        |app| listed(app, "x.jpg").rating == Some(5),
+        |app| listed(app, "x.jpg").label.as_deref() == Some("Red"),
     );
     let times = updates.lock().unwrap().clone();
     assert_eq!(times.len(), 2);
@@ -241,16 +230,16 @@ fn busy_is_retried_once() {
     // Busy twice: no third try; the error shows and the editor is usable again.
     let (addr, updates) = update_stub(vec![json!(codes::BUSY)]);
     let (_fx, ctx, mut app) = open_stub(addr);
-    assert!(app.edit(Edit::Rating(5)));
+    assert!(app.edit(Edit::Label(Some("Red".into()))));
     run_until(
         &ctx,
         &mut app,
         "the second refusal",
         |_| {},
-        |app| !sending(app, Field::Rating),
+        |app| !sending(app, Field::Label),
     );
     assert_eq!(app.detail().unwrap().error(), Some(&EditError::Busy));
-    assert_eq!(listed(&app, "x.jpg").rating, None);
+    assert_eq!(listed(&app, "x.jpg").label, None);
     // Watch a while longer than the retry delay: nothing more is sent.
     let watch = Instant::now();
     while watch.elapsed() < BUSY_RETRY_DELAY * 2 {
@@ -259,7 +248,7 @@ fn busy_is_retried_once() {
     }
     assert_eq!(updates.lock().unwrap().len(), 2);
     // A new edit clears the error and is sent.
-    assert!(app.edit(Edit::Rating(1)));
+    assert!(app.edit(Edit::Label(Some("Blue".into()))));
     assert_eq!(app.detail().unwrap().error(), None);
 }
 
@@ -267,18 +256,18 @@ fn busy_is_retried_once() {
 fn other_errors_reenable_the_editors_and_keep_the_server_value() {
     let (addr, updates) = update_stub(vec![json!(codes::INVALID_PARAMS)]);
     let (_fx, ctx, mut app) = open_stub(addr);
-    assert!(app.edit(Edit::Rating(5)));
+    assert!(app.edit(Edit::Label(Some("Red".into()))));
     run_until(
         &ctx,
         &mut app,
         "the refusal",
         |_| {},
-        |app| !sending(app, Field::Rating),
+        |app| !sending(app, Field::Label),
     );
     let view = app.detail().unwrap();
     assert!(matches!(view.error(), Some(EditError::Failed(_))));
     assert!(view.editors_shown());
-    assert_eq!(listed(&app, "x.jpg").rating, None);
+    assert_eq!(listed(&app, "x.jpg").label, None);
     assert_eq!(updates.lock().unwrap().len(), 1);
 }
 
@@ -326,7 +315,7 @@ fn an_edit_answered_after_a_switch_is_dropped() {
         |app| item_ids(app) == ["x"],
     );
     app.select(&ItemId("x".into()));
-    assert!(app.edit(Edit::Rating(5)));
+    assert!(app.edit(Edit::Label(Some("Red".into()))));
     run_until(
         &ctx,
         &mut app,
@@ -347,12 +336,12 @@ fn an_edit_answered_after_a_switch_is_dropped() {
     let watch = Instant::now();
     while watch.elapsed() < Duration::from_millis(300) {
         frame(&ctx, &mut app);
-        assert_eq!(listed(&app, "x.jpg").rating, None);
+        assert_eq!(listed(&app, "x.jpg").label, None);
         std::thread::sleep(Duration::from_millis(5));
     }
     // Nothing of A's edit is waited for on B.
     app.select(&ItemId("x".into()));
-    assert!(!sending(&app, Field::Rating));
+    assert!(!sending(&app, Field::Label));
 }
 
 #[test]
@@ -392,10 +381,212 @@ fn the_viewer_steps_through_the_listing_and_closes_on_escape() {
     assert_eq!(selected(&app), Some(id("b")));
 }
 
+/// A stub listing item `x`, which the server rates 2, and answering `ops.apply` as asked: held
+/// until `release` is set, and either applying the rating or refusing it with `reject`.
+struct RatingStub {
+    addr: std::net::SocketAddr,
+    calls: Calls,
+    release: Arc<AtomicBool>,
+}
+
+fn rating_stub(hold: bool, reject: Option<&'static str>) -> RatingStub {
+    let calls = Calls::default();
+    let release = Arc::new(AtomicBool::new(!hold));
+    let (seen, released) = (calls.clone(), release.clone());
+    let addr = serve(move |req| {
+        let Some((id, method, params)) = (req.rpc().is_some()).then(|| seen.record(req)) else {
+            return StubResponse::new(404, Vec::new());
+        };
+        match method.as_str() {
+            "server.info" => StubResponse::rpc_result(id, photos_server_info()),
+            "library.info" => StubResponse::rpc_result(id, library_info("lib")),
+            "folder.list" => {
+                let mut x = item("x");
+                x["rating"] = json!(2);
+                let listing = json!({"folders": [], "items": [x], "next_cursor": null});
+                StubResponse::rpc_result(id, listing)
+            }
+            "ops.apply" => {
+                let start = Instant::now();
+                while !released.load(Ordering::SeqCst) {
+                    assert!(start.elapsed() < DEADLINE, "never released");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                match reject {
+                    Some(reason) => {
+                        let results: Vec<Value> = params["ops"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|op| json!({"id": op["id"], "status": "rejected", "reason": reason}))
+                            .collect();
+                        StubResponse::rpc_result(id, json!({ "results": results }))
+                    }
+                    None => StubResponse::rpc_result(id, all_applied(&params)),
+                }
+            }
+            _ => StubResponse::rpc_error(id, codes::METHOD_NOT_FOUND, "method not found"),
+        }
+    });
+    RatingStub {
+        addr,
+        calls,
+        release,
+    }
+}
+
+fn pending(app: &PhotosApp) -> usize {
+    app.connection().unwrap().session().pending_ratings()
+}
+
+fn shown_rating(app: &PhotosApp) -> Option<i8> {
+    app.detail().unwrap().rating()
+}
+
+/// The app on `stub` with `x` selected and its pane drawn: the stars' centres.
+fn open_rating(stub: &RatingStub) -> (Fixture, egui::Context, PhotosApp, Vec<egui::Pos2>) {
+    let (fx, ctx, mut app) = open_stub(stub.addr);
+    // Frames until the pane's layout, preview included, has stopped moving.
+    for _ in 0..5 {
+        frame(&ctx, &mut app);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let stars = star_centres(&ctx, &mut app);
+    (fx, ctx, app, stars)
+}
+
 #[test]
-fn rating_clicks_set_or_clear() {
-    assert_eq!(rating_after_click(None, 3), 3);
-    assert_eq!(rating_after_click(Some(0), 1), 1);
-    assert_eq!(rating_after_click(Some(2), 4), 4);
-    assert_eq!(rating_after_click(Some(4), 4), 0);
+fn a_star_click_shows_at_once() {
+    let stub = rating_stub(true, None);
+    let (_fx, ctx, mut app, stars) = open_rating(&stub);
+    assert_eq!(shown_rating(&app), Some(2));
+
+    click_at(&ctx, &mut app, stars[3]);
+    // The next frame shows four stars, though the server has not answered: its `ops.apply`
+    // is held, and the rating is still unsettled.
+    frame(&ctx, &mut app);
+    assert_eq!(shown_rating(&app), Some(4));
+    assert_eq!(pending(&app), 1);
+    assert!(
+        !app.detail().unwrap().is_sending(Field::Label),
+        "no editor waits for a rating"
+    );
+    assert_eq!(
+        listed(&app, "x.jpg").rating,
+        Some(2),
+        "the listing is the server's"
+    );
+
+    stub.release.store(true, Ordering::SeqCst);
+    run_until(
+        &ctx,
+        &mut app,
+        "the rating to settle",
+        |_| {},
+        |app| pending(app) == 0,
+    );
+    assert_eq!(shown_rating(&app), Some(4));
+    assert_eq!(app.notice(), None);
+    let sent = stub.calls.batches();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        (sent[0][0]["item"].as_str(), sent[0][0]["value"].as_i64()),
+        (Some("x"), Some(4))
+    );
+}
+
+#[test]
+fn a_refused_rating_reverts_and_notices_once() {
+    let stub = rating_stub(true, Some("read_only"));
+    let (_fx, ctx, mut app, stars) = open_rating(&stub);
+    assert_eq!(shown_rating(&app), Some(2));
+
+    click_at(&ctx, &mut app, stars[3]);
+    frame(&ctx, &mut app);
+    assert_eq!(shown_rating(&app), Some(4));
+    assert_eq!(app.notice(), None);
+
+    // The server refuses it: back to the server's rating, and the notice says why.
+    stub.release.store(true, Ordering::SeqCst);
+    run_until(
+        &ctx,
+        &mut app,
+        "the refusal",
+        |_| {},
+        |app| app.notice().is_some(),
+    );
+    assert_eq!(pending(&app), 0);
+    assert_eq!(shown_rating(&app), Some(2));
+    let text = app.notice().unwrap().to_owned();
+    assert_eq!(text, "Could not apply a rating (read-only)");
+
+    // Pushed once: ten more frames neither repeat it nor change what the stars show. A
+    // second push would make a new notice, with its own time.
+    let shown_at = |app: &PhotosApp| app.notice_since();
+    let first = shown_at(&app);
+    assert!(first.is_some());
+    for _ in 0..10 {
+        frame(&ctx, &mut app);
+        assert_eq!(app.notice(), Some(text.as_str()));
+        assert_eq!(shown_at(&app), first, "the notice was pushed again");
+        assert_eq!(shown_rating(&app), Some(2));
+    }
+    assert_eq!(
+        stub.calls.batches().len(),
+        1,
+        "a refused rating is not sent again"
+    );
+}
+
+/// What the grid's star badge on `x` says: its hover text, once the pointer has rested on it.
+fn grid_badge(ctx: &egui::Context, app: &mut PhotosApp) -> Option<String> {
+    ctx.enable_accesskit();
+    let nodes = |out: egui::FullOutput| {
+        out.platform_output
+            .accesskit_update
+            .expect("the tree comes with every frame once accessibility is on")
+            .nodes
+    };
+    let cell = nodes(frame_with(ctx, app, Vec::new()))
+        .into_iter()
+        .find(|(_, n)| n.label() == Some("x.jpg"))
+        .and_then(|(_, n)| n.bounds())
+        .expect("the grid shows x");
+    // Inside the badge's first star, at the cell's lower left, whatever the cell's size.
+    let at = egui::pos2(cell.x0 as f32 + 9.0, cell.y1 as f32 - 10.0);
+    // Moved once, then still: a tooltip waits for the pointer to rest.
+    for i in 0..120 {
+        let events = if i == 0 {
+            vec![egui::Event::PointerMoved(at)]
+        } else {
+            Vec::new()
+        };
+        let said = nodes(frame_with(ctx, app, events))
+            .into_iter()
+            .find_map(|(_, n)| {
+                n.label()
+                    .or(n.value())
+                    .filter(|l| l.starts_with("Rated "))
+                    .map(str::to_owned)
+            });
+        if said.is_some() {
+            return said;
+        }
+    }
+    None
+}
+
+#[test]
+fn the_grid_badge_shows_a_rating_at_once() {
+    let stub = rating_stub(true, None);
+    let (_fx, ctx, mut app, stars) = open_rating(&stub);
+    assert_eq!(grid_badge(&ctx, &mut app).as_deref(), Some("Rated 2 of 5"));
+
+    click_at(&ctx, &mut app, stars[3]);
+    frame(&ctx, &mut app);
+    // The server has not answered: its `ops.apply` is held.
+    assert_eq!(pending(&app), 1);
+    assert_eq!(grid_badge(&ctx, &mut app).as_deref(), Some("Rated 4 of 5"));
+    assert_eq!(pending(&app), 1);
+    stub.release.store(true, Ordering::SeqCst);
 }

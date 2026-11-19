@@ -138,8 +138,8 @@ impl BrowseState {
     }
 
     /// What the detail pane shows for the selected item.
-    pub fn detail(&self) -> Option<DetailView<'_>> {
-        Some(DetailView::new(self.selected_item()?, &self.edits))
+    pub fn detail(&self, session: &Session) -> Option<DetailView<'_>> {
+        Some(DetailView::new(self.selected_item()?, &self.edits, session))
     }
 
     /// Send `edit` of the selected item. Returns whether it was sent: not when nothing is
@@ -427,10 +427,13 @@ impl BrowseState {
             );
             let can = Openable::of(session);
             let dimmed = |item: &MediaItem| !can.open(item);
+            let ratings = session.ratings();
+            let rating = |item: &MediaItem| ratings.of(item);
             let r = ThumbGrid::new(&self.items)
                 .selected(self.selected.clone())
                 .id_salt(salt)
                 .dimmed(&dimmed)
+                .rating(&rating)
                 .show(ui, session.images());
             if let Some(id) = r.selected {
                 self.selected = Some(id);

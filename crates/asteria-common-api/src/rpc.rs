@@ -67,6 +67,7 @@ pub const UPLOAD_BEGIN: &str = "upload.begin";
 pub const UPLOAD_STATUS: &str = "upload.status";
 pub const UPLOAD_COMMIT: &str = "upload.commit";
 pub const UPLOAD_ABORT: &str = "upload.abort";
+pub const OPS_APPLY: &str = "ops.apply";
 pub const ORGANIZE_APPLY: &str = "organize.apply";
 pub const ORGANIZE_UNDO: &str = "organize.undo";
 pub const ORGANIZE_HISTORY: &str = "organize.history";

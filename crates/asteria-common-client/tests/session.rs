@@ -2,24 +2,19 @@
 //! slowly.
 
 mod common;
+mod server;
 
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use asteria_common_api::{ClientInfo, FolderListParams, HandshakeError, MediaUpdateParams};
-use asteria_common_client::profiles::ServerProfile;
 use asteria_common_client::rpc::ClientError;
 use asteria_common_client::session::{
     Reply, Request, RequestId, Response, Session, SessionDirs, SessionState,
 };
-use asteria_common_core::{Library, MediaKind};
-use asteria_common_server::keys::{KeyStore, KeyVerifier};
-use asteria_common_server::upload::UploadStore;
-use asteria_common_server::{AppExtension, AppState, Cache, Processor, router, scan, spawn_writer};
 use corundum_framework::egui;
 use serde_json::json;
 
@@ -27,108 +22,7 @@ use common::{
     DEADLINE, StubRequest, StubResponse, library_info, photos_client, photos_server_info, profile,
     serve, wait_settled,
 };
-
-struct Photos;
-impl AppExtension for Photos {
-    fn accepts(&self, kind: MediaKind) -> bool {
-        matches!(kind, MediaKind::Image | MediaKind::Video)
-    }
-}
-
-/// A photos server on a temporary library, listening on a free local port. Stops when dropped.
-struct TestServer {
-    _dir: tempfile::TempDir,
-    rt: Option<tokio::runtime::Runtime>,
-    addr: SocketAddr,
-    token: String,
-    library_id: String,
-}
-
-impl TestServer {
-    fn start() -> TestServer {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("lib");
-        std::fs::create_dir(&root).unwrap();
-        let lib = Arc::new(
-            Library::init(&root, "owner")
-                .unwrap()
-                .with_state_dir(dir.path().join("state")),
-        );
-        let library_id = lib.config().id.0.to_string();
-        let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
-        let red = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../asteria-common-core/tests/fixtures/red.jpg");
-        std::fs::copy(&red, root.join("a.jpg")).unwrap();
-        scan(&lib, &cache, &Photos).unwrap();
-        // The keys live in the temporary directory, not in the app's data directory.
-        let keys = dir.path().join("keys");
-        let token = KeyStore::open(&keys)
-            .unwrap()
-            .add(
-                "owner",
-                None,
-                asteria_common_server::keys::ProfileId::new("owner").unwrap(),
-            )
-            .unwrap()
-            .1
-            .expose()
-            .to_owned();
-        let processor = Arc::new(Processor::new(
-            dir.path().join("cache/thumbs"),
-            1,
-            Duration::from_secs(60),
-        ));
-        let uploads = Arc::new(UploadStore::open(lib.state_dir().unwrap()).unwrap());
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let addr = rt.block_on(async {
-            let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
-            let (rescan, rescan_rx) = tokio::sync::mpsc::channel(1);
-            let state = AppState::new(
-                lib,
-                cache,
-                writer,
-                Arc::new(KeyVerifier::new(&keys)),
-                asteria_photos_api::APP,
-                asteria_photos_api::APP_API,
-                Arc::new(AtomicBool::new(false)),
-                rescan,
-                Arc::new(Photos),
-                processor,
-                uploads,
-            );
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            tokio::spawn(async move {
-                let _rescan_rx = rescan_rx;
-                axum::serve(listener, router(state)).await.unwrap();
-            });
-            addr
-        });
-        TestServer {
-            _dir: dir,
-            rt: Some(rt),
-            addr,
-            token,
-            library_id,
-        }
-    }
-
-    fn profile(&self, token: &str) -> ServerProfile {
-        profile(self.addr, token)
-    }
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        if let Some(rt) = self.rt.take() {
-            rt.shutdown_background();
-        }
-    }
-}
+use server::TestServer;
 
 #[test]
 fn handshake_ok_reports_library_id() {

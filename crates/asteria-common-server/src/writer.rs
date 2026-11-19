@@ -15,12 +15,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use asteria_common_api::{
-    ItemId, MediaUpdateParams, OpStatus, SkipReason, UploadCommitParams, UploadCommitResult,
+    ItemId, MediaUpdateParams, OpStatus, RatingOp, RejectReason, SkipReason, UploadCommitParams,
+    UploadCommitResult,
 };
 use asteria_common_core::hash::{ContentHash, HashScope};
 use asteria_common_core::journal::{Actor, BatchId};
 use asteria_common_core::{Error as FwError, Library, UserId};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use grain_id::GrainId;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -58,6 +59,10 @@ pub enum WriteError {
     Internal(String),
 }
 
+/// What became of one rating operation: its id, and either whether it changed the rating
+/// with the item as it is now, or why it was refused.
+pub type OpOutcome = (String, Result<(bool, ItemRecord), RejectReason>);
+
 /// A piece of work for the queue: it gets the library and cache and reports on its own.
 type ExecFn = Box<dyn FnOnce(&Arc<Library>, &Arc<Cache>) + Send>;
 
@@ -66,6 +71,11 @@ enum Job {
         actor: Actor,
         params: MediaUpdateParams,
         reply: oneshot::Sender<Result<ItemRecord, WriteError>>,
+    },
+    Ops {
+        actor: Actor,
+        ops: Vec<RatingOp>,
+        reply: oneshot::Sender<Result<Vec<OpOutcome>, WriteError>>,
     },
     Relink {
         reply: oneshot::Sender<Result<RelinkReport, WriteError>>,
@@ -133,6 +143,10 @@ pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHa
                     reply,
                 } => {
                     let r = run_blocking(move || do_update(&lib, &cache, actor, params)).await;
+                    let _ = reply.send(r);
+                }
+                Job::Ops { actor, ops, reply } => {
+                    let r = run_blocking(move || do_ops(&lib, &cache, actor, ops)).await;
                     let _ = reply.send(r);
                 }
                 Job::Relink { reply } => {
@@ -215,6 +229,24 @@ impl Writer {
                 params,
                 reply,
             })
+            .await
+            .map_err(|_| stopped())?;
+        rx.await.map_err(|_| stopped())?
+    }
+
+    /// Applies rating operations in order, each as the rating `media.update` would set but
+    /// at the operation's own time (never later than now), so the newest one wins. A
+    /// refused operation (including one whose sidecar cannot be written) does not stop the
+    /// others; only a failure of the whole call (the cache) fails it, and the client sends
+    /// the whole batch again (a rating applied twice changes nothing).
+    pub async fn apply_ops(
+        &self,
+        actor: Actor,
+        ops: Vec<RatingOp>,
+    ) -> Result<Vec<OpOutcome>, WriteError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Job::Ops { actor, ops, reply })
             .await
             .map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?
@@ -735,6 +767,91 @@ fn do_update(
         .get_by_id(&id)
         .map_err(internal)?
         .ok_or(WriteError::NotFound)
+}
+
+fn do_ops(
+    library: &Library,
+    cache: &Cache,
+    actor: Actor,
+    ops: Vec<RatingOp>,
+) -> Result<Vec<OpOutcome>, WriteError> {
+    let user = organize::actor_user(actor);
+    let owner = library.owner();
+    let now = Utc::now();
+    ops.into_iter()
+        .map(|op| {
+            let outcome = match parse_rating_op(&op, now) {
+                Ok(at) => do_rating(library, cache, actor, owner, user, &op.item, op.value, at),
+                Err(reason) => Ok(Err(reason)),
+            };
+            outcome.map(|o| (op.id, o))
+        })
+        .collect()
+}
+
+/// The time of `op`, held back to `now`; or why the operation is invalid.
+fn parse_rating_op(op: &RatingOp, now: DateTime<Utc>) -> Result<DateTime<Utc>, RejectReason> {
+    if !(-1..=5).contains(&op.value) {
+        return Err(RejectReason::Invalid);
+    }
+    let at = DateTime::parse_from_rfc3339(&op.at).map_err(|_| RejectReason::Invalid)?;
+    Ok(at.with_timezone(&Utc).min(now))
+}
+
+/// One rating, written like [`do_update`] writes one: a single sidecar write, hash fields
+/// set the same way. The outer error (the cache failed) fails the whole call; the inner one
+/// refuses this operation, as does a sidecar that cannot be written.
+#[allow(clippy::too_many_arguments)]
+fn do_rating(
+    library: &Library,
+    cache: &Cache,
+    actor: Actor,
+    owner: UserId,
+    user: UserId,
+    id: &ItemId,
+    value: i8,
+    at: DateTime<Utc>,
+) -> Result<Result<(bool, ItemRecord), RejectReason>, WriteError> {
+    let Some(rec) = cache.get_by_id(id).map_err(internal)? else {
+        return Ok(Err(RejectReason::NotFound));
+    };
+    if rec.sidecar_error.is_some() {
+        return Ok(Err(RejectReason::ReadOnly));
+    }
+    let rel = Path::new(&rec.path);
+    let stamp = stat(&library.root().join(rel));
+    let hash = usable_hash(&rec, stamp);
+    let file_hash = usable_file_hash(&rec, stamp);
+    let mut changed = false;
+    let written = library.update_sidecar(rel, actor, |sc| {
+        if sc.content_hash.is_none() {
+            sc.content_hash = hash;
+        }
+        sc.file_hash = file_hash;
+        // The value's range was checked before.
+        changed = sc.apply_rating(owner, user, value, at).unwrap_or(false);
+    });
+    if let Err(FwError::MediaNotFound(_)) = written {
+        return Ok(Err(RejectReason::NotFound));
+    }
+    if let Err(e) = refresh_cache(library, cache, &rec) {
+        tracing::warn!(error = %e, path = %rec.path, "cache refresh after write failed");
+    }
+    if let Err(e) = written {
+        // This item's sidecar cannot be written (broken since the scan, or an I/O error):
+        // the operation is refused, and the others still go.
+        match e {
+            FwError::UnsafeSidecarWrite(_) => {
+                tracing::error!(error = %e, path = %rec.path, "unsafe sidecar write refused");
+            }
+            _ => tracing::warn!(error = %e, path = %rec.path, "cannot write a rating"),
+        }
+        return Ok(Err(RejectReason::ReadOnly));
+    }
+    match cache.get_by_id(id).map_err(internal)? {
+        Some(rec) => Ok(Ok((changed, rec))),
+        None => Ok(Err(RejectReason::NotFound)),
+    }
 }
 
 fn refresh_cache(library: &Library, cache: &Cache, rec: &ItemRecord) -> Result<(), ServerError> {

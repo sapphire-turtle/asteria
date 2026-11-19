@@ -78,6 +78,15 @@ pub enum ClientError {
     Offline,
 }
 
+/// Whether the server will take no more requests from this session: it refused the token,
+/// the handshake failed, or it now serves another library. Retrying cannot help.
+pub(crate) fn ends_session(e: &ClientError) -> bool {
+    matches!(
+        e,
+        ClientError::Unauthorized | ClientError::LibraryChanged | ClientError::Handshake(_)
+    )
+}
+
 /// Talks to one server with one token. Blocking: never call it on the UI thread.
 pub struct RpcClient {
     http: Client,

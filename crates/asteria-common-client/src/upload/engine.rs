@@ -18,12 +18,12 @@
 //! whose previous session is still finishing a request waits for it to release the file,
 //! which it does once that request's outcome is applied and saved.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use asteria_common_api::{
@@ -43,8 +43,9 @@ use super::plan::{PlanWarning, plan_drop};
 use super::queue::{
     GroupId, GroupState, QueueSummary, QueuedFile, QueuedGroup, UploadQueue, save_groups,
 };
+use crate::claim::{Claim, claim};
 use crate::profiles::Token;
-use crate::rpc::{ClientError, RpcClient, UPLOAD_TIMEOUT};
+use crate::rpc::{ClientError, RpcClient, UPLOAD_TIMEOUT, ends_session};
 use crate::session::{Gate, Health, lock_gate, note_health};
 
 /// The first wait after the server could not be reached or asked to wait, in milliseconds;
@@ -364,43 +365,6 @@ impl Drop for Uploads {
     }
 }
 
-/// The queue files owned by an engine of this process.
-static OWNED: LazyLock<(Mutex<HashSet<PathBuf>>, Condvar)> =
-    LazyLock::new(|| (Mutex::new(HashSet::new()), Condvar::new()));
-
-/// Ownership of one queue file; released when dropped.
-struct Claim(PathBuf);
-
-impl Drop for Claim {
-    fn drop(&mut self) {
-        let (owned, released) = &*OWNED;
-        owned
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.0);
-        released.notify_all();
-    }
-}
-
-/// Takes ownership of the queue file `path`, waiting while another engine holds it. `None`
-/// if `give_up` turns true first.
-fn claim(path: &Path, give_up: impl Fn() -> bool) -> Option<Claim> {
-    let (owned, released) = &*OWNED;
-    let mut set = owned.lock().unwrap_or_else(|e| e.into_inner());
-    loop {
-        if give_up() {
-            return None;
-        }
-        if set.insert(path.to_owned()) {
-            return Some(Claim(path.to_owned()));
-        }
-        set = released
-            .wait_timeout(set, Duration::from_millis(50))
-            .unwrap_or_else(|e| e.into_inner())
-            .0;
-    }
-}
-
 /// The engine thread: claims and loads the queue, starts the saver, runs the engine, and
 /// on the way out lets the saver write the last state and release the file.
 fn run_engine(inner: Arc<Inner>, rx: mpsc::Receiver<Msg>, cfg: EngineConfig) {
@@ -515,10 +479,7 @@ fn transient(e: &ClientError) -> bool {
 
 /// Whether the engine must stop talking to the server altogether.
 fn halting(e: &ClientError) -> bool {
-    matches!(
-        e,
-        ClientError::Unauthorized | ClientError::LibraryChanged | ClientError::Handshake(_)
-    ) || lacks_uploads(e)
+    ends_session(e) || lacks_uploads(e)
 }
 
 /// Whether `e` says the server has no upload methods (a server older than API 2.2).
