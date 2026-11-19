@@ -155,6 +155,10 @@ fn a_large_backlog_goes_in_batches() {
         queue.rate(item(&format!("item-{n}")), (n % 5) as i8 + 1);
     }
     assert_eq!(queue.pending(), 450);
+    // The appender writes on its own thread; the backlog is the file, so wait for all of it.
+    wait_for("the backlog to reach the file", || {
+        file_lines(&path).len() == 450
+    });
     gate.open();
     gate.wake();
     wait_for("the backlog to be confirmed", || queue.pending() == 0);
