@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use asteria_common_core::{Library, MediaKind};
+use asteria_common_server::journal::{JournalCtx, open_journal};
 use asteria_common_server::keys::{KeyStore, KeyVerifier};
 use asteria_common_server::upload::UploadStore;
 use asteria_common_server::{AppExtension, AppState, Cache, Processor, router, scan, spawn_writer};
@@ -142,9 +143,18 @@ fn env_full(
         1,
         Arc::new(AtomicBool::new(false)),
         rescan,
-        ext,
+        ext.clone(),
         processor.clone(),
         Arc::new(UploadStore::open(&dir.path().join("state")).unwrap()),
+        open_journal(
+            JournalCtx {
+                library: lib.clone(),
+                cache: cache.clone(),
+                ext: ext.clone(),
+            },
+            None,
+        )
+        .unwrap(),
     );
     Env {
         _dir: dir,

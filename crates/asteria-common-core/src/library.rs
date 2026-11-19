@@ -174,7 +174,8 @@ impl Library {
         self.state_dir.as_deref()
     }
 
-    /// This instance's journal, `<state dir>/journal/`.
+    /// This instance's old-format journal, `<state dir>/journal-v1/`; corundum's own journal
+    /// is `<state dir>/journal/`.
     pub fn journal(&self) -> Result<Journal> {
         let dir = self.state_dir.as_ref().ok_or(Error::NoStateDir)?;
         Ok(Journal::new(dir.join(JOURNAL_DIR)))

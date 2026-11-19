@@ -46,7 +46,7 @@ fn journal_goes_to_the_state_dir_not_the_workspace() {
     lib.set_rating(Path::new("red.jpg"), owner, 4, t(1), Actor::User(owner))
         .unwrap();
     let month = Utc::now().format("%Y-%m.jsonl").to_string();
-    assert!(dir.state.path().join("journal").join(month).is_file());
+    assert!(dir.state.path().join("journal-v1").join(month).is_file());
     let mut meta: Vec<_> = fs::read_dir(dir.path().join(".asteria"))
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())

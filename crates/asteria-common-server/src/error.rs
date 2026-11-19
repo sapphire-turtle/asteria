@@ -14,6 +14,9 @@ pub enum ServerError {
     /// The API keys' store.
     #[error("api keys: {0}")]
     Keys(#[from] corundum_framework::keys::Error),
+    /// The journal's store could not open.
+    #[error("journal: {0}")]
+    Journal(#[from] corundum_framework::journal::StoreError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::ids::UserId;
 /// The journal's directory under an instance's state directory.
-pub(crate) const JOURNAL_DIR: &str = "journal";
+pub(crate) const JOURNAL_DIR: &str = "journal-v1";
 const EXT: &str = "jsonl";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

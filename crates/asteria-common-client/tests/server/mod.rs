@@ -14,6 +14,7 @@ use std::time::Duration;
 use asteria_common_api::ItemId;
 use asteria_common_client::profiles::ServerProfile;
 use asteria_common_core::{Library, MediaKind};
+use asteria_common_server::journal::{JournalCtx, open_journal};
 use asteria_common_server::keys::{KeyStore, KeyVerifier};
 use asteria_common_server::upload::UploadStore;
 use asteria_common_server::{AppExtension, AppState, Cache, Processor, router, scan, spawn_writer};
@@ -89,6 +90,15 @@ impl TestServer {
         let (app, addr) = rt.block_on(async {
             let (writer, _h) = spawn_writer(lib.clone(), state_cache.clone());
             let (rescan, rescan_rx) = tokio::sync::mpsc::channel(1);
+            let journal = open_journal(
+                JournalCtx {
+                    library: lib.clone(),
+                    cache: state_cache.clone(),
+                    ext: Arc::new(Photos),
+                },
+                None,
+            )
+            .unwrap();
             let state = AppState::new(
                 lib,
                 state_cache,
@@ -101,6 +111,7 @@ impl TestServer {
                 Arc::new(Photos),
                 processor,
                 uploads,
+                journal,
             );
             let app = router(state);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

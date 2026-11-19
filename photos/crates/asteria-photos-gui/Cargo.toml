@@ -10,7 +10,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-asteria-common-api = { path = "../../../crates/asteria-common-api", version = "2.4.0" }
+asteria-common-api = { path = "../../../crates/asteria-common-api", version = "2.5.0" }
 asteria-common-client = { path = "../../../crates/asteria-common-client" }
 asteria-photos-api = { path = "../asteria-photos-api" }
 corundum-framework = { workspace = true, features = ["gui", "serde", "eframe"] }

@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 asteria-common-core = { path = "../asteria-common-core" }
-asteria-common-api = { path = "../asteria-common-api", version = "2.4.0" }
+asteria-common-api = { path = "../asteria-common-api", version = "2.5.0" }
 blake3.workspace = true
 chrono.workspace = true
 bytes.workspace = true
