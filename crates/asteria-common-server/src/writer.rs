@@ -184,6 +184,23 @@ pub fn spawn_writer(
     (writer, handle)
 }
 
+/// Who has a queued batch job: nobody yet, the queue (it runs), or the caller (it never
+/// runs). The first to take it has it.
+#[derive(Default)]
+struct Claim(std::sync::atomic::AtomicU8);
+
+impl Claim {
+    const RUN: u8 = 1;
+    const DROP: u8 = 2;
+
+    fn take(&self, by: u8) -> bool {
+        use std::sync::atomic::Ordering::AcqRel;
+        self.0
+            .compare_exchange(0, by, AcqRel, std::sync::atomic::Ordering::Acquire)
+            .is_ok()
+    }
+}
+
 /// The error a job reports when its blocking task panicked.
 trait JobError: Send + 'static {
     fn job_failed() -> Self;
@@ -294,7 +311,10 @@ impl Writer {
     ///
     /// A batch that is not over after the wait (`set_organize_wait`) is answered with
     /// `running: true` and no results; it goes on, and `organize.status` reads its outcome
-    /// from the Journal. A dry run is always waited for.
+    /// from the Journal. One the queue has not even started by then (the queue is busy with
+    /// an earlier batch) is `Busy` and never runs, as `media.update` is (§4.3). A request
+    /// whose operations were all skipped while planning runs no batch and has no id. A dry
+    /// run is always waited for.
     pub(crate) async fn organize(
         &self,
         actor: Actor,
@@ -326,6 +346,14 @@ impl Writer {
                 Err((path, why)) => early.push(organize::skipped(i, &path, why)),
             }
         }
+        if indices.is_empty() {
+            // Every operation was skipped while planning: nothing to run, no batch.
+            return Ok(Batch {
+                id: None,
+                results: early,
+                running: false,
+            });
+        }
         let label = label.or_else(|| auto_label(files::Move::KIND, indices.len()));
         plans.push(Op::new::<OrganizeTidy>(&TidyPlan {
             user: organize::actor_user(actor),
@@ -333,7 +361,11 @@ impl Writer {
         }));
         let actor = actor_of(actor);
         let id = self
-            .start_batch(move |j| j.submit(plans, &origin, &actor, label), |_, _| {})
+            .start_batch(
+                deadline,
+                move |j| j.submit(plans, &origin, &actor, label),
+                |_, _| {},
+            )
             .await?;
         self.answer(id, deadline, move |b| {
             organize::merge_results(b, &indices, early)
@@ -346,7 +378,8 @@ impl Writer {
     /// dry run checks the moves back on the queue and touches nothing.
     ///
     /// A batch that cannot be undone (unknown, already undone or being undone, too old, or
-    /// someone else's) is refused at once, before the queue.
+    /// someone else's) is refused at once, before the queue; one the queue does not start
+    /// within the wait is `Busy`, as in [`Writer::organize`].
     pub(crate) async fn undo(
         &self,
         of: BatchId,
@@ -369,6 +402,7 @@ impl Writer {
         }
         let id = self
             .start_batch(
+                deadline,
                 move |j| j.undo_batch(of, &origin, &actor),
                 |lib, b| organize::remove_emptied_folders(lib.root(), &organize::sources(b)),
             )
@@ -380,14 +414,23 @@ impl Writer {
     /// waits for it to end, so the jobs behind it wait too, and runs `ended` with it. Gives
     /// the batch's id as soon as it has started. (The Journal's operations never wait on the
     /// Journal themselves: that is done here.)
+    ///
+    /// A job the queue has not taken by `deadline` is `Busy`, and never runs: the queue and
+    /// the caller each try to claim it, and only one can.
     async fn start_batch(
         &self,
+        deadline: Instant,
         start: impl FnOnce(&ServerJournal) -> Result<BatchId, JournalError> + Send + 'static,
         ended: impl FnOnce(&Arc<Library>, &BatchRecords) + Send + 'static,
     ) -> Result<BatchId, WriteError> {
         let (started, rx) = oneshot::channel();
         let journal = self.journal.clone();
+        let claim = Arc::new(Claim::default());
+        let queue_claim = claim.clone();
         let job = Box::new(move |lib: &Arc<Library>, _: &Arc<Cache>| {
+            if !queue_claim.take(Claim::RUN) {
+                return;
+            }
             let id = match start(&journal) {
                 Ok(id) => id,
                 Err(e) => {
@@ -401,11 +444,20 @@ impl Writer {
                 Err(e) => tracing::error!(error = %e, batch = %id, "a batch failed"),
             }
         });
-        self.tx.send(Job::Exec(job)).await.map_err(|_| stopped())?;
+        let busy = || WriteError::Busy("the batch did not start in time".into());
+        match tokio::time::timeout_at(deadline, self.tx.send(Job::Exec(job))).await {
+            Err(_) => return Err(busy()),
+            Ok(sent) => sent.map_err(|_| stopped())?,
+        }
+        let mut rx = rx;
+        let started = match tokio::time::timeout_at(deadline, &mut rx).await {
+            Ok(started) => started,
+            // Not taken yet: refuse it, unless the queue has just taken it.
+            Err(_) if claim.take(Claim::DROP) => return Err(busy()),
+            Err(_) => rx.await,
+        };
         // A dropped sender means the job panicked.
-        let started = rx
-            .await
-            .map_err(|_| WriteError::Internal("write job failed".into()))?;
+        let started = started.map_err(|_| WriteError::Internal("write job failed".into()))?;
         Ok(started?)
     }
 

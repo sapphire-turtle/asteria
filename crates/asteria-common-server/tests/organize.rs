@@ -199,6 +199,10 @@ async fn unknown_item_is_missing() {
     assert_eq!(r["status"], "skipped");
     assert_eq!(r["reason"], "missing");
     assert_eq!(r["path"], "");
+    // Nothing was left to run: no batch.
+    assert!(v["result"]["batch_id"].is_null(), "{v}");
+    assert_eq!(v["result"]["running"], false);
+    assert!(journal(&e).is_empty());
 }
 
 #[tokio::test]
@@ -696,4 +700,33 @@ async fn a_long_batch_answers_running_then_status_finishes() {
     assert_eq!(r["results"][0]["status"], "done");
     assert_eq!(r["results"][0]["new_path"], "c.jpg");
     assert!(e.root.join("c.jpg").exists() && !Path::new(&e.root.join("a.jpg")).exists());
+}
+
+#[tokio::test]
+async fn an_apply_that_cannot_start_in_time_is_busy_and_never_runs() {
+    let gate = Arc::new(Gate::default());
+    let e = common::env_ext(gate.clone());
+    e.state.set_organize_wait(Duration::from_millis(50));
+    gate.set(true);
+    let first = apply(&e, vec![mv(&e, "a.jpg", "c.jpg")], false, None).await;
+    assert_eq!(first["result"]["running"], true, "{first}");
+
+    // Behind the held batch, the second does not start within the wait.
+    let started = std::time::Instant::now();
+    let second = apply(&e, vec![mv(&e, "sub/b.jpg", "d.jpg")], false, None).await;
+    assert!(started.elapsed() < Duration::from_secs(5), "{second}");
+    assert_eq!(second["error"]["code"], codes::BUSY, "{second}");
+
+    gate.set(false);
+    // A dry run queues behind the refused job, so once it answers the queue has passed it.
+    let dry = apply(&e, vec![mv(&e, "c.jpg", "e.jpg")], true, None).await;
+    assert_eq!(dry["result"]["results"][0]["status"], "done", "{dry}");
+    assert!(e.root.join("sub/b.jpg").exists() && !e.root.join("d.jpg").exists());
+    let batches = journal(&e);
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    assert_eq!(
+        batches[0].begin.batch_id.to_string(),
+        batch_id(&first),
+        "{batches:?}"
+    );
 }

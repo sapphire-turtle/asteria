@@ -15,7 +15,9 @@ use asteria_common_server::journal::files::{
 };
 use asteria_common_server::journal::map::rpc_error;
 use asteria_common_server::journal::{JournalCtx, ServerJournal, open_journal};
-use asteria_common_server::{AppExtension, Cache, ExtContext, Rewrite, item_id_for, scan};
+use asteria_common_server::{
+    AppExtension, Cache, ExtContext, Rewrite, hash_pending, item_id_for, scan,
+};
 use corundum_framework::journal::{
     Actor, BatchId, BatchRecords, JournalError, OpRecord, Origin, Outcome, Planned, Skip,
 };
@@ -241,6 +243,9 @@ fn move_then_undo_restores_file_sidecar_and_cache() {
 #[test]
 fn trash_then_undo_restores_the_path() {
     let e = env();
+    hash_pending(&e.lib, &e.cache, &Default::default()).unwrap();
+    let hashed = e.cache.get_by_path("a.jpg").unwrap().unwrap().hash;
+    assert!(hashed.is_some());
     let b = e.run(vec![e.trash("a.jpg")]);
     let d = done_move(of_kind(&b, "trash")[0]);
     assert_eq!(d.from, "a.jpg");
@@ -258,7 +263,8 @@ fn trash_then_undo_restores_the_path() {
     );
     assert_eq!(fs::read(e.path("a.jpg")).unwrap(), b"photo a");
     assert!(e.path("a.jpg.xmp").exists() && !e.path(&d.to).exists());
-    assert!(e.cached("a.jpg"));
+    // The hash comes back with the item: the trash kept it for the undo.
+    assert_eq!(e.cache.get_by_path("a.jpg").unwrap().unwrap().hash, hashed);
 }
 
 #[test]
