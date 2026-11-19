@@ -1,6 +1,7 @@
 //! The server's journal: the directory it lives in, how it is made ready, and the corundum
 //! `Journal` that runs every change to the library.
 
+pub mod files;
 pub mod map;
 mod prepare;
 
@@ -60,8 +61,23 @@ pub(crate) fn undo_policy() -> UndoPolicy {
     }
 }
 
-/// Registers every operation the server runs; each task adds its own.
-pub fn register_all(_reg: &mut Registry<JournalCtx>, _ext: &dyn AppExtension) {}
+/// Registers every operation the server runs.
+pub fn register_all(reg: &mut Registry<JournalCtx>, _ext: &dyn AppExtension) {
+    files::register(reg);
+}
+
+/// The label of a batch given none, by the kind of its first operation and how many
+/// operations of that kind it has; `None` for a kind with no label of its own.
+pub fn auto_label(kind: &str, n: usize) -> Option<String> {
+    Some(match kind {
+        "move" | "trash" => format!("Move {n} files"),
+        "rate" => format!("Rate {n} items"),
+        "write_sidecar" => "Edit metadata".into(),
+        "upload" => format!("Upload {n} files"),
+        "relink_sidecar" => format!("Relink {n} sidecars"),
+        _ => return None,
+    })
+}
 
 fn system_now_ms() -> i64 {
     SystemTime::now()
@@ -92,6 +108,23 @@ pub async fn wait_up_to<C: Send + Sync + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unnamed_batches_are_labelled_by_their_first_kind() {
+        assert_eq!(auto_label("move", 3).as_deref(), Some("Move 3 files"));
+        assert_eq!(auto_label("trash", 1).as_deref(), Some("Move 1 files"));
+        assert_eq!(auto_label("rate", 2).as_deref(), Some("Rate 2 items"));
+        assert_eq!(
+            auto_label("write_sidecar", 1).as_deref(),
+            Some("Edit metadata")
+        );
+        assert_eq!(auto_label("upload", 4).as_deref(), Some("Upload 4 files"));
+        assert_eq!(
+            auto_label("relink_sidecar", 5).as_deref(),
+            Some("Relink 5 sidecars")
+        );
+        assert_eq!(auto_label("organize_tidy", 1), None);
+    }
 
     #[test]
     fn the_undo_policy_is_the_window_with_no_count_limit() {

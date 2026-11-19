@@ -1,11 +1,12 @@
 //! Moving, renaming and trashing one media file together with its sidecar: the per-operation
-//! core of the organize batches, and the pieces the writer strings into a batch (request
-//! validation, dry runs, the closing steps).
+//! core of the organize batches (run as Journal operations, see [`crate::journal::files`]),
+//! request validation, dry runs, and the batches' results, status and history as the
+//! Journal records them.
 //!
-//! Writes are ordered original, journal, cache. A move never replaces an existing file, and
+//! Writes are ordered original, cache, journal. A move never replaces an existing file, and
 //! a stop at any point never loses an original: after the media moved but before the sidecar
-//! did, `relink_orphans` finds the sidecar again; a missing journal line only loses the
-//! undo of that one move; a stale cache is fixed by the next scan.
+//! did, `relink_orphans` finds the sidecar again; a stop before the Journal records the move
+//! only loses the undo of that one move; a stale cache is fixed by the next scan.
 
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
@@ -13,20 +14,26 @@ use std::path::Path;
 
 use asteria_common_api::{
     BatchSummary, ItemId, MAX_LABEL_CHARS, MAX_OPS, OpResult, OpStatus, OrganizeAction,
-    OrganizeHistory, OrganizeOp, RpcError, SkipReason, codes,
+    OrganizeHistory, OrganizeOp, OrganizeStatus, RpcError, SkipReason, codes,
 };
-use asteria_common_core::fsutil::atomic_write;
 use asteria_common_core::hash::file_hash;
-use asteria_common_core::journal::{Actor, BatchId, JournalEntry, OpId, OpKind};
+use asteria_common_core::journal::{Actor, OpId};
 use asteria_common_core::paths::{META_DIR, TRASH_DIR, sidecar_path_for, trash_rel};
 use asteria_common_core::upload_path::validate_inbox_path;
 use asteria_common_core::{Error as FwError, Library, classify};
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat};
+use corundum_framework::journal::{
+    BatchId, BatchRecords, BatchSummary as JournalSummary, JournalError, OpKind as _, OpRecord,
+    Outcome,
+};
 use grain_id::GrainId;
 
-use crate::cache::{Cache, ExtraRecord, ItemRecord, SidecarSnapshot, StoredHash, item_id_for};
+use crate::cache::{Cache, ItemRecord, SidecarSnapshot, StoredHash, item_id_for};
 use crate::ext::{AppExtension, ExtContext, Rewrite};
 use crate::fsutil::{DirError, check_dirs_inside, create_dirs_inside, move_no_clobber};
+use crate::journal::files::{Expect, MoveDone, planned_op};
+use crate::journal::map::{reason_of, rpc_error as journal_rpc_error};
+use crate::journal::{ServerJournal, files};
 use crate::rpc::rpc_error;
 use crate::scan::{extract_guarded, mtime_ns};
 
@@ -41,18 +48,8 @@ pub(crate) struct PlannedOp {
 #[derive(Debug, Clone)]
 pub(crate) enum Target {
     Path(String),
-    Trash,
-}
-
-/// What the file looked like when the operation was planned.
-#[derive(Debug, Clone)]
-pub(crate) struct Expect {
-    pub size: u64,
-    pub mtime_ns: i128,
-    /// Whole-file hash (`file/1`); compared when given.
-    pub file_hash: Option<String>,
-    /// Brought back into the cache when a file is restored from the trash; never compared.
-    pub hash: Option<StoredHash>,
+    /// Into the trash, under this id (`trash_rel`).
+    Trash(GrainId),
 }
 
 #[derive(Debug, Clone)]
@@ -61,14 +58,14 @@ pub(crate) struct Done {
     pub to: String,
     /// The new record, when the file is now somewhere the library shows.
     pub record: Option<ItemRecord>,
+    /// The file's hash for its stamp, when known: kept for a restore from the trash.
+    pub hash: Option<StoredHash>,
 }
 
 pub(crate) struct OpCtx<'a> {
     pub library: &'a Library,
     pub cache: &'a Cache,
     pub ext: &'a dyn AppExtension,
-    pub actor: Actor,
-    pub batch: Option<BatchId>,
 }
 
 /// The effect of the earlier operations of a batch, for checks that do not touch the disk.
@@ -100,7 +97,6 @@ impl Sim {
 pub(crate) enum FailAt {
     AfterMedia,
     AfterSidecar,
-    AfterJournal,
     /// Not a stop: a foreign sidecar appears at the target after the media moved.
     PlantTargetSidecar,
 }
@@ -116,6 +112,61 @@ fn stop_at(at: FailAt) -> Result<(), SkipReason> {
         return Err(SkipReason::Io);
     }
     Ok(())
+}
+
+/// A move that waits, on whatever thread runs it (the Journal's worker), before it touches
+/// anything: a test stops a batch midway with it, as a crash would.
+#[cfg(test)]
+pub(crate) mod hold {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+
+    struct Held {
+        source: PathBuf,
+        entered: Sender<()>,
+        release: Receiver<()>,
+    }
+
+    static HELD: Mutex<Option<Held>> = Mutex::new(None);
+
+    /// The move of the absolute `source` says so on `entered`, waits for `release`, then
+    /// gives up.
+    pub(crate) struct Hold {
+        pub entered: Receiver<()>,
+        pub release: Sender<()>,
+    }
+
+    pub(crate) fn at(source: PathBuf) -> Hold {
+        let (entered, entered_rx) = channel();
+        let (release_tx, release) = channel();
+        *HELD.lock().unwrap() = Some(Held {
+            source,
+            entered,
+            release,
+        });
+        Hold {
+            entered: entered_rx,
+            release: release_tx,
+        }
+    }
+
+    /// `true` when the move of `source` was held and must give up.
+    pub(crate) fn wait(source: &Path) -> bool {
+        let held = {
+            let mut slot = HELD.lock().unwrap_or_else(|p| p.into_inner());
+            match &*slot {
+                Some(h) if h.source == source => slot.take(),
+                _ => None,
+            }
+        };
+        let Some(h) = held else {
+            return false;
+        };
+        let _ = h.entered.send(());
+        let _ = h.release.recv();
+        true
+    }
 }
 
 fn in_meta_dir(rel: &str) -> bool {
@@ -188,16 +239,12 @@ fn is_case_variant(from: &Path, to: &Path) -> bool {
 /// when `to` is `from` itself in another case, which a move straight there would find taken.
 /// The temporary name is visible, and keeps the extension, so that a file left there by a
 /// crash is found by the next scan.
-fn move_media(from: &Path, to: &Path, op_id: &OpId) -> std::io::Result<()> {
+fn move_media(from: &Path, to: &Path, tag: &GrainId) -> std::io::Result<()> {
     if !is_case_variant(from, to) {
         return move_no_clobber(from, to);
     }
     let name = to.file_name().map(|n| n.to_string_lossy().into_owned());
-    let tmp = to.with_file_name(format!(
-        "asteria-rename-{}-{}",
-        op_id.0,
-        name.unwrap_or_default()
-    ));
+    let tmp = to.with_file_name(format!("asteria-rename-{tag}-{}", name.unwrap_or_default()));
     move_no_clobber(from, &tmp)?;
     move_no_clobber(&tmp, to).inspect_err(|_| {
         if let Err(e) = move_no_clobber(&tmp, from) {
@@ -207,7 +254,7 @@ fn move_media(from: &Path, to: &Path, op_id: &OpId) -> std::io::Result<()> {
     })
 }
 
-fn exists(p: &Path) -> std::io::Result<bool> {
+pub(crate) fn exists(p: &Path) -> std::io::Result<bool> {
     match p.symlink_metadata() {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
@@ -258,15 +305,20 @@ fn check_source(ctx: &OpCtx, op: &PlannedOp) -> Result<(), SkipReason> {
     Ok(())
 }
 
-/// Carries `op` out: the media file and its sidecar move, the move is journaled, and the cache
-/// follows. Checks again against the disk first; never replaces an existing file.
+/// Carries `op` out: the media file and its sidecar move, and the cache follows. Checks
+/// again against the disk first; never replaces an existing file.
 pub(crate) fn apply(ctx: &OpCtx, op: &PlannedOp) -> Result<Done, SkipReason> {
-    check(ctx, op, &Sim::default())?;
     let root = ctx.library.root();
-    let op_id = OpId(GrainId::random());
+    #[cfg(test)]
+    if hold::wait(&root.join(&op.from)) {
+        return Err(SkipReason::Io);
+    }
+    check(ctx, op, &Sim::default())?;
+    // Names the temporary file of a case-only rename.
+    let tag = GrainId::random();
     let to = match &op.to {
         Target::Path(p) => p.clone(),
-        Target::Trash => trash_rel(&op_id, &op.from),
+        Target::Trash(id) => trash_rel(&OpId(*id), &op.from),
     };
     let from_abs = root.join(&op.from);
     let to_abs = root.join(&to);
@@ -279,7 +331,7 @@ pub(crate) fn apply(ctx: &OpCtx, op: &PlannedOp) -> Result<Done, SkipReason> {
         DirError::Io(e) => io_skip("cannot create folder", &to, &e),
         linked => dir_skip(&to, linked),
     })?;
-    move_media(&from_abs, &to_abs, &op_id).map_err(|e| match e.kind() {
+    move_media(&from_abs, &to_abs, &tag).map_err(|e| match e.kind() {
         ErrorKind::AlreadyExists => SkipReason::TargetExists,
         ErrorKind::NotFound => SkipReason::Missing,
         _ => io_skip("cannot move media", &op.from, &e),
@@ -290,9 +342,9 @@ pub(crate) fn apply(ctx: &OpCtx, op: &PlannedOp) -> Result<Done, SkipReason> {
     if FAIL_AT.with(|f| f.get()) == Some(FailAt::PlantTargetSidecar) {
         std::fs::write(&to_sidecar, "foreign sidecar").unwrap();
     }
-    if has_sidecar && let Err(e) = move_media(&from_sidecar, &to_sidecar, &op_id) {
+    if has_sidecar && let Err(e) = move_media(&from_sidecar, &to_sidecar, &tag) {
         // Never leave the media moved with its sidecar behind.
-        if let Err(back) = move_media(&to_abs, &from_abs, &op_id) {
+        if let Err(back) = move_media(&to_abs, &from_abs, &tag) {
             tracing::error!(from = %op.from, %to, error = %back,
                 "could not put the media back after its sidecar failed to move");
         }
@@ -318,36 +370,8 @@ pub(crate) fn apply(ctx: &OpCtx, op: &PlannedOp) -> Result<Done, SkipReason> {
                 .clone()
                 .filter(|h| (h.size, h.mtime_ns) == stamp)
         });
-    let kind = if in_meta_dir(&to) {
-        OpKind::Trash
-    } else if op.from.rsplit_once('/').map(|p| p.0) == to.rsplit_once('/').map(|p| p.0) {
-        OpKind::Rename
-    } else {
-        OpKind::Move
-    };
-    let entry = JournalEntry {
-        op_id,
-        plan_id: ctx.batch,
-        actor: ctx.actor,
-        at: Utc::now(),
-        kind,
-        before: serde_json::json!({
-            "path": op.from,
-            "size": op.expect.size,
-            "mtime_ns": op.expect.mtime_ns as i64,
-            "hash": hash,
-        }),
-        after: serde_json::json!({ "path": to, "sidecar": has_sidecar }),
-    };
-    // The original has moved, so a journal failure cannot undo that: log it and go on.
-    if let Err(e) = ctx.library.journal().and_then(|j| j.append(&entry)) {
-        tracing::error!(from = %op.from, %to, error = %e, "moved a file but could not journal it");
-    }
-    #[cfg(test)]
-    stop_at(FailAt::AfterJournal)?;
-
     let record = update_cache(ctx, op, &to);
-    Ok(Done { to, record })
+    Ok(Done { to, record, hash })
 }
 
 /// Brings the cache in line with the move. A failure is only logged: the next scan fixes it.
@@ -410,7 +434,7 @@ fn restore_record(ctx: &OpCtx, op: &PlannedOp, to: &str) -> Result<Option<ItemRe
 /// (the path is what `OpResult::path` reports; empty when the item is unknown).
 pub(crate) type Planned = Result<PlannedOp, (String, SkipReason)>;
 
-/// What a finished batch reports.
+/// What a batch reports.
 pub struct Batch {
     /// `None` for a dry run.
     pub id: Option<BatchId>,
@@ -479,7 +503,7 @@ pub(crate) fn plan_apply(cache: &Cache, ops: &[OrganizeOp]) -> Result<Vec<Planne
                 }
                 Target::Path(to.clone())
             }
-            OrganizeAction::Trash => Target::Trash,
+            OrganizeAction::Trash => Target::Trash(GrainId::random()),
         };
         planned.push(match rec {
             None => Err((String::new(), SkipReason::Missing)),
@@ -534,14 +558,12 @@ pub(crate) fn reported_path(op: &PlannedOp) -> &str {
     }
 }
 
-/// The report of an operation that `apply` carried out. A move into the trash (the redo
-/// of a trash) reports like a trash: no new path or id.
-pub(crate) fn applied(index: usize, op: &PlannedOp, d: Done) -> OpResult {
+/// The report of an operation that was carried out, to `to`. A move into the trash (the
+/// redo of a trash) reports like a trash: no new path or id.
+fn applied(index: usize, op: &PlannedOp, to: String, item_id: Option<ItemId>) -> OpResult {
     let path = reported_path(op);
     match &op.to {
-        Target::Path(to) if !in_meta_dir(to) => {
-            done(index, path, Some(d.to), d.record.map(|r| r.id))
-        }
+        Target::Path(p) if !in_meta_dir(p) => done(index, path, Some(to), item_id),
         _ => done(index, path, None, None),
     }
 }
@@ -568,7 +590,7 @@ pub(crate) fn dry_run(ctx: &OpCtx, ops: &[Planned]) -> Vec<OpResult> {
                         };
                         done(i, reported_path(op), new_path, id)
                     }
-                    Target::Trash => {
+                    Target::Trash(_) => {
                         sim.free(&op.from);
                         done(i, reported_path(op), None, None)
                     }
@@ -602,65 +624,9 @@ pub(crate) fn rewrites_after(
         })
 }
 
-/// The first journal line of a batch.
-pub(crate) fn write_header(
-    ctx: &OpCtx,
-    label: Option<&str>,
-    op_count: usize,
-    undo_of: Option<BatchId>,
-) -> Result<(), FwError> {
-    append(
-        ctx,
-        OpKind::Batch,
-        serde_json::Value::Null,
-        serde_json::json!({ "label": label, "op_count": op_count, "undo_of": undo_of }),
-    )
-}
-
-fn append(
-    ctx: &OpCtx,
-    kind: OpKind,
-    before: serde_json::Value,
-    after: serde_json::Value,
-) -> Result<(), FwError> {
-    ctx.library.journal()?.append(&JournalEntry {
-        op_id: OpId(GrainId::random()),
-        plan_id: ctx.batch,
-        actor: ctx.actor,
-        at: Utc::now(),
-        kind,
-        before,
-        after,
-    })
-}
-
-/// The last write job of a batch: removes the folders the moves emptied, applies the
-/// rewrites and journals the end.
-pub(crate) fn finish(
-    ctx: &OpCtx,
-    sources: &[String],
-    rewrites: &[Rewrite],
-    done: usize,
-    skipped: usize,
-) {
-    remove_emptied_folders(ctx.library.root(), sources);
-    for rw in rewrites {
-        apply_rewrite(ctx, rw);
-    }
-    let end = append(
-        ctx,
-        OpKind::BatchEnd,
-        serde_json::Value::Null,
-        serde_json::json!({ "done": done, "skipped": skipped }),
-    );
-    if let Err(e) = end {
-        tracing::error!(error = %e, "could not journal the end of a batch");
-    }
-}
-
 /// Removes the folders that `sources` left empty, up towards the root. The library root,
 /// `.asteria` and the trash folder stay.
-fn remove_emptied_folders(root: &Path, sources: &[String]) {
+pub(crate) fn remove_emptied_folders(root: &Path, sources: &[String]) {
     let keep = format!("{META_DIR}/{TRASH_DIR}");
     for src in sources {
         let mut dir = src.rsplit_once('/').map(|p| p.0);
@@ -677,7 +643,8 @@ fn remove_emptied_folders(root: &Path, sources: &[String]) {
     }
 }
 
-fn safe_rel(rel: &str) -> bool {
+/// A library path the app may rewrite: relative, plain, and not inside `.asteria`.
+pub(crate) fn safe_rel(rel: &str) -> bool {
     !rel.is_empty()
         && !in_meta_dir(rel)
         && Path::new(rel)
@@ -685,240 +652,187 @@ fn safe_rel(rel: &str) -> bool {
             .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
-/// Writes `rw.after` over `rw.path` if the file still holds `rw.before`, journals it and
-/// updates the extras record. Anything else is logged and left alone.
-fn apply_rewrite(ctx: &OpCtx, rw: &Rewrite) {
-    if !safe_rel(&rw.path) {
-        tracing::warn!(path = %rw.path, "rewrite refused: not a library path");
-        return;
-    }
-    let abs = ctx.library.root().join(&rw.path);
-    // Writing over a link would replace it with a plain file.
-    if std::fs::symlink_metadata(&abs).is_ok_and(|m| m.file_type().is_symlink()) {
-        tracing::info!(path = %rw.path, "rewrite skipped: the playlist is a symlink");
-        return;
-    }
-    match std::fs::read_to_string(&abs) {
-        Ok(now) if now == rw.before => {}
-        Ok(_) => {
-            tracing::warn!(path = %rw.path, "rewrite skipped: the file changed meanwhile");
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(path = %rw.path, error = %e, "rewrite skipped: cannot read the file");
-            return;
-        }
-    }
-    if let Err(e) = atomic_write(&abs, rw.after.as_bytes()) {
-        tracing::warn!(path = %rw.path, error = %e, "rewrite failed");
-        return;
-    }
-    let journaled = append(
-        ctx,
-        OpKind::RewritePlaylist,
-        serde_json::json!({ "path": rw.path, "content": rw.before }),
-        serde_json::json!({ "path": rw.path, "content": rw.after }),
-    );
-    if let Err(e) = journaled {
-        tracing::error!(path = %rw.path, error = %e, "rewrote a file but could not journal it");
-    }
-    if ctx.ext.wants_extra(&rw.path)
-        && let Ok(meta) = std::fs::metadata(&abs)
-    {
-        let rec = ExtraRecord {
-            size: meta.len(),
-            mtime_ns: mtime_ns(&meta),
-        };
-        if let Err(e) = ctx.cache.put_extras(&[(rw.path.clone(), rec)]) {
-            tracing::warn!(path = %rw.path, error = %e, "extras not updated; the next scan will fix it");
-        }
+/// The operations of a batch that answer to the request's: its own `move` and `trash`, in
+/// order (an undo's included), not their children nor the closing tidy.
+fn file_ops(b: &BatchRecords) -> impl DoubleEndedIterator<Item = &OpRecord> {
+    b.ops.iter().filter(|o| {
+        o.parent.is_none() && (o.kind == files::Move::KIND || o.kind == files::Trash::KIND)
+    })
+}
+
+fn done_of(rec: &OpRecord) -> Option<MoveDone> {
+    match &rec.outcome {
+        Outcome::Done(v) => serde_json::from_value(v.clone()).ok(),
+        Outcome::Skipped(_) => None,
     }
 }
 
-/// What `organize.undo` runs: the inverse operations, newest first, and the playlists to put
-/// back afterwards.
-pub(crate) struct UndoPlan {
-    /// A journal line that cannot be read stays in as a skipped operation.
-    pub ops: Vec<Planned>,
-    pub restores: Vec<Rewrite>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum UndoError {
-    NotFound,
-    AlreadyUndone,
-}
-
-fn header_undo_of(e: &JournalEntry) -> Option<BatchId> {
-    serde_json::from_value(e.after.get("undo_of")?.clone()).ok()
-}
-
-/// The batches in the journal, newest first.
-pub(crate) fn history(entries: &[JournalEntry]) -> Vec<BatchSummary> {
-    let mut order: Vec<BatchSummary> = Vec::new();
-    let mut index: HashMap<BatchId, usize> = HashMap::new();
-    for e in entries {
-        let Some(id) = e.plan_id else { continue };
-        match e.kind {
-            OpKind::Batch if !index.contains_key(&id) => {
-                let (user, agent) = match e.actor {
-                    Actor::User(u) => (u, false),
-                    Actor::Agent { on_behalf_of } => (on_behalf_of, true),
-                };
-                index.insert(id, order.len());
-                order.push(BatchSummary {
-                    batch_id: id.0.to_string(),
-                    user: user.to_string(),
-                    agent,
-                    at: e.at.to_rfc3339_opts(SecondsFormat::AutoSi, true),
-                    label: parsed(&e.after, "label"),
-                    op_count: parsed(&e.after, "op_count").unwrap_or(0),
-                    done: 0,
-                    skipped: 0,
-                    complete: false,
-                    undo_of: header_undo_of(e).map(|b| b.0.to_string()),
-                    undone_by: None,
-                });
-            }
-            OpKind::Move | OpKind::Rename | OpKind::Trash => {
-                if let Some(&i) = index.get(&id) {
-                    order[i].done += 1;
-                }
-            }
-            OpKind::BatchEnd => {
-                if let Some(&i) = index.get(&id) {
-                    order[i].complete = true;
-                    order[i].skipped = parsed(&e.after, "skipped").unwrap_or(0);
-                }
-            }
-            _ => {}
-        }
+/// The report of a recorded `move` or `trash`. An operation whose plan cannot be read (an
+/// undo the Journal could not plan) reports no path.
+fn result_of(index: usize, rec: &OpRecord) -> OpResult {
+    let op = planned_op(&rec.kind, &rec.plan);
+    let path = op.as_ref().map_or("", reported_path);
+    match (&rec.outcome, &op, done_of(rec)) {
+        (Outcome::Skipped(s), _, _) => skipped(index, path, reason_of(s)),
+        (Outcome::Done(_), Some(op), Some(d)) => applied(index, op, d.to, d.item_id.map(ItemId)),
+        (Outcome::Done(_), _, _) => done(index, path, None, None),
     }
-    // In journal order, so the newest undo of a batch is the one that stays.
-    for i in 0..order.len() {
-        let Some(target) = order[i].undo_of.clone() else {
-            continue;
-        };
-        let by = order[i].batch_id.clone();
-        if let Some(&t) = target
-            .parse::<GrainId>()
-            .ok()
-            .and_then(|g| index.get(&BatchId(g)))
-        {
-            order[t].undone_by = Some(by);
-        }
-    }
-    order.reverse();
-    order
 }
 
-/// One page of `all` (newest first): the batches older than `cursor`, at most `limit`.
-pub(crate) fn history_page(
-    all: Vec<BatchSummary>,
+/// The reports of the batch's operations, numbered in order.
+pub(crate) fn results(b: &BatchRecords) -> Vec<OpResult> {
+    file_ops(b)
+        .enumerate()
+        .map(|(i, rec)| result_of(i, rec))
+        .collect()
+}
+
+/// The reports of an `organize.apply` batch: the operations it ran under their request
+/// index (`indices`, in order), with the ones skipped before it ran (`early`).
+pub(crate) fn merge_results(
+    b: &BatchRecords,
+    indices: &[usize],
+    early: Vec<OpResult>,
+) -> Vec<OpResult> {
+    let mut ran = file_ops(b);
+    let mut out: Vec<OpResult> = indices
+        .iter()
+        .map(|&i| match ran.next() {
+            Some(rec) => result_of(i, rec),
+            // The batch ended without it (its record could not be written).
+            None => skipped(i, "", SkipReason::Io),
+        })
+        .collect();
+    out.extend(early);
+    out.sort_by_key(|r| r.index);
+    out
+}
+
+/// The moves that would undo the batch, newest first, for a dry run.
+pub(crate) fn undo_plans(b: &BatchRecords) -> Vec<Planned> {
+    file_ops(b)
+        .rev()
+        .filter(|rec| matches!(rec.outcome, Outcome::Done(_)))
+        .map(|rec| {
+            let back = done_of(rec).map(|d| d.back().op());
+            back.ok_or_else(|| (String::new(), SkipReason::Io))
+        })
+        .collect()
+}
+
+/// The places the batch's operations moved files from, for the folders they may have left
+/// empty.
+pub(crate) fn sources(b: &BatchRecords) -> Vec<String> {
+    file_ops(b).filter_map(done_of).map(|d| d.from).collect()
+}
+
+/// Whether the batch ran to its end; one ended when the store was opened again did not.
+fn ran_to_end(s: &JournalSummary) -> bool {
+    s.complete && !s.interrupted
+}
+
+fn summary_of(s: &JournalSummary) -> BatchSummary {
+    let at = DateTime::from_timestamp_millis(s.begin.at)
+        .unwrap_or(DateTime::UNIX_EPOCH)
+        .to_rfc3339_opts(SecondsFormat::AutoSi, true);
+    BatchSummary {
+        batch_id: s.begin.batch_id.to_string(),
+        user: s.begin.actor.principal.clone(),
+        agent: s.begin.actor.agent,
+        at,
+        label: s.begin.label.clone(),
+        op_count: s.done + s.skipped,
+        done: s.done,
+        skipped: s.skipped,
+        complete: ran_to_end(s),
+        // A redo undoes the undo it names.
+        undo_of: s.begin.undo_of.or(s.begin.redo_of).map(|b| b.to_string()),
+        undone_by: s.undone_by.map(|b| b.to_string()),
+    }
+}
+
+/// Whether the batch has one of its own operations of these kinds.
+fn has_kind(
+    journal: &ServerJournal,
+    s: &JournalSummary,
+    kinds: &[String],
+) -> Result<bool, RpcError> {
+    match journal.status(s.begin.batch_id) {
+        Ok(b) => Ok(b
+            .ops
+            .iter()
+            .any(|o| o.parent.is_none() && kinds.contains(&o.kind))),
+        // Dropped from the store meanwhile.
+        Err(JournalError::NotFound(_)) => Ok(false),
+        Err(e) => Err(journal_rpc_error(e)),
+    }
+}
+
+/// One page of the history, newest first: at most `limit` batches older than `cursor`,
+/// only those with an operation of `kinds` when given. Blocks on the Journal.
+pub(crate) fn history(
+    journal: &ServerJournal,
     limit: u32,
     cursor: Option<&str>,
+    kinds: Option<&[String]>,
 ) -> Result<OrganizeHistory, RpcError> {
-    let start = match cursor {
-        None => 0,
-        Some(c) => {
-            all.iter()
-                .position(|b| b.batch_id == c)
-                .ok_or_else(|| invalid("unknown cursor"))?
-                + 1
-        }
+    let unknown = || invalid("unknown cursor");
+    let mut cursor = match cursor {
+        None => None,
+        Some(c) => Some(BatchId(c.parse::<GrainId>().map_err(|_| unknown())?)),
     };
-    let mut batches: Vec<BatchSummary> = all.into_iter().skip(start).collect();
-    let more = batches.len() > limit as usize;
-    batches.truncate(limit as usize);
+    // One more than asked, to tell whether there is a next page.
+    let want = limit as usize + 1;
+    let mut found: Vec<BatchSummary> = Vec::new();
+    while found.len() < want {
+        let page = journal.history(cursor, want).map_err(|e| match e {
+            JournalError::NotFound(_) => unknown(),
+            e => journal_rpc_error(e),
+        })?;
+        let Some(last) = page.last() else { break };
+        cursor = Some(last.begin.batch_id);
+        let end = page.len() < want;
+        for s in &page {
+            if found.len() == want {
+                break;
+            }
+            let keep = match kinds {
+                None => true,
+                Some(kinds) => has_kind(journal, s, kinds)?,
+            };
+            if keep {
+                found.push(summary_of(s));
+            }
+        }
+        if end {
+            break;
+        }
+    }
+    let more = found.len() > limit as usize;
+    found.truncate(limit as usize);
     let next_cursor = if more {
-        batches.last().map(|b| b.batch_id.clone())
+        found.last().map(|b| b.batch_id.clone())
     } else {
         None
     };
     Ok(OrganizeHistory {
-        batches,
+        batches: found,
         next_cursor,
     })
 }
 
-fn parsed<T: serde::de::DeserializeOwned>(v: &serde_json::Value, key: &str) -> Option<T> {
-    serde_json::from_value(v.get(key)?.clone()).ok()
-}
-
-/// A path as the journal wrote it: relative, with plain components only (it may lie in the
-/// trash folder).
-fn plain_rel(rel: &str) -> bool {
-    !rel.is_empty()
-        && Path::new(rel)
-            .components()
-            .all(|c| matches!(c, std::path::Component::Normal(_)))
-}
-
-/// The inverse of batch `id`. Fails when there is no such batch or an undo of it exists.
-/// A line that cannot be read is logged and left out.
-pub(crate) fn plan_undo(entries: &[JournalEntry], id: BatchId) -> Result<UndoPlan, UndoError> {
-    let mut found = false;
-    let mut ops = Vec::new();
-    let mut restores = Vec::new();
-    for e in entries {
-        if e.kind == OpKind::Batch && header_undo_of(e) == Some(id) {
-            return Err(UndoError::AlreadyUndone);
-        }
-        if e.plan_id != Some(id) {
-            continue;
-        }
-        match e.kind {
-            OpKind::Batch => found = true,
-            OpKind::Move | OpKind::Rename | OpKind::Trash => match inverse(e) {
-                Some(op) => ops.push(Ok(op)),
-                None => {
-                    tracing::warn!(op = %e.op_id.0, "journal line cannot be undone");
-                    // Journal paths are library-relative; anything else is not reported,
-                    // and neither is a place in the trash: the item's old place stands in.
-                    let shown =
-                        |v| parsed(v, "path").filter(|p: &String| plain_rel(p) && !in_meta_dir(p));
-                    let path = shown(&e.after)
-                        .or_else(|| shown(&e.before))
-                        .unwrap_or_default();
-                    ops.push(Err((path, SkipReason::Io)));
-                }
-            },
-            OpKind::RewritePlaylist => match inverse_rewrite(e) {
-                Some(rw) => restores.push(rw),
-                None => tracing::warn!(op = %e.op_id.0, "journal line cannot be undone"),
-            },
-            _ => {}
-        }
-    }
-    if !found {
-        return Err(UndoError::NotFound);
-    }
-    ops.reverse();
-    restores.reverse();
-    Ok(UndoPlan { ops, restores })
-}
-
-fn inverse(e: &JournalEntry) -> Option<PlannedOp> {
-    let to: String = parsed(&e.before, "path").filter(|p: &String| plain_rel(p))?;
-    let from: String = parsed(&e.after, "path").filter(|p: &String| plain_rel(p))?;
-    let mtime: i64 = parsed(&e.before, "mtime_ns")?;
-    Some(PlannedOp {
-        from,
-        to: Target::Path(to),
-        expect: Expect {
-            size: parsed(&e.before, "size")?,
-            mtime_ns: i128::from(mtime),
-            file_hash: None,
-            hash: parsed(&e.before, "hash"),
-        },
-    })
-}
-
-fn inverse_rewrite(e: &JournalEntry) -> Option<Rewrite> {
-    Some(Rewrite {
-        path: parsed(&e.after, "path").filter(|p: &String| plain_rel(p))?,
-        before: parsed(&e.after, "content")?,
-        after: parsed(&e.before, "content")?,
+/// Where the batch `id` is, with its results once it has ended. Blocks on the Journal.
+pub(crate) fn status(journal: &ServerJournal, id: BatchId) -> Result<OrganizeStatus, JournalError> {
+    let b = journal.status(id)?;
+    let results = results(&b);
+    let count = |status| results.iter().filter(|r| r.status == status).count() as u32;
+    Ok(OrganizeStatus {
+        batch_id: id.to_string(),
+        running: !b.summary.complete,
+        complete: ran_to_end(&b.summary),
+        done: count(OpStatus::Done),
+        skipped: count(OpStatus::Skipped),
+        results: b.summary.complete.then_some(results),
     })
 }
 
@@ -940,7 +854,6 @@ mod tests {
         _dir: tempfile::TempDir,
         lib: Library,
         cache: Cache,
-        batch: BatchId,
     }
 
     impl Env {
@@ -963,7 +876,6 @@ mod tests {
                 _dir: dir,
                 lib,
                 cache,
-                batch: BatchId(GrainId::random()),
             }
         }
 
@@ -972,8 +884,6 @@ mod tests {
                 library: &self.lib,
                 cache: &self.cache,
                 ext: &All,
-                actor: Actor::User(self.lib.owner()),
-                batch: Some(self.batch),
             }
         }
 
@@ -994,20 +904,6 @@ mod tests {
         fn path(&self, rel: &str) -> std::path::PathBuf {
             self.lib.root().join(rel)
         }
-
-        fn last(&self) -> JournalEntry {
-            self.lib
-                .journal()
-                .unwrap()
-                .read_all()
-                .unwrap()
-                .pop()
-                .unwrap()
-        }
-
-        fn journal_len(&self) -> usize {
-            self.lib.journal().unwrap().read_all().unwrap().len()
-        }
     }
 
     fn to(p: &str) -> Target {
@@ -1015,39 +911,31 @@ mod tests {
     }
 
     #[test]
-    fn moves_media_and_sidecar_and_journals_a_move() {
+    fn moves_media_and_sidecar() {
         let e = Env::new();
         let done = apply(&e.ctx(), &e.op("a.jpg", to("sub/c.jpg"))).unwrap();
         assert_eq!(done.to, "sub/c.jpg");
         assert_eq!(done.record.unwrap().path, "sub/c.jpg");
         assert!(!e.path("a.jpg").exists() && !e.path("a.jpg.xmp").exists());
         assert!(e.path("sub/c.jpg").exists() && e.path("sub/c.jpg.xmp").exists());
-        let j = e.last();
-        assert_eq!(j.kind, OpKind::Move);
-        assert_eq!(j.plan_id, Some(e.batch));
-        assert_eq!(j.before["path"], "a.jpg");
-        assert_eq!(j.after["path"], "sub/c.jpg");
-        assert_eq!(j.after["sidecar"], true);
         assert!(e.cache.get_by_path("sub/c.jpg").unwrap().is_some());
         assert!(e.cache.get_by_path("a.jpg").unwrap().is_none());
     }
 
     #[test]
-    fn same_folder_is_a_rename() {
+    fn a_rename_moves_the_revision() {
         let e = Env::new();
         let before = e.cache.revision();
         apply(&e.ctx(), &e.op("a.jpg", to("c.jpg"))).unwrap();
-        assert_eq!(e.last().kind, OpKind::Rename);
         assert!(e.cache.revision() > before);
     }
 
     #[test]
-    fn trash_goes_under_the_op_id_and_leaves_the_cache() {
+    fn trash_goes_under_the_trash_id_and_leaves_the_cache() {
         let e = Env::new();
-        let done = apply(&e.ctx(), &e.op("a.jpg", Target::Trash)).unwrap();
-        let j = e.last();
-        assert_eq!(j.kind, OpKind::Trash);
-        assert_eq!(done.to, format!(".asteria/trash/{}/a.jpg", j.op_id.0));
+        let id = GrainId::random();
+        let done = apply(&e.ctx(), &e.op("a.jpg", Target::Trash(id))).unwrap();
+        assert_eq!(done.to, format!(".asteria/trash/{id}/a.jpg"));
         assert!(done.record.is_none());
         assert!(e.path(&done.to).exists());
         assert!(e.path(&format!("{}.xmp", done.to)).exists());
@@ -1060,8 +948,8 @@ mod tests {
         let e = Env::new();
         crate::hashing::hash_pending(&e.lib, &e.cache, &Default::default()).unwrap();
         let hashed = e.cache.get_by_path("a.jpg").unwrap().unwrap().hash.unwrap();
-        let done = apply(&e.ctx(), &e.op("a.jpg", Target::Trash)).unwrap();
-        let stored: StoredHash = serde_json::from_value(e.last().before["hash"].clone()).unwrap();
+        let done = apply(&e.ctx(), &e.op("a.jpg", Target::Trash(GrainId::random()))).unwrap();
+        let stored = done.hash.clone().unwrap();
         assert_eq!(stored, hashed);
         let mut back = e.op(&done.to, to("a.jpg"));
         back.expect.hash = Some(stored);
@@ -1089,7 +977,6 @@ mod tests {
         );
         assert_eq!(std::fs::read(e.path("a.jpg")).unwrap(), b"photo a");
         assert!(e.path("a.jpg.xmp").exists() && !e.path("c.jpg").exists());
-        assert_eq!(e.journal_len(), 1); // only the sidecar update of setup
     }
 
     /// A rename that changes only the case goes ahead on a case-insensitive filesystem too,
@@ -1101,7 +988,6 @@ mod tests {
         assert_eq!(check(&e.ctx(), &op, &Sim::default()), Ok(()));
         let done = apply(&e.ctx(), &op).unwrap();
         assert_eq!(done.to, "A.jpg");
-        assert_eq!(e.last().kind, OpKind::Rename);
         let mut names: Vec<_> = std::fs::read_dir(e.lib.root())
             .unwrap()
             .map(|d| d.unwrap().file_name().into_string().unwrap())
@@ -1200,28 +1086,6 @@ mod tests {
         assert!(e.path("Photos/2025/05/c.jpg").exists());
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_symlinked_playlist_is_not_rewritten() {
-        let e = Env::new();
-        std::fs::write(e.path("real.m3u"), "a.jpg\n").unwrap();
-        std::os::unix::fs::symlink("real.m3u", e.path("list.m3u")).unwrap();
-        let before = e.journal_len();
-        let rw = Rewrite {
-            path: "list.m3u".into(),
-            before: "a.jpg\n".into(),
-            after: "c.jpg\n".into(),
-        };
-        apply_rewrite(&e.ctx(), &rw);
-        let link = std::fs::symlink_metadata(e.path("list.m3u")).unwrap();
-        assert!(link.file_type().is_symlink());
-        assert_eq!(
-            std::fs::read_to_string(e.path("real.m3u")).unwrap(),
-            "a.jpg\n"
-        );
-        assert_eq!(e.journal_len(), before);
-    }
-
     #[test]
     fn sim_sees_earlier_ops_of_the_batch() {
         let e = Env::new();
@@ -1250,35 +1114,23 @@ mod tests {
     #[test]
     fn crash_after_media_leaves_the_sidecar_for_relink() {
         let e = Env::new();
-        let n = e.journal_len();
         crash(&e, FailAt::AfterMedia);
         assert!(e.path("sub/c.jpg").exists() && !e.path("a.jpg").exists());
         assert!(e.path("a.jpg.xmp").exists() && !e.path("sub/c.jpg.xmp").exists());
-        assert_eq!(e.journal_len(), n);
         scan(&e.lib, &e.cache, &All).unwrap();
         crate::hashing::hash_pending(&e.lib, &e.cache, &Default::default()).unwrap();
         relink_orphans(&e.lib, &e.cache).unwrap();
         assert!(e.path("sub/c.jpg.xmp").exists() && !e.path("a.jpg.xmp").exists());
     }
 
+    /// The file moved, but nothing says so: only the undo of this one move is lost, and the
+    /// next scan fixes the cache.
     #[test]
-    fn crash_after_sidecar_loses_only_the_journal_line() {
+    fn crash_after_sidecar_leaves_a_stale_cache() {
         let e = Env::new();
-        let n = e.journal_len();
         crash(&e, FailAt::AfterSidecar);
         assert!(e.path("sub/c.jpg").exists() && e.path("sub/c.jpg.xmp").exists());
         assert!(!e.path("a.jpg").exists() && !e.path("a.jpg.xmp").exists());
-        assert_eq!(e.journal_len(), n);
-    }
-
-    #[test]
-    fn crash_after_journal_is_recorded() {
-        let e = Env::new();
-        let n = e.journal_len();
-        crash(&e, FailAt::AfterJournal);
-        assert_eq!(e.journal_len(), n + 1);
-        assert_eq!(e.last().kind, OpKind::Move);
-        // The cache is stale until the next scan.
         assert!(e.cache.get_by_path("a.jpg").unwrap().is_some());
         scan(&e.lib, &e.cache, &All).unwrap();
         assert!(e.cache.get_by_path("a.jpg").unwrap().is_none());
@@ -1286,7 +1138,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_hash_falls_back_to_a_valid_expect_hash_when_the_cached_one_is_stale() {
+    fn the_kept_hash_falls_back_to_a_valid_expect_hash_when_the_cached_one_is_stale() {
         let e = Env::new();
         let mut op = e.op("a.jpg", to("c.jpg"));
         let mk = |size, mtime_ns| StoredHash {
@@ -1301,15 +1153,13 @@ mod tests {
         e.cache.put(&rec).unwrap();
         let valid = mk(op.expect.size, op.expect.mtime_ns);
         op.expect.hash = Some(valid.clone());
-        apply(&e.ctx(), &op).unwrap();
-        let stored: StoredHash = serde_json::from_value(e.last().before["hash"].clone()).unwrap();
-        assert_eq!(stored, valid);
+        let done = apply(&e.ctx(), &op).unwrap();
+        assert_eq!(done.hash, Some(valid));
     }
 
     #[test]
     fn a_sidecar_target_taken_mid_move_puts_the_media_back() {
         let e = Env::new();
-        let n = e.journal_len();
         let sidecar_before = std::fs::read(e.path("a.jpg.xmp")).unwrap();
         FAIL_AT.with(|f| f.set(Some(FailAt::PlantTargetSidecar)));
         let r = apply(&e.ctx(), &e.op("a.jpg", to("c.jpg")));
@@ -1322,7 +1172,6 @@ mod tests {
             b"foreign sidecar"
         );
         assert!(!e.path("c.jpg").exists());
-        assert_eq!(e.journal_len(), n);
     }
 
     #[test]

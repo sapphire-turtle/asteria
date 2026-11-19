@@ -15,6 +15,7 @@ use asteria_common_core::{Library, MediaKind};
 use asteria_common_server::{
     AppExtension, CACHE_SCHEMA, Cache, ExtContext, rpc_error, scan, scan_cancellable,
 };
+use corundum_framework::journal::{BatchRecords, OpRecord, Outcome, Skip};
 use serde_json::{Value, json};
 
 /// Stores the file length as app data and counts the calls to `extract`.
@@ -439,20 +440,16 @@ async fn move_a_to_c(e: &common::Env) -> Value {
     .await
 }
 
-fn kinds(e: &common::Env) -> Vec<String> {
-    e.lib
-        .journal()
-        .unwrap()
-        .read_all()
-        .unwrap()
+/// The newest batch of the journal, with its operations.
+fn last_batch(e: &common::Env) -> BatchRecords {
+    let newest = e.state.journal().history(None, 1).unwrap();
+    e.state.journal().status(newest[0].begin.batch_id).unwrap()
+}
+
+fn rewrites(b: &BatchRecords) -> Vec<&OpRecord> {
+    b.ops
         .iter()
-        .map(|l| {
-            serde_json::to_value(l.kind)
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_string()
-        })
+        .filter(|o| o.kind == "rewrite_playlist")
         .collect()
 }
 
@@ -468,14 +465,12 @@ async fn after_moves_rewrites_are_written_and_journaled() {
         fs::read_to_string(e.root.join("list.m3u8")).unwrap(),
         "c.jpg\n"
     );
-    let j = e.lib.journal().unwrap().read_all().unwrap();
-    let rw = j
-        .iter()
-        .find(|l| serde_json::to_value(l.kind).unwrap() == "rewrite_playlist")
-        .unwrap();
-    assert_eq!(rw.before["content"], "a.jpg\n");
-    assert_eq!(rw.after["content"], "c.jpg\n");
-    assert_eq!(rw.after["path"], "list.m3u8");
+    let b = last_batch(&e);
+    let rw = rewrites(&b)[0];
+    assert!(matches!(rw.outcome, Outcome::Done(_)), "{rw:?}");
+    assert_eq!(rw.plan["before"], "a.jpg\n");
+    assert_eq!(rw.plan["after"], "c.jpg\n");
+    assert_eq!(rw.plan["path"], "list.m3u8");
     let extras = e.cache.extras().unwrap();
     assert_eq!(extras[0].1.size, 6);
 }
@@ -489,8 +484,12 @@ async fn a_rewrite_of_a_changed_file_is_skipped() {
         fs::read_to_string(e.root.join("list.m3u8")).unwrap(),
         "edited meanwhile\n"
     );
-    assert!(!kinds(&e).contains(&"rewrite_playlist".to_string()));
-    assert_eq!(kinds(&e).last().unwrap(), "batch_end");
+    let b = last_batch(&e);
+    assert_eq!(
+        rewrites(&b)[0].outcome,
+        Outcome::Skipped(Skip::PreconditionFailed)
+    );
+    assert!(b.summary.complete && !b.summary.interrupted);
 }
 
 #[tokio::test]
@@ -502,7 +501,9 @@ async fn a_panicking_after_moves_still_ends_the_batch() {
         fs::read_to_string(e.root.join("list.m3u8")).unwrap(),
         "a.jpg\n"
     );
-    assert_eq!(kinds(&e).last().unwrap(), "batch_end");
+    let b = last_batch(&e);
+    assert!(rewrites(&b).is_empty());
+    assert!(b.summary.complete && !b.summary.interrupted);
 }
 
 #[tokio::test]
@@ -528,7 +529,9 @@ async fn undo_puts_the_playlist_back_without_asking_the_app() {
         *ext.seen.lock().unwrap(),
         vec![("a.jpg".to_string(), "c.jpg".to_string())]
     );
-    assert_eq!(kinds(&e).last().unwrap(), "batch_end");
+    let b = last_batch(&e);
+    assert!(b.summary.begin.undo_of.is_some() && b.summary.complete);
+    assert!(matches!(rewrites(&b)[0].outcome, Outcome::Done(_)));
 }
 
 #[tokio::test]
@@ -688,7 +691,7 @@ async fn a_slow_undo_returns_running() {
 }
 
 #[tokio::test]
-async fn a_second_undo_is_busy_while_the_first_runs() {
+async fn a_second_undo_is_refused_while_the_first_runs() {
     let slow = Arc::new(Slow::default());
     let e = common::env_ext(slow.clone());
     let (of, v) = blocked_undo(&e, &slow).await;
@@ -702,7 +705,8 @@ async fn a_second_undo_is_busy_while_the_first_runs() {
         json!({"batch_id": of}),
     )
     .await;
-    assert_eq!(second["error"]["code"], codes::BUSY, "{second}");
+    // At once, not after the first: an undo of it is under way.
+    assert_eq!(second["error"]["code"], codes::ALREADY_UNDONE, "{second}");
 
     slow.open();
     let s = finished_status(&e, &id).await;

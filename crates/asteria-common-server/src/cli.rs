@@ -458,7 +458,7 @@ async fn run(
         },
         None,
     )?;
-    let (writer, writer_handle) = spawn_writer(library.clone(), cache.clone());
+    let (writer, writer_handle) = spawn_writer(library.clone(), cache.clone(), journal.clone());
     let closer = writer.clone();
     let scanning = Arc::new(AtomicBool::new(false));
     let (rescan_tx, rescan_rx) = mpsc::channel(1);

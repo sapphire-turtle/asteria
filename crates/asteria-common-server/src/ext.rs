@@ -41,8 +41,9 @@ pub enum ThumbSource {
 }
 
 /// A change to an app file (a playlist, say) that follows a batch of moves: `path` is
-/// rewritten from `before` to `after`, but only if it still holds exactly `before`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// rewritten from `before` to `after`, but only if it still holds exactly `before`. It is
+/// also the plan of the `rewrite_playlist` operation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rewrite {
     /// Library-relative, with `/` separators.
     pub path: String,
@@ -92,8 +93,9 @@ pub trait AppExtension: Send + Sync + 'static {
         Vec::new()
     }
     /// Called once a batch has moved files. `moves` are the (old path, new path) pairs that
-    /// completed; moves to the trash are not included. The returned rewrites are applied
-    /// and journaled as part of the batch.
+    /// completed; moves to the trash are not included. The returned rewrites run as
+    /// `rewrite_playlist` operations of the batch, and are undone with it; an undo does not
+    /// call this.
     fn after_moves(&self, _ctx: &ExtContext, _moves: &[(String, String)]) -> Vec<Rewrite> {
         Vec::new()
     }

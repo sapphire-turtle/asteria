@@ -4,9 +4,15 @@ mod common;
 
 use std::fs;
 
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
 use asteria_common_api::{MAX_OPS, codes};
-use asteria_common_core::journal::{JournalEntry, OpKind};
+use asteria_common_core::MediaKind;
+use asteria_common_server::{AppExtension, ExtContext, Rewrite};
 use common::{Env, call, env, item_id};
+use corundum_framework::journal::{BatchId, BatchRecords, BatchSummary};
 use serde_json::{Value, json};
 
 fn mv(e: &Env, from: &str, to: &str) -> Value {
@@ -27,8 +33,14 @@ async fn apply(e: &Env, ops: Vec<Value>, dry_run: bool, label: Option<&str>) -> 
     .await
 }
 
-fn journal(e: &Env) -> Vec<JournalEntry> {
-    e.lib.journal().unwrap().read_all().unwrap()
+/// Every batch in the journal, newest first.
+fn journal(e: &Env) -> Vec<BatchSummary> {
+    e.state.journal().history(None, 10_000).unwrap()
+}
+
+fn records(e: &Env, id: &str) -> BatchRecords {
+    let id = BatchId(id.parse().unwrap());
+    e.state.journal().status(id).unwrap()
 }
 
 #[tokio::test]
@@ -201,9 +213,8 @@ async fn emptied_folders_are_removed_but_not_the_root() {
 }
 
 #[tokio::test]
-async fn journal_has_header_ops_and_end() {
+async fn the_journal_records_the_batch() {
     let e = env();
-    let before = journal(&e).len();
     let v = apply(
         &e,
         vec![mv(&e, "a.jpg", "c.jpg"), trash(&e, "sub/b.jpg")],
@@ -212,23 +223,20 @@ async fn journal_has_header_ops_and_end() {
     )
     .await;
     let id = v["result"]["batch_id"].as_str().unwrap().to_string();
-    let lines: Vec<JournalEntry> = journal(&e).into_iter().skip(before).collect();
-    let kinds: Vec<OpKind> = lines.iter().map(|l| l.kind).collect();
-    assert_eq!(
-        kinds,
-        vec![
-            OpKind::Batch,
-            OpKind::Rename,
-            OpKind::Trash,
-            OpKind::BatchEnd
-        ]
-    );
-    assert!(lines.iter().all(|l| l.plan_id.unwrap().0.to_string() == id));
-    assert_eq!(lines[0].after["op_count"], 2);
-    assert_eq!(lines[0].after["label"], "tidy");
-    assert!(lines[0].after["undo_of"].is_null());
-    assert_eq!(lines[3].after["done"], 2);
-    assert_eq!(lines[3].after["skipped"], 0);
+    let b = records(&e, &id);
+    let kinds: Vec<&str> = b
+        .ops
+        .iter()
+        .filter(|o| o.parent.is_none())
+        .map(|o| o.kind.as_str())
+        .collect();
+    assert_eq!(kinds, ["move", "trash", "organize_tidy"]);
+    assert_eq!(b.summary.begin.label.as_deref(), Some("tidy"));
+    assert_eq!(b.summary.begin.undo_of, None);
+    assert!(b.summary.complete && !b.summary.interrupted);
+    assert_eq!(b.summary.skipped, 0);
+    let origin = b.summary.begin.origin.as_str();
+    assert!(origin.starts_with("key:"), "{origin}");
 }
 
 #[tokio::test]
@@ -365,8 +373,12 @@ async fn undo_of_undo_redoes() {
         "{r}"
     );
     assert!(!e.root.join("a.jpg").exists());
-    let kinds: Vec<OpKind> = journal(&e).iter().map(|l| l.kind).collect();
-    assert_eq!(kinds.iter().filter(|k| **k == OpKind::Trash).count(), 2);
+    let redo = &journal(&e)[0];
+    assert_eq!(
+        redo.begin.redo_of.map(|b| b.to_string()),
+        Some(u.clone()),
+        "{redo:?}"
+    );
 }
 
 #[tokio::test]
@@ -393,11 +405,11 @@ async fn concurrent_undos_of_one_batch_run_once() {
             assert!(code == codes::BUSY as i64 || code == codes::ALREADY_UNDONE as i64);
         }
     }
-    let headers = journal(&e)
+    let undos = journal(&e)
         .iter()
-        .filter(|l| l.kind == OpKind::Batch && !l.after["undo_of"].is_null())
+        .filter(|s| s.begin.undo_of.is_some())
         .count();
-    assert_eq!(headers, 1);
+    assert_eq!(undos, 1);
 }
 
 #[tokio::test]
@@ -474,61 +486,6 @@ async fn unknown_batch_is_not_found() {
     assert_eq!(v["error"]["code"], codes::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn an_incomplete_batch_shows_and_undoes() {
-    use asteria_common_core::journal::{Actor, BatchId, OpId};
-    use chrono::Utc;
-    use grain_id::GrainId;
-
-    let e = env();
-    let batch = BatchId(GrainId::random());
-    let line = |kind, before: Value, after: Value| JournalEntry {
-        op_id: OpId(GrainId::random()),
-        plan_id: Some(batch),
-        actor: Actor::User(e.lib.owner()),
-        at: Utc::now(),
-        kind,
-        before,
-        after,
-    };
-    // The batch stopped after one move: header and the move, no end line.
-    fs::create_dir(e.root.join("2025")).unwrap();
-    fs::rename(e.root.join("a.jpg"), e.root.join("2025/x.jpg")).unwrap();
-    let meta = fs::metadata(e.root.join("2025/x.jpg")).unwrap();
-    let mtime = meta
-        .modified()
-        .unwrap()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as i64;
-    let j = e.lib.journal().unwrap();
-    j.append(&line(
-        OpKind::Batch,
-        Value::Null,
-        json!({"label": "crashed", "op_count": 1, "undo_of": null}),
-    ))
-    .unwrap();
-    j.append(&line(
-        OpKind::Move,
-        json!({"path": "a.jpg", "size": meta.len(), "mtime_ns": mtime, "hash": null}),
-        json!({"path": "2025/x.jpg", "sidecar": false}),
-    ))
-    .unwrap();
-
-    let h = call(&e.app, &e.owner_token, "organize.history", json!({})).await;
-    let b = &h["result"]["batches"][0];
-    assert_eq!(b["batch_id"], batch.0.to_string());
-    assert_eq!(b["complete"], false);
-    assert_eq!(b["done"], 1);
-    assert_eq!(b["op_count"], 1);
-    assert_eq!(b["skipped"], 0);
-    assert_eq!(b["label"], "crashed");
-
-    let v = undo(&e, &batch.0.to_string(), false).await;
-    assert_eq!(status(&v, 0), "done", "{v}");
-    assert!(e.root.join("a.jpg").exists());
-}
-
 async fn batch_status(e: &Env, id: &str) -> Value {
     call(
         &e.app,
@@ -559,92 +516,6 @@ async fn status_of_a_finished_batch_has_its_results() {
     assert_eq!(r["skipped"], 0);
     assert_eq!(r["batch_id"], v["result"]["batch_id"]);
     assert_eq!(r["results"], v["result"]["results"]);
-}
-
-#[tokio::test]
-async fn status_falls_back_to_the_journal() {
-    use asteria_common_core::journal::{Actor, BatchId, OpId};
-    use chrono::Utc;
-    use grain_id::GrainId;
-
-    let e = env();
-    let batch = BatchId(GrainId::random());
-    let line = |kind, before: Value, after: Value| JournalEntry {
-        op_id: OpId(GrainId::random()),
-        plan_id: Some(batch),
-        actor: Actor::User(e.lib.owner()),
-        at: Utc::now(),
-        kind,
-        before,
-        after,
-    };
-    fs::create_dir(e.root.join("2025")).unwrap();
-    fs::rename(e.root.join("a.jpg"), e.root.join("2025/x.jpg")).unwrap();
-    let meta = fs::metadata(e.root.join("2025/x.jpg")).unwrap();
-    let mtime = meta
-        .modified()
-        .unwrap()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as i64;
-    let j = e.lib.journal().unwrap();
-    j.append(&line(
-        OpKind::Batch,
-        Value::Null,
-        json!({"label": "crashed", "op_count": 1, "undo_of": null}),
-    ))
-    .unwrap();
-    j.append(&line(
-        OpKind::Move,
-        json!({"path": "a.jpg", "size": meta.len(), "mtime_ns": mtime, "hash": null}),
-        json!({"path": "2025/x.jpg", "sidecar": false}),
-    ))
-    .unwrap();
-
-    let s = batch_status(&e, &batch.0.to_string()).await;
-    let r = &s["result"];
-    assert_eq!(r["running"], false, "{s}");
-    assert_eq!(r["complete"], false);
-    assert_eq!(r["done"], 1);
-    assert!(r.get("results").is_none(), "{s}");
-}
-
-#[tokio::test]
-async fn status_of_a_failed_batch_falls_back_to_the_journal() {
-    use asteria_common_core::journal::{Actor, BatchId, OpId};
-    use chrono::Utc;
-    use grain_id::GrainId;
-
-    let e = env();
-    let batch = BatchId(GrainId::random());
-    e.state.writer().fail_batch_for_test(batch);
-    // No header was journaled: nothing changed.
-    let s = batch_status(&e, &batch.0.to_string()).await;
-    assert_eq!(s["error"]["code"], codes::NOT_FOUND, "{s}");
-    assert_eq!(
-        s["error"]["message"],
-        "the batch failed before changing anything"
-    );
-
-    e.lib
-        .journal()
-        .unwrap()
-        .append(&JournalEntry {
-            op_id: OpId(GrainId::random()),
-            plan_id: Some(batch),
-            actor: Actor::User(e.lib.owner()),
-            at: Utc::now(),
-            kind: OpKind::Batch,
-            before: Value::Null,
-            after: json!({"label": "broke", "op_count": 2, "undo_of": null}),
-        })
-        .unwrap();
-    let s = batch_status(&e, &batch.0.to_string()).await;
-    let r = &s["result"];
-    assert_eq!(r["running"], false, "{s}");
-    assert_eq!(r["complete"], false);
-    assert_eq!(r["done"], 0);
-    assert!(r.get("results").is_none(), "{s}");
 }
 
 #[tokio::test]
@@ -682,7 +553,9 @@ async fn history_pages_newest_first() {
     assert_eq!(batches[0]["user"], e.lib.owner().to_string());
     assert_eq!(batches[1]["label"], "two");
     assert_eq!(batches[1]["complete"], true);
-    assert_eq!(batches[1]["done"], 1);
+    // The journal's own count: the move and the batch's closing tidy.
+    assert_eq!(batches[1]["done"], 2);
+    assert_eq!(batches[1]["op_count"], 2);
     assert!(batches[1]["undone_by"].is_null());
 
     let p2 = hist(json!({"limit": 2, "cursor": b2})).await;
@@ -694,61 +567,133 @@ async fn history_pages_newest_first() {
 
     let bad = hist(json!({"cursor": "nonsense"})).await;
     assert_eq!(bad["error"]["code"], codes::INVALID_PARAMS);
+    let gone = hist(json!({"cursor": grain_id::GrainId::random().to_string()})).await;
+    assert_eq!(gone["error"]["code"], codes::INVALID_PARAMS);
 }
 
 #[tokio::test]
-async fn an_unreadable_journal_line_is_a_skipped_op() {
-    use asteria_common_core::journal::{Actor, BatchId, OpId};
-    use chrono::Utc;
-    use grain_id::GrainId;
-
+async fn history_filters_by_kinds_and_labels_unnamed_batches() {
     let e = env();
-    let batch = BatchId(GrainId::random());
-    let line = |kind, before: Value, after: Value| JournalEntry {
-        op_id: OpId(GrainId::random()),
-        plan_id: Some(batch),
-        actor: Actor::User(e.lib.owner()),
-        at: Utc::now(),
-        kind,
-        before,
-        after,
+    let moved = batch_id(&apply(&e, vec![mv(&e, "a.jpg", "c.jpg")], false, None).await);
+    let trashed = batch_id(&apply(&e, vec![trash(&e, "sub/b.jpg")], false, Some("bin")).await);
+    let hist = |kinds: Value| {
+        let e = &e;
+        async move {
+            let v = call(
+                &e.app,
+                &e.owner_token,
+                "organize.history",
+                json!({"kinds": kinds}),
+            )
+            .await;
+            let ids: Vec<String> = v["result"]["batches"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{v}"))
+                .iter()
+                .map(|b| b["batch_id"].as_str().unwrap().to_string())
+                .collect();
+            (ids, v)
+        }
     };
-    fs::create_dir(e.root.join("2025")).unwrap();
-    fs::rename(e.root.join("a.jpg"), e.root.join("2025/x.jpg")).unwrap();
-    let meta = fs::metadata(e.root.join("2025/x.jpg")).unwrap();
-    let mtime = meta
-        .modified()
-        .unwrap()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as i64;
-    let j = e.lib.journal().unwrap();
-    for l in [
-        line(
-            OpKind::Batch,
-            Value::Null,
-            json!({"label": null, "op_count": 2, "undo_of": null}),
-        ),
-        line(
-            OpKind::Move,
-            json!({"path": "a.jpg", "size": meta.len(), "mtime_ns": mtime, "hash": null}),
-            json!({"path": "2025/x.jpg", "sidecar": false}),
-        ),
-        // No size: this one cannot be read.
-        line(
-            OpKind::Move,
-            json!({"path": "b.jpg", "mtime_ns": 1}),
-            json!({"path": "2025/y.jpg", "sidecar": false}),
-        ),
-    ] {
-        j.append(&l).unwrap();
+    assert_eq!(
+        hist(json!(["trash"])).await.0,
+        std::slice::from_ref(&trashed)
+    );
+    assert_eq!(hist(json!(["move"])).await.0, std::slice::from_ref(&moved));
+    assert_eq!(
+        hist(json!(["move", "trash"])).await.0,
+        [trashed.clone(), moved.clone()]
+    );
+    assert!(hist(json!(["rate"])).await.0.is_empty());
+    let (all, v) = hist(Value::Null).await;
+    assert_eq!(all, [trashed, moved]);
+    assert_eq!(v["result"]["batches"][0]["label"], "bin");
+    assert_eq!(v["result"]["batches"][1]["label"], "Move 1 files");
+}
+
+#[tokio::test]
+async fn history_with_kinds_pages_over_the_matching_batches() {
+    let e = env();
+    let t1 = batch_id(&apply(&e, vec![trash(&e, "a.jpg")], false, None).await);
+    apply(&e, vec![mv(&e, "sub/b.jpg", "b.jpg")], false, None).await;
+    let t2 = batch_id(&apply(&e, vec![trash(&e, "b.jpg")], false, None).await);
+    let page = |cursor: Value| {
+        let e = &e;
+        async move {
+            call(
+                &e.app,
+                &e.owner_token,
+                "organize.history",
+                json!({"kinds": ["trash"], "limit": 1, "cursor": cursor}),
+            )
+            .await
+        }
+    };
+    let p1 = page(Value::Null).await;
+    assert_eq!(p1["result"]["batches"][0]["batch_id"], t2, "{p1}");
+    assert_eq!(p1["result"]["next_cursor"], t2);
+    let p2 = page(json!(t2)).await;
+    assert_eq!(p2["result"]["batches"][0]["batch_id"], t1, "{p2}");
+    assert!(p2["result"]["next_cursor"].is_null(), "{p2}");
+}
+
+/// Holds `after_moves`, which runs at the end of every batch, until the gate opens.
+#[derive(Default)]
+struct Gate {
+    closed: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+impl Gate {
+    fn set(&self, closed: bool) {
+        *self.closed.lock().unwrap() = closed;
+        self.cv.notify_all();
     }
-    let v = undo(&e, &batch.0.to_string(), false).await;
-    let results = v["result"]["results"].as_array().unwrap();
-    assert_eq!(results.len(), 2, "{v}");
-    let bad = results.iter().find(|r| r["status"] == "skipped").unwrap();
-    assert_eq!(bad["reason"], "io");
-    assert_eq!(bad["path"], "2025/y.jpg");
-    assert_eq!(results.iter().filter(|r| r["status"] == "done").count(), 1);
-    assert!(e.root.join("a.jpg").exists());
+}
+
+impl AppExtension for Gate {
+    fn accepts(&self, kind: MediaKind) -> bool {
+        matches!(kind, MediaKind::Image)
+    }
+    fn after_moves(&self, _ctx: &ExtContext, _moves: &[(String, String)]) -> Vec<Rewrite> {
+        let guard = self.closed.lock().unwrap();
+        let _ = self
+            .cv
+            .wait_timeout_while(guard, Duration::from_secs(30), |closed| *closed)
+            .unwrap();
+        Vec::new()
+    }
+}
+
+#[tokio::test]
+async fn a_long_batch_answers_running_then_status_finishes() {
+    let gate = Arc::new(Gate::default());
+    let e = common::env_ext(gate.clone());
+    e.state.set_organize_wait(Duration::from_millis(50));
+    gate.set(true);
+    let v = apply(&e, vec![mv(&e, "a.jpg", "c.jpg")], false, None).await;
+    assert_eq!(v["result"]["running"], true, "{v}");
+    assert!(v["result"]["results"].as_array().unwrap().is_empty());
+    let id = batch_id(&v);
+    let s = batch_status(&e, &id).await;
+    assert_eq!(s["result"]["running"], true, "{s}");
+    assert_eq!(s["result"]["complete"], false);
+    assert!(s["result"].get("results").is_none(), "{s}");
+
+    gate.set(false);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let s = loop {
+        let s = batch_status(&e, &id).await;
+        if s["result"]["running"] == false {
+            break s;
+        }
+        assert!(std::time::Instant::now() < deadline, "still running: {s}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let r = &s["result"];
+    assert_eq!(r["complete"], true, "{s}");
+    assert_eq!(r["done"], 1);
+    assert_eq!(r["results"][0]["status"], "done");
+    assert_eq!(r["results"][0]["new_path"], "c.jpg");
+    assert!(e.root.join("c.jpg").exists() && !Path::new(&e.root.join("a.jpg")).exists());
 }

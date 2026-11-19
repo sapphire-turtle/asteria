@@ -8,6 +8,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
 use common::*;
+use corundum_framework::journal::{Actor, BatchId, BatchRecords, BatchSummary};
 use http_body_util::BodyExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::{RoleClient, RunningService};
@@ -61,6 +62,20 @@ fn agent(e: &Env) -> Value {
     json!({"agent": e.lib.owner().to_string()})
 }
 
+/// The batches of the corundum journal, newest first.
+fn batches(e: &Env) -> Vec<BatchSummary> {
+    e.state.journal().history(None, 1000).unwrap()
+}
+
+fn batch(e: &Env, id: &Value) -> BatchRecords {
+    let id = BatchId(id.as_str().unwrap().parse().unwrap());
+    e.state.journal().status(id).unwrap()
+}
+
+fn agent_actor(e: &Env) -> Actor {
+    Actor::agent(e.lib.owner().to_string())
+}
+
 #[tokio::test]
 async fn lists_the_framework_tools() {
     let e = env();
@@ -75,6 +90,10 @@ async fn lists_the_framework_tools() {
     let instructions = info.instructions.as_deref().unwrap();
     assert!(
         instructions.starts_with(INSTRUCTIONS_START),
+        "{instructions}"
+    );
+    assert!(
+        instructions.contains("you can undo it with organize_undo within 30 days."),
         "{instructions}"
     );
     client.cancel().await.unwrap();
@@ -175,7 +194,6 @@ async fn shutdown_ends_open_mcp_streams() {
 async fn organize_apply_is_recorded_as_the_agent() {
     let e = env();
     let client = connect(&e).await;
-    let before = journal(&e).len();
     let ops = json!([{"item_id": item_id(&e, "a.jpg"), "kind": "move", "to": "2025/a.jpg"}]);
     let r = tool(
         &client,
@@ -186,15 +204,38 @@ async fn organize_apply_is_recorded_as_the_agent() {
     let v = ok_json(&r);
     assert_eq!(v["results"][0]["status"], "done");
     assert!(e.root.join("2025/a.jpg").exists());
-    let lines: Vec<JournalEntry> = journal(&e).into_iter().skip(before).collect();
-    let header = lines.iter().find(|l| l.kind == OpKind::Batch).unwrap();
-    assert_eq!(actor(header), agent(&e));
-    let op = lines.iter().find(|l| l.kind == OpKind::Move).unwrap();
-    assert_eq!(actor(op), agent(&e));
+    let b = batch(&e, &v["batch_id"]);
+    assert_eq!(b.summary.begin.actor, agent_actor(&e));
+    assert_eq!(b.summary.begin.label.as_deref(), Some("by year"));
+    // An MCP session is an origin of its own.
+    let origin = b.summary.begin.origin.as_str().to_string();
+    assert!(origin.starts_with("mcp:"), "{origin}");
 
     let h = ok_json(&tool(&client, "organize_history", json!({})).await);
     assert_eq!(h["batches"][0]["batch_id"], v["batch_id"]);
     assert_eq!(h["batches"][0]["agent"], true);
+
+    // The same session again: the same origin. `/rpc` has the key's.
+    let ops = json!([{"item_id": item_id(&e, "sub/b.jpg"), "kind": "trash"}]);
+    let w = ok_json(&tool(&client, "organize_apply", json!({"ops": ops})).await);
+    assert_eq!(
+        batch(&e, &w["batch_id"]).summary.begin.origin.as_str(),
+        origin
+    );
+    let rpc = call(
+        &e.app,
+        &e.owner_token,
+        "organize.apply",
+        json!({"ops": [{"item_id": item_id(&e, "2025/a.jpg"), "kind": "move", "to": "a.jpg"}]}),
+    )
+    .await;
+    let begin = batch(&e, &rpc["result"]["batch_id"]).summary.begin;
+    assert!(
+        begin.origin.as_str().starts_with("key:"),
+        "{:?}",
+        begin.origin
+    );
+    assert_eq!(begin.actor, Actor::person(e.lib.owner().to_string()));
     client.cancel().await.unwrap();
 }
 
@@ -204,21 +245,16 @@ async fn organize_undo_is_recorded_as_the_agent() {
     let client = connect(&e).await;
     let ops = json!([{"item_id": item_id(&e, "a.jpg"), "kind": "move", "to": "2025/a.jpg"}]);
     let v = ok_json(&tool(&client, "organize_apply", json!({"ops": ops})).await);
-    let before = journal(&e).len();
     let u = ok_json(&tool(&client, "organize_undo", json!({"batch_id": v["batch_id"]})).await);
     assert_eq!(u["results"][0]["status"], "done");
     assert!(e.root.join("a.jpg").exists());
-    let lines: Vec<JournalEntry> = journal(&e).into_iter().skip(before).collect();
-    let header = lines.iter().find(|l| l.kind == OpKind::Batch).unwrap();
-    assert_eq!(header.after["undo_of"], v["batch_id"]);
-    let ops: Vec<&JournalEntry> = lines
-        .iter()
-        .filter(|l| !matches!(l.kind, OpKind::Batch | OpKind::BatchEnd))
-        .collect();
-    assert!(!ops.is_empty());
-    for l in std::iter::once(header).chain(ops) {
-        assert_eq!(actor(l), agent(&e), "{:?}", l.kind);
-    }
+    let undo = batch(&e, &u["batch_id"]);
+    assert_eq!(
+        undo.summary.begin.undo_of.map(|b| b.to_string()),
+        v["batch_id"].as_str().map(str::to_string)
+    );
+    assert_eq!(undo.summary.begin.actor, agent_actor(&e));
+    assert_eq!(batches(&e)[0].begin.batch_id, undo.summary.begin.batch_id);
     client.cancel().await.unwrap();
 }
 

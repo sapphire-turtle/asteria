@@ -130,7 +130,6 @@ impl TestServer {
             .unwrap();
         let hooks = puts.clone();
         let addr = rt.block_on(async {
-            let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
             let (rescan, rescan_rx) = tokio::sync::mpsc::channel(1);
             let journal = open_journal(
                 JournalCtx {
@@ -141,6 +140,7 @@ impl TestServer {
                 None,
             )
             .unwrap();
+            let (writer, _h) = spawn_writer(lib.clone(), cache.clone(), journal.clone());
             let state = AppState::new(
                 lib,
                 cache,

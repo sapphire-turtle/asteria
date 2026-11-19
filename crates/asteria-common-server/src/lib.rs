@@ -2,7 +2,6 @@
 
 pub mod app;
 mod auth;
-mod batches;
 pub mod cache;
 pub mod cli;
 pub mod config;

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use asteria_common_api::{ItemId, MediaUpdateParams};
 use asteria_common_core::journal::Actor;
 use asteria_common_core::{Library, MediaKind, UserId};
+use asteria_common_server::journal::{JournalCtx, ServerJournal, open_journal};
 use asteria_common_server::{
     AppExtension, Cache, StoredHash, WriteError, Writer, scan, spawn_writer,
 };
@@ -23,6 +24,7 @@ struct Env {
     lib: Arc<Library>,
     cache: Arc<Cache>,
     writer: Writer,
+    journal: ServerJournal,
 }
 
 fn env() -> Env {
@@ -41,13 +43,23 @@ fn env() -> Env {
     )
     .unwrap();
     scan(&lib, &cache, &Photos).unwrap();
-    let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
+    let journal = open_journal(
+        JournalCtx {
+            library: lib.clone(),
+            cache: cache.clone(),
+            ext: Arc::new(Photos),
+        },
+        None,
+    )
+    .unwrap();
+    let (writer, _h) = spawn_writer(lib.clone(), cache.clone(), journal.clone());
     Env {
         _dir: dir,
         root,
         lib,
         cache,
         writer,
+        journal,
     }
 }
 
@@ -311,7 +323,7 @@ async fn writer_does_not_touch_cached_hash() {
 async fn shutdown_drains_all_queued_jobs() {
     let e = env();
     let owner = e.lib.owner();
-    let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone());
+    let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone(), e.journal.clone());
     let mut tasks = Vec::new();
     for i in 0..5 {
         let w = w.clone();
@@ -338,7 +350,7 @@ async fn shutdown_drains_all_queued_jobs() {
 #[tokio::test]
 async fn stopped_writer_errors() {
     let e = env();
-    let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone());
+    let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone(), e.journal.clone());
     h.abort();
     let _ = h.await;
     assert_eq!(
@@ -351,7 +363,7 @@ async fn stopped_writer_errors() {
 async fn close_drains_queued_jobs_while_clones_live() {
     let e = env();
     let owner = e.lib.owner();
-    let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone());
+    let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone(), e.journal.clone());
     let mut tasks = Vec::new();
     for i in 0..5 {
         let w = w.clone();

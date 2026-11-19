@@ -102,7 +102,6 @@ impl TestServer {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let log = requests.clone();
         let addr = rt.block_on(async {
-            let (writer, _h) = spawn_writer(state_lib.clone(), cache.clone());
             let (rescan, rescan_rx) = tokio::sync::mpsc::channel(1);
             let journal = open_journal(
                 JournalCtx {
@@ -113,6 +112,7 @@ impl TestServer {
                 None,
             )
             .unwrap();
+            let (writer, _h) = spawn_writer(state_lib.clone(), cache.clone(), journal.clone());
             let state = AppState::new(
                 state_lib,
                 cache,

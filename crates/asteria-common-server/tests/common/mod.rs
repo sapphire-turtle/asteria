@@ -103,7 +103,16 @@ fn env_full(
     fs::create_dir(root.join("sub")).unwrap();
     fs::copy(&red, root.join("sub/b.jpg")).unwrap();
     scan(&lib, &cache, ext.as_ref()).unwrap();
-    let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
+    let journal = open_journal(
+        JournalCtx {
+            library: lib.clone(),
+            cache: cache.clone(),
+            ext: ext.clone(),
+        },
+        None,
+    )
+    .unwrap();
+    let (writer, _h) = spawn_writer(lib.clone(), cache.clone(), journal.clone());
 
     let keys_dir = dir.path().join("keys");
     let mut keys = key_store(&keys_dir);
@@ -146,15 +155,7 @@ fn env_full(
         ext.clone(),
         processor.clone(),
         Arc::new(UploadStore::open(&dir.path().join("state")).unwrap()),
-        open_journal(
-            JournalCtx {
-                library: lib.clone(),
-                cache: cache.clone(),
-                ext: ext.clone(),
-            },
-            None,
-        )
-        .unwrap(),
+        journal,
     );
     Env {
         _dir: dir,

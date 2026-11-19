@@ -8,6 +8,7 @@ use asteria_common_api::{UploadCommitParams, UploadCommitResult, UploadFile, Upl
 use asteria_common_core::hash::{ContentHash, file_hash};
 use asteria_common_core::journal::OpKind;
 use asteria_common_core::{Library, MediaKind, UserId};
+use asteria_common_server::journal::{JournalCtx, open_journal};
 use asteria_common_server::upload::{UploadError, UploadLimits, UploadStore};
 use asteria_common_server::upload_commit::commit;
 use asteria_common_server::{AppExtension, Cache, hash_pending, scan, spawn_writer};
@@ -427,7 +428,16 @@ fn japanese_path_roundtrips() {
 async fn writer_commits_through_the_queue() {
     let e = env();
     let s = e.upload(b"heic bytes");
-    let (writer, _h) = spawn_writer(e.lib.clone(), e.cache.clone());
+    let journal = open_journal(
+        JournalCtx {
+            library: e.lib.clone(),
+            cache: e.cache.clone(),
+            ext: Arc::new(Photos),
+        },
+        None,
+    )
+    .unwrap();
+    let (writer, _h) = spawn_writer(e.lib.clone(), e.cache.clone(), journal);
     let r = writer
         .commit_upload(
             e.store.clone(),

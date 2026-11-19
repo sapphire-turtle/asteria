@@ -1,7 +1,9 @@
 //! The single per-library write queue. Every write to original files (sidecar edits,
-//! orphan relinks and placing upload commits) goes through one task that runs jobs one at a
-//! time on the blocking pool, then refreshes the cache. An upload commit hashes and stages
-//! its files before it joins the queue (see [`crate::upload_commit`]).
+//! orphan relinks, placing upload commits and organize batches) goes through one task that
+//! runs jobs one at a time on the blocking pool, then refreshes the cache. An upload commit
+//! hashes and stages its files before it joins the queue (see [`crate::upload_commit`]). An
+//! organize job hands its batch to the Journal and waits for it to end, so the jobs behind it
+//! wait too (§4.3).
 //!
 //! Shutdown: [`spawn_writer`] returns the [`Writer`] and the task's `JoinHandle`. Once
 //! every `Writer` clone is dropped the task finishes the queued jobs and ends, so
@@ -9,28 +11,33 @@
 //! (a connection task still holding the app state), [`Writer::close`] refuses new jobs and
 //! lets the task end after the queued ones.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use asteria_common_api::{
-    ItemId, MediaUpdateParams, OpStatus, RatingOp, RejectReason, SkipReason, UploadCommitParams,
+    ItemId, MediaUpdateParams, OpResult, RatingOp, RejectReason, UploadCommitParams,
     UploadCommitResult,
 };
 use asteria_common_core::hash::{ContentHash, HashScope};
-use asteria_common_core::journal::{Actor, BatchId};
+use asteria_common_core::journal::Actor;
 use asteria_common_core::{Error as FwError, Library, UserId};
 use chrono::{DateTime, Utc};
-use grain_id::GrainId;
+use corundum_framework::journal::{
+    BatchId, BatchRecords, JournalError, OpKind as _, Origin, Planned as Op,
+};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
-use crate::batches::BatchBook;
 use crate::cache::{Cache, ItemRecord, SidecarSnapshot, StoredHash};
 use crate::error::ServerError;
-use crate::ext::{AppExtension, ExtContext, Rewrite};
+use crate::ext::AppExtension;
 use crate::hashing::{RelinkReport, relink_orphans};
+use crate::journal::files::{self, OrganizeTidy, TidyMove, TidyPlan};
+use crate::journal::map::actor_of;
+use crate::journal::{ServerJournal, auto_label, wait_up_to};
 use crate::organize::{self, Batch, OpCtx, Planned, Target};
 use crate::scan::mtime_ns;
 use crate::upload::{UploadError, UploadStore};
@@ -57,6 +64,9 @@ pub enum WriteError {
     Invalid(String),
     #[error("internal error: {0}")]
     Internal(String),
+    /// The Journal refused or failed the batch.
+    #[error(transparent)]
+    Journal(#[from] JournalError),
 }
 
 /// What became of one rating operation: its id, and either whether it changed the rating
@@ -97,40 +107,33 @@ pub(crate) enum BatchKind {
     Apply,
     /// Check everything, change nothing.
     DryRun,
-    /// A batch that undoes `of`; `restores` put playlists back after the moves. `claim`
-    /// keeps `of` marked as running until the batch has ended, so no second undo of it can
-    /// start in between.
-    Undo {
-        of: BatchId,
-        restores: Vec<Rewrite>,
-        claim: RunningGuard,
-    },
 }
 
 #[derive(Clone)]
 pub struct Writer {
     tx: mpsc::Sender<Job>,
     library: Arc<Library>,
-    /// The batches being run right now.
-    running: Arc<Mutex<HashSet<BatchId>>>,
+    /// Runs and records the batches.
+    journal: ServerJournal,
     /// Turns for the first phase of upload commits (`COMMIT_PREPARE_JOBS`).
     prepare_permits: Arc<Semaphore>,
-    /// The batches this run started, running and ended.
-    book: Arc<BatchBook>,
     /// How long `organize` waits for a batch.
     organize_wait: Arc<Mutex<Duration>>,
 }
 
-/// Starts the writer task. Must be called inside a Tokio runtime (it uses `tokio::spawn`).
-/// See the module docs for shutdown.
-pub fn spawn_writer(library: Arc<Library>, cache: Arc<Cache>) -> (Writer, JoinHandle<()>) {
+/// Starts the writer task, which hands its batches to `journal`. Must be called inside a
+/// Tokio runtime (it uses `tokio::spawn`). See the module docs for shutdown.
+pub fn spawn_writer(
+    library: Arc<Library>,
+    cache: Arc<Cache>,
+    journal: ServerJournal,
+) -> (Writer, JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<Job>(QUEUE);
     let writer = Writer {
         tx,
         library: library.clone(),
-        running: Arc::default(),
+        journal,
         prepare_permits: Arc::new(Semaphore::new(COMMIT_PREPARE_JOBS)),
-        book: Arc::default(),
         organize_wait: Arc::new(Mutex::new(APPLY_WAIT)),
     };
     let handle = tokio::spawn(async move {
@@ -259,11 +262,6 @@ impl Writer {
         let _ = self.tx.send(Job::Close).await;
     }
 
-    /// The batches that are running now (between their first and last journal line).
-    pub fn running(&self) -> Arc<Mutex<HashSet<BatchId>>> {
-        self.running.clone()
-    }
-
     /// Runs `f` as one job of the queue.
     async fn exec<T: Send + 'static>(
         &self,
@@ -279,105 +277,163 @@ impl Writer {
             .map_err(|_| WriteError::Internal("write job failed".into()))
     }
 
-    /// Marks `id` as running, or `None` if it already is. `organize.undo` takes this on the
-    /// batch it undoes before reading the journal, so the check for an earlier undo and the
-    /// start of this one cannot interleave with another undo of the same batch.
-    pub(crate) fn claim_running(&self, id: BatchId) -> Option<RunningGuard> {
-        RunningGuard::try_new(&self.running, id)
-    }
-
-    /// The batches this run started: which are running, and the results of those that ended.
-    pub(crate) fn book(&self) -> &BatchBook {
-        &self.book
-    }
-
-    /// Marks `id` as failed in the book, as a batch that ended with an error would. Only for
-    /// tests, which cannot make a batch fail on cue.
-    #[doc(hidden)]
-    pub fn fail_batch_for_test(&self, id: BatchId) {
-        self.book.fail(id);
-    }
-
     /// Sets how long [`Writer::organize`] waits for a batch (tests use a short one).
     pub(crate) fn set_organize_wait(&self, wait: Duration) {
         *self.organize_wait.lock().unwrap_or_else(|p| p.into_inner()) = wait;
     }
 
-    /// Runs a batch of moves and trashes: a header line, then each operation as a job of its
-    /// own (so other writes interleave), then a last job that tidies up and journals the
-    /// end. A dry run is one job that touches nothing. The batch runs in a task of its own
-    /// and finishes even when the caller stops waiting. The cache is updated by the
-    /// operations, so the caller need not rescan.
+    fn organize_wait(&self) -> Duration {
+        *self.organize_wait.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Runs a batch of moves and trashes in the Journal, closed by an `organize_tidy`, as
+    /// `actor` from `origin`; a batch without a label gets one. The operations skipped while
+    /// planning are not run, and report under their request index. A dry run checks each
+    /// operation on the queue and touches nothing. The operations update the cache, so the
+    /// caller need not rescan.
     ///
     /// A batch that is not over after the wait (`set_organize_wait`) is answered with
-    /// `running: true` and no results; it goes on, and its outcome lands in [`Writer::book`].
-    /// A dry run is always waited for.
-    ///
-    /// An error means nothing was done: the header could not be journaled (for example the
-    /// server has no state directory), so no file was touched.
+    /// `running: true` and no results; it goes on, and `organize.status` reads its outcome
+    /// from the Journal. A dry run is always waited for.
     pub(crate) async fn organize(
         &self,
         actor: Actor,
+        origin: Origin,
         label: Option<String>,
         ops: Vec<Planned>,
         ext: Arc<dyn AppExtension>,
         kind: BatchKind,
     ) -> Result<Batch, WriteError> {
-        let (undo_of, restores, claim) = match kind {
-            BatchKind::DryRun => {
-                let writer = self.clone();
-                let task = tokio::spawn(async move { writer.run_dry(actor, ops, ext).await });
-                return task.await.unwrap_or_else(|e| {
-                    tracing::error!(error = %e, "organize task failed");
-                    Err(WriteError::Internal("write job failed".into()))
-                });
+        if let BatchKind::DryRun = kind {
+            return self.run_dry(ops, ext).await;
+        }
+        let deadline = Instant::now() + self.organize_wait();
+        let mut indices = Vec::new();
+        let mut early = Vec::new();
+        let mut plans = Vec::new();
+        let mut moves = Vec::new();
+        for (i, planned) in ops.into_iter().enumerate() {
+            match planned {
+                Ok(op) => {
+                    indices.push(i);
+                    plans.push(files::planned(&op));
+                    let to = match op.to {
+                        Target::Path(to) => Some(to),
+                        Target::Trash(_) => None,
+                    };
+                    moves.push(TidyMove { from: op.from, to });
+                }
+                Err((path, why)) => early.push(organize::skipped(i, &path, why)),
             }
-            BatchKind::Apply => (None, None, None),
-            BatchKind::Undo {
-                of,
-                restores,
-                claim,
-            } => (Some(of), Some(restores), Some(claim)),
-        };
-        let id = BatchId(GrainId::random());
-        self.book.start(id);
-        let wait = *self.organize_wait.lock().unwrap_or_else(|p| p.into_inner());
-        let writer = self.clone();
-        let mut task = tokio::spawn(async move {
-            // However the task ends, the book must not keep the batch as running.
-            let mut ending = Ending {
-                book: writer.book.clone(),
-                id,
-                ended: false,
+        }
+        let label = label.or_else(|| auto_label(files::Move::KIND, indices.len()));
+        plans.push(Op::new::<OrganizeTidy>(&TidyPlan {
+            user: organize::actor_user(actor),
+            moves,
+        }));
+        let actor = actor_of(actor);
+        let id = self
+            .start_batch(move |j| j.submit(plans, &origin, &actor, label), |_, _| {})
+            .await?;
+        self.answer(id, deadline, move |b| {
+            organize::merge_results(b, &indices, early)
+        })
+        .await
+    }
+
+    /// Undoes the batch `of` in the Journal, as `actor` from `origin`, and answers like
+    /// [`Writer::organize`]. Once the undo has ended, the folders it emptied are removed. A
+    /// dry run checks the moves back on the queue and touches nothing.
+    ///
+    /// A batch that cannot be undone (unknown, already undone or being undone, too old, or
+    /// someone else's) is refused at once, before the queue.
+    pub(crate) async fn undo(
+        &self,
+        of: BatchId,
+        actor: Actor,
+        origin: Origin,
+        ext: Arc<dyn AppExtension>,
+        dry_run: bool,
+    ) -> Result<Batch, WriteError> {
+        let deadline = Instant::now() + self.organize_wait();
+        let actor = actor_of(actor);
+        let (journal, checking) = (self.journal.clone(), actor.clone());
+        let target = tokio::task::spawn_blocking(move || {
+            journal.check_undo(of, &checking)?;
+            journal.status(of)
+        })
+        .await
+        .map_err(|e| WriteError::Internal(e.to_string()))??;
+        if dry_run {
+            return self.run_dry(organize::undo_plans(&target), ext).await;
+        }
+        let id = self
+            .start_batch(
+                move |j| j.undo_batch(of, &origin, &actor),
+                |lib, b| organize::remove_emptied_folders(lib.root(), &organize::sources(b)),
+            )
+            .await?;
+        self.answer(id, deadline, organize::results).await
+    }
+
+    /// Starts a batch with a job of the queue: `start` hands it to the Journal, then the job
+    /// waits for it to end, so the jobs behind it wait too, and runs `ended` with it. Gives
+    /// the batch's id as soon as it has started. (The Journal's operations never wait on the
+    /// Journal themselves: that is done here.)
+    async fn start_batch(
+        &self,
+        start: impl FnOnce(&ServerJournal) -> Result<BatchId, JournalError> + Send + 'static,
+        ended: impl FnOnce(&Arc<Library>, &BatchRecords) + Send + 'static,
+    ) -> Result<BatchId, WriteError> {
+        let (started, rx) = oneshot::channel();
+        let journal = self.journal.clone();
+        let job = Box::new(move |lib: &Arc<Library>, _: &Arc<Cache>| {
+            let id = match start(&journal) {
+                Ok(id) => id,
+                Err(e) => {
+                    let _ = started.send(Err(e));
+                    return;
+                }
             };
-            // The claim lives until the batch has ended, even when nobody waits for it.
-            let _claim = claim;
-            let outcome = writer
-                .run_batch(id, actor, label, ops, ext, undo_of, restores)
-                .await;
-            match &outcome {
-                Ok(batch) => writer.book.finish(id, batch.results.clone()),
-                Err(_) => writer.book.fail(id),
+            let _ = started.send(Ok(id));
+            match journal.wait(id) {
+                Ok(b) => ended(lib, &b),
+                Err(e) => tracing::error!(error = %e, batch = %id, "a batch failed"),
             }
-            ending.ended = true;
-            outcome
         });
-        match tokio::time::timeout(wait, &mut task).await {
-            Err(_) => Ok(Batch {
+        self.tx.send(Job::Exec(job)).await.map_err(|_| stopped())?;
+        // A dropped sender means the job panicked.
+        let started = rx
+            .await
+            .map_err(|_| WriteError::Internal("write job failed".into()))?;
+        Ok(started?)
+    }
+
+    /// The answer for the batch `id`: its results by `report` if it ends by `deadline`,
+    /// otherwise `running`.
+    async fn answer(
+        &self,
+        id: BatchId,
+        deadline: Instant,
+        report: impl FnOnce(&BatchRecords) -> Vec<OpResult>,
+    ) -> Result<Batch, WriteError> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        Ok(match wait_up_to(&self.journal, id, left).await? {
+            None => Batch {
                 id: Some(id),
                 results: Vec::new(),
                 running: true,
-            }),
-            Ok(joined) => joined.unwrap_or_else(|e| {
-                tracing::error!(error = %e, "organize task failed");
-                Err(WriteError::Internal("write job failed".into()))
-            }),
-        }
+            },
+            Some(b) => Batch {
+                id: Some(id),
+                results: report(&b),
+                running: false,
+            },
+        })
     }
 
     async fn run_dry(
         &self,
-        actor: Actor,
         ops: Vec<Planned>,
         ext: Arc<dyn AppExtension>,
     ) -> Result<Batch, WriteError> {
@@ -387,131 +443,12 @@ impl Writer {
                     library: lib,
                     cache,
                     ext: ext.as_ref(),
-                    actor,
-                    batch: None,
                 };
                 organize::dry_run(&ctx, &ops)
             })
             .await?;
         Ok(Batch {
             id: None,
-            results,
-            running: false,
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn run_batch(
-        &self,
-        id: BatchId,
-        actor: Actor,
-        label: Option<String>,
-        ops: Vec<Planned>,
-        ext: Arc<dyn AppExtension>,
-        undo_of: Option<BatchId>,
-        restores: Option<Vec<Rewrite>>,
-    ) -> Result<Batch, WriteError> {
-        let _running = RunningGuard::new(&self.running, id);
-        let count = ops.len();
-        let header = {
-            let ext = ext.clone();
-            self.exec(move |lib, cache| {
-                let ctx = OpCtx {
-                    library: lib,
-                    cache,
-                    ext: ext.as_ref(),
-                    actor,
-                    batch: Some(id),
-                };
-                organize::write_header(&ctx, label.as_deref(), count, undo_of)
-            })
-            .await?
-        };
-        if let Err(e) = header {
-            tracing::error!(error = %e, "cannot journal the start of a batch; nothing was changed");
-            return Err(WriteError::Internal(e.to_string()));
-        }
-
-        let mut results = Vec::with_capacity(count);
-        // (from, to) of the completed operations; `to` is `None` for a trash.
-        let mut completed: Vec<(String, Option<String>)> = Vec::new();
-        for (i, planned) in ops.into_iter().enumerate() {
-            let op = match planned {
-                Ok(op) => op,
-                Err((path, why)) => {
-                    results.push(organize::skipped(i, &path, why));
-                    continue;
-                }
-            };
-            let (job_op, job_ext) = (op.clone(), ext.clone());
-            let outcome = self
-                .exec(move |lib, cache| {
-                    let ctx = OpCtx {
-                        library: lib,
-                        cache,
-                        ext: job_ext.as_ref(),
-                        actor,
-                        batch: Some(id),
-                    };
-                    organize::apply(&ctx, &job_op)
-                })
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::error!(error = %e, from = %op.from, "organize job did not run");
-                    Err(SkipReason::Io)
-                });
-            match outcome {
-                Ok(d) => {
-                    let to = match op.to {
-                        Target::Path(_) => Some(d.to.clone()),
-                        Target::Trash => None,
-                    };
-                    completed.push((op.from.clone(), to));
-                    results.push(organize::applied(i, &op, d));
-                }
-                Err(why) => results.push(organize::skipped(i, organize::reported_path(&op), why)),
-            }
-        }
-
-        let done = results
-            .iter()
-            .filter(|r| r.status == OpStatus::Done)
-            .count();
-        let skipped = results.len() - done;
-        let finished = self
-            .exec(move |lib, cache| {
-                let ctx = OpCtx {
-                    library: lib,
-                    cache,
-                    ext: ext.as_ref(),
-                    actor,
-                    batch: Some(id),
-                };
-                let rewrites = match restores {
-                    Some(restores) => restores,
-                    None => {
-                        let moves: Vec<(String, String)> = completed
-                            .iter()
-                            .filter_map(|(from, to)| Some((from.clone(), to.clone()?)))
-                            .collect();
-                        let ectx = ExtContext {
-                            library: lib.clone(),
-                            cache: cache.clone(),
-                            user: organize::actor_user(actor),
-                            owner: lib.owner(),
-                        };
-                        organize::rewrites_after(ext.as_ref(), &ectx, &moves)
-                    }
-                };
-                let sources: Vec<String> = completed.into_iter().map(|(from, _)| from).collect();
-                organize::finish(&ctx, &sources, &rewrites, done, skipped);
-            })
-            .await;
-        if let Err(e) = finished {
-            tracing::error!(error = %e, "the last job of a batch did not run");
-        }
-        Ok(Batch {
-            id: Some(id),
             results,
             running: false,
         })
@@ -582,54 +519,6 @@ impl Writer {
             .await
             .map_err(|_| upload_stopped())?;
         rx.await.map_err(|_| upload_stopped())?
-    }
-}
-
-/// Marks a batch as failed in the book if its task ends without having said how.
-struct Ending {
-    book: Arc<BatchBook>,
-    id: BatchId,
-    ended: bool,
-}
-
-impl Drop for Ending {
-    fn drop(&mut self) {
-        if !self.ended {
-            self.book.fail(self.id);
-        }
-    }
-}
-
-/// Takes a batch out of `running` however its task ends.
-pub(crate) struct RunningGuard {
-    set: Arc<Mutex<HashSet<BatchId>>>,
-    id: BatchId,
-}
-
-impl RunningGuard {
-    fn try_new(set: &Arc<Mutex<HashSet<BatchId>>>, id: BatchId) -> Option<RunningGuard> {
-        let fresh = set.lock().unwrap_or_else(|p| p.into_inner()).insert(id);
-        fresh.then(|| RunningGuard {
-            set: set.clone(),
-            id,
-        })
-    }
-
-    fn new(set: &Arc<Mutex<HashSet<BatchId>>>, id: BatchId) -> RunningGuard {
-        set.lock().unwrap_or_else(|p| p.into_inner()).insert(id);
-        RunningGuard {
-            set: set.clone(),
-            id,
-        }
-    }
-}
-
-impl Drop for RunningGuard {
-    fn drop(&mut self) {
-        self.set
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&self.id);
     }
 }
 

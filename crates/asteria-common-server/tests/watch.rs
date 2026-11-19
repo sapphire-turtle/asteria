@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use asteria_common_api::MediaUpdateParams;
 use asteria_common_core::journal::Actor;
 use asteria_common_core::{Library, MediaKind};
+use asteria_common_server::journal::{JournalCtx, open_journal};
 use asteria_common_server::{AppExtension, Cache, ScanLoop, spawn_scan_loop, spawn_writer};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -72,7 +73,16 @@ fn start_with(setup: impl FnOnce(&Path), trigger_cap: usize) -> Env {
     let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
     setup(&root);
     let gate = Arc::new(Gate::default());
-    let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
+    let journal = open_journal(
+        JournalCtx {
+            library: lib.clone(),
+            cache: cache.clone(),
+            ext: gate.clone(),
+        },
+        None,
+    )
+    .unwrap();
+    let (writer, _h) = spawn_writer(lib.clone(), cache.clone(), journal);
     let (tx, rx) = mpsc::channel(trigger_cap);
     let passes = Arc::new(AtomicUsize::new(0));
     let scanning = Arc::new(AtomicBool::new(false));

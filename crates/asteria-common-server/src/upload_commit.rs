@@ -609,6 +609,29 @@ mod tests {
     use super::*;
     use asteria_common_api::UploadFile;
 
+    /// A writer over the library, with a journal of its own.
+    fn writer_for(
+        lib: &Arc<Library>,
+        cache: &Arc<Cache>,
+    ) -> (crate::Writer, tokio::task::JoinHandle<()>) {
+        struct Media;
+        impl crate::AppExtension for Media {
+            fn accepts(&self, kind: asteria_common_core::MediaKind) -> bool {
+                matches!(
+                    kind,
+                    asteria_common_core::MediaKind::Image | asteria_common_core::MediaKind::Video
+                )
+            }
+        }
+        let ctx = crate::journal::JournalCtx {
+            library: lib.clone(),
+            cache: cache.clone(),
+            ext: Arc::new(Media),
+        };
+        let journal = crate::journal::open_journal(ctx, None).unwrap();
+        crate::spawn_writer(lib.clone(), cache.clone(), journal)
+    }
+
     #[test]
     fn numbering() {
         assert_eq!(numbered("IMG_0001.HEIC", 1), "IMG_0001.HEIC");
@@ -1029,7 +1052,7 @@ mod tests {
             .unwrap()
             .session;
         store.put_chunk(me, &session, 0, b"heic bytes").unwrap();
-        let (writer, _h) = crate::spawn_writer(lib.clone(), cache.clone());
+        let (writer, _h) = writer_for(&lib, &cache);
 
         let _serial = hold::TESTS.lock().await;
         // The commit stops as it starts hashing, as a big file would keep it there.
@@ -1106,7 +1129,7 @@ mod tests {
             .unwrap()
             .session;
         store.put_chunk(me, &session, 0, b"heic bytes").unwrap();
-        let (writer, _h) = crate::spawn_writer(lib.clone(), cache.clone());
+        let (writer, _h) = writer_for(&lib, &cache);
         let params = UploadCommitParams {
             files: vec![UploadFile {
                 session: session.clone(),

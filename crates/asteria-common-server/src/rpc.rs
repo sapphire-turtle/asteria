@@ -7,8 +7,8 @@ use asteria_common_api::{
     ExistingMedia, FOLDER_LIST, FolderListParams, FolderListing, HISTORY_DEFAULT_LIMIT,
     HISTORY_MAX_LIMIT, ItemId, LIBRARY_INFO, LIBRARY_RESCAN, LibraryInfo, MAX_RATING_OPS,
     MEDIA_GET, MEDIA_UPDATE, MediaGetParams, MediaItem, MediaUpdateParams, OPS_APPLY,
-    ORGANIZE_APPLY, ORGANIZE_HISTORY, ORGANIZE_STATUS, ORGANIZE_UNDO, OpStatus, OpsApplyParams,
-    OpsApplyResult, OrganizeApplyParams, OrganizeHistoryParams, OrganizeResult, OrganizeStatus,
+    ORGANIZE_APPLY, ORGANIZE_HISTORY, ORGANIZE_STATUS, ORGANIZE_UNDO, OpsApplyParams,
+    OpsApplyResult, OrganizeApplyParams, OrganizeHistoryParams, OrganizeResult,
     OrganizeStatusParams, OrganizeUndoParams, RatingOpResult, RatingOpStatus, RpcError, RpcOutcome,
     RpcResponse, SERVER_INFO, ServerInfo, UPLOAD_ABORT, UPLOAD_BEGIN, UPLOAD_CHECK, UPLOAD_COMMIT,
     UPLOAD_STATUS, UploadBeginParams, UploadCheckParams, UploadCheckResult, UploadCommitParams,
@@ -16,21 +16,23 @@ use asteria_common_api::{
 };
 use asteria_common_core::UserId;
 use asteria_common_core::hash::ContentHash;
-use asteria_common_core::journal::{Actor, BatchId};
+use asteria_common_core::journal::Actor;
 use axum::Extension;
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::State;
 use chrono::{DateTime, SecondsFormat};
+use corundum_framework::journal::{BatchId, JournalError, Origin};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::error::TrySendError;
 
-use crate::batches::Slot;
+use crate::auth::Caller;
 use crate::cache::ItemRecord;
 use crate::error::ServerError;
 use crate::ext::ExtContext;
+use crate::journal::map::{self, origin_key};
 use crate::organize;
 use crate::state::AppState;
 use crate::upload::UploadError;
@@ -83,7 +85,7 @@ fn respond(id: u64, outcome: Result<Value, RpcError>) -> Json<RpcResponse<Value>
 
 pub(crate) async fn rpc(
     State(state): State<AppState>,
-    Extension(user): Extension<UserId>,
+    Extension(caller): Extension<Caller>,
     body: Bytes,
 ) -> Json<RpcResponse<Value>> {
     // Id 0 is used when the request's own id cannot be read (JSON-RPC says `null` there, but
@@ -108,20 +110,30 @@ pub(crate) async fn rpc(
             Err(rpc_error(codes::INVALID_REQUEST, "jsonrpc must be \"2.0\"")),
         );
     }
+    let origin = origin_key(&caller.key);
     respond(
         id,
-        dispatch(&state, Actor::User(user), &req.method, req.params).await,
+        dispatch(
+            &state,
+            Actor::User(caller.user),
+            origin,
+            &req.method,
+            req.params,
+        )
+        .await,
     )
 }
 
-/// Runs one RPC method for `actor` (`/mcp` calls the methods through this).
+/// Runs one RPC method for `actor`, its writes recorded as from `origin` (`/mcp` calls the
+/// methods through this).
 pub(crate) async fn call(
     state: &AppState,
     actor: Actor,
+    origin: Origin,
     method: &str,
     params: Value,
 ) -> Result<Value, RpcError> {
-    dispatch(state, actor, method, params).await
+    dispatch(state, actor, origin, method, params).await
 }
 
 fn params<P: DeserializeOwned>(v: Value) -> Result<P, RpcError> {
@@ -165,7 +177,19 @@ fn write_err(e: WriteError) -> RpcError {
         }
         WriteError::Invalid(m) => rpc_error(codes::INVALID_PARAMS, m),
         WriteError::Internal(m) => internal(m),
+        WriteError::Journal(e) => map::rpc_error(e),
     }
+}
+
+fn no_such_batch() -> RpcError {
+    rpc_error(codes::NOT_FOUND, "no such batch")
+}
+
+/// The batch `id` names; an id that is not one is an id nobody has.
+fn batch_id(id: &str) -> Result<BatchId, RpcError> {
+    id.parse::<grain_id::GrainId>()
+        .map(BatchId)
+        .map_err(|_| no_such_batch())
 }
 
 fn upload_err(e: UploadError) -> RpcError {
@@ -190,11 +214,12 @@ async fn upload_blocking<T: Send + 'static>(
     }
 }
 
-/// Runs `method`. Writes are journaled as `actor`; everything else sees the user `actor`
-/// acts as.
+/// Runs `method`. Writes are journaled as `actor` from `origin`; everything else sees the
+/// user `actor` acts as.
 async fn dispatch(
     state: &AppState,
     actor: Actor,
+    origin: Origin,
     method: &str,
     p: Value,
 ) -> Result<Value, RpcError> {
@@ -382,66 +407,35 @@ async fn dispatch(
             };
             let batch = state
                 .writer()
-                .organize(actor, p.label, planned, state.extension().clone(), kind)
+                .organize(
+                    actor,
+                    origin,
+                    p.label,
+                    planned,
+                    state.extension().clone(),
+                    kind,
+                )
                 .await
                 .map_err(write_err)?;
             to_value(OrganizeResult {
-                batch_id: batch.id.map(|b| b.0.to_string()),
+                batch_id: batch.id.map(|b| b.to_string()),
                 results: batch.results,
                 running: batch.running,
             })
         }
         ORGANIZE_UNDO => {
             let p: OrganizeUndoParams = params(p)?;
-            // An id that is not one is an id nobody has.
-            let Ok(of) = p.batch_id.parse::<grain_id::GrainId>().map(BatchId) else {
-                return Err(rpc_error(codes::NOT_FOUND, "no such batch"));
-            };
-            let busy = || rpc_error(codes::BUSY, "that batch is being changed; retry");
-            // The claim comes before the journal is read: the check for an earlier undo and
-            // the start of this one must not interleave with another undo of the same batch.
-            let claim = if p.dry_run {
-                let running = state.writer().running();
-                let taken = running
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .contains(&of);
-                if taken {
-                    return Err(busy());
-                }
-                None
-            } else {
-                Some(state.writer().claim_running(of).ok_or_else(busy)?)
-            };
-            let library = state.library().clone();
-            let plan = tokio::task::spawn_blocking(move || {
-                let entries = library.journal()?.read_all()?;
-                Ok::<_, asteria_common_core::Error>(organize::plan_undo(&entries, of))
-            })
-            .await
-            .map_err(internal)?
-            .map_err(internal)?
-            .map_err(|e| match e {
-                organize::UndoError::NotFound => rpc_error(codes::NOT_FOUND, "no such batch"),
-                organize::UndoError::AlreadyUndone => {
-                    rpc_error(codes::ALREADY_UNDONE, "that batch was already undone")
-                }
-            })?;
-            let kind = match claim {
-                Some(claim) => BatchKind::Undo {
-                    of,
-                    restores: plan.restores,
-                    claim,
-                },
-                None => BatchKind::DryRun,
-            };
+            let of = batch_id(&p.batch_id)?;
             let batch = state
                 .writer()
-                .organize(actor, None, plan.ops, state.extension().clone(), kind)
+                .undo(of, actor, origin, state.extension().clone(), p.dry_run)
                 .await
-                .map_err(write_err)?;
+                .map_err(|e| match e {
+                    WriteError::Journal(JournalError::NotFound(_)) => no_such_batch(),
+                    e => write_err(e),
+                })?;
             to_value(OrganizeResult {
-                batch_id: batch.id.map(|b| b.0.to_string()),
+                batch_id: batch.id.map(|b| b.to_string()),
                 results: batch.results,
                 running: batch.running,
             })
@@ -452,71 +446,26 @@ async fn dispatch(
                 .limit
                 .unwrap_or(HISTORY_DEFAULT_LIMIT)
                 .clamp(1, HISTORY_MAX_LIMIT);
-            let library = state.library().clone();
-            let all = tokio::task::spawn_blocking(move || {
-                let entries = library.journal()?.read_all()?;
-                Ok::<_, asteria_common_core::Error>(organize::history(&entries))
+            let journal = state.journal().clone();
+            let history = tokio::task::spawn_blocking(move || {
+                organize::history(&journal, limit, p.cursor.as_deref(), p.kinds.as_deref())
             })
             .await
-            .map_err(internal)?
-            .map_err(internal)?;
-            to_value(organize::history_page(all, limit, p.cursor.as_deref())?)
+            .map_err(internal)??;
+            to_value(history)
         }
         ORGANIZE_STATUS => {
             let p: OrganizeStatusParams = params(p)?;
-            let no_such = || rpc_error(codes::NOT_FOUND, "no such batch");
-            let Ok(id) = p.batch_id.parse::<grain_id::GrainId>().map(BatchId) else {
-                return Err(no_such());
-            };
-            let count = |results: &[asteria_common_api::OpResult], status| {
-                results.iter().filter(|r| r.status == status).count() as u32
-            };
-            match state.writer().book().get(id) {
-                Some(Slot::Running) => to_value(OrganizeStatus {
-                    batch_id: p.batch_id,
-                    running: true,
-                    complete: false,
-                    done: 0,
-                    skipped: 0,
-                    results: None,
-                }),
-                Some(Slot::Done(results)) => to_value(OrganizeStatus {
-                    batch_id: p.batch_id,
-                    running: false,
-                    complete: true,
-                    done: count(&results, OpStatus::Done),
-                    skipped: count(&results, OpStatus::Skipped),
-                    results: Some(results),
-                }),
-                // A failed batch may have changed files before it stopped; the journal knows.
-                slot @ (Some(Slot::Failed) | None) => {
-                    let library = state.library().clone();
-                    let all = tokio::task::spawn_blocking(move || {
-                        let entries = library.journal()?.read_all()?;
-                        Ok::<_, asteria_common_core::Error>(organize::history(&entries))
-                    })
-                    .await
-                    .map_err(internal)?
-                    .map_err(internal)?;
-                    let id = id.0.to_string();
-                    let found = all.into_iter().find(|b| b.batch_id == id);
-                    let b = found.ok_or_else(|| match slot {
-                        Some(_) => rpc_error(
-                            codes::NOT_FOUND,
-                            "the batch failed before changing anything",
-                        ),
-                        None => no_such(),
-                    })?;
-                    to_value(OrganizeStatus {
-                        batch_id: b.batch_id,
-                        running: false,
-                        complete: b.complete,
-                        done: b.done,
-                        skipped: b.skipped,
-                        results: None,
-                    })
-                }
-            }
+            let id = batch_id(&p.batch_id)?;
+            let journal = state.journal().clone();
+            let status = tokio::task::spawn_blocking(move || organize::status(&journal, id))
+                .await
+                .map_err(internal)?
+                .map_err(|e| match e {
+                    JournalError::NotFound(_) => no_such_batch(),
+                    e => map::rpc_error(e),
+                })?;
+            to_value(status)
         }
         _ => {
             // Not a common method: the app may know it. The extension is synchronous and
