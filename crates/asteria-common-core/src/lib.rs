@@ -6,7 +6,6 @@ pub mod error;
 pub mod fsutil;
 pub mod hash;
 pub mod ids;
-
 pub mod kind;
 pub mod library;
 pub mod meta;

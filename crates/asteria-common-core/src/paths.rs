@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 pub const META_DIR: &str = ".asteria";
 
-/// Holds trashed files, one folder per batch, under [`META_DIR`].
+/// Holds trashed files, one folder per trash id, under [`META_DIR`].
 pub const TRASH_DIR: &str = "trash";
 
 /// Library-relative path a trashed file is moved to: `.asteria/trash/<id>/<rel>`.
@@ -43,7 +43,7 @@ mod tests {
     use grain_id::GrainId;
 
     #[test]
-    fn trash_rel_nests_under_the_op_id() {
+    fn trash_rel_nests_under_the_trash_id() {
         let g = GrainId::random();
         assert_eq!(
             trash_rel(&g.to_string(), "2025/a.jpg"),
