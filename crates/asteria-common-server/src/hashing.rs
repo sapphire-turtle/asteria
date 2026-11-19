@@ -19,7 +19,7 @@ use walkdir::WalkDir;
 use crate::cache::{Cache, SidecarSnapshot, StoredHash};
 use crate::error::ServerError;
 use crate::fsutil::move_no_clobber;
-use crate::journal::files::{RelinkPlan, RelinkSidecar};
+use crate::journal::files::{RelinkPlan, RelinkSidecar, io_skip};
 use crate::journal::map::{actor_of, origin_scan};
 use crate::journal::{ServerJournal, auto_label};
 use crate::organize;
@@ -356,11 +356,6 @@ pub(crate) fn move_sidecar(
         }
     }
     Ok(())
-}
-
-fn io_skip(what: &str, path: &str, e: &std::io::Error) -> Skip {
-    tracing::warn!(%path, error = %e, "{what}");
-    Skip::Io(e.to_string())
 }
 
 /// Items an orphan sidecar with this hash may be moved to (spec §4.2 item 5): current

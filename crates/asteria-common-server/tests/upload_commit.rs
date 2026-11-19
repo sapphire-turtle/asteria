@@ -115,6 +115,27 @@ impl Env {
         )
     }
 
+    /// Undoes the newest upload batch, and gives the undo as it ended.
+    fn undo_upload(&self) -> BatchRecords {
+        let id = self.upload_batches().last().unwrap().summary.begin.batch_id;
+        let me = Actor::person(self.me.to_string());
+        let u = self.journal.undo_batch(id, &origin(), &me).unwrap();
+        self.journal.wait(u).unwrap()
+    }
+
+    /// The names of the files in the trash, sorted.
+    fn trashed(&self) -> Vec<String> {
+        let trash = self.root.join(".asteria/trash");
+        let mut out: Vec<String> = walkdir::WalkDir::new(&trash)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|d| d.file_type().is_file())
+            .map(|d| d.file_name().to_string_lossy().into_owned())
+            .collect();
+        out.sort();
+        out
+    }
+
     /// The upload batches, oldest first, with their operations.
     fn upload_batches(&self) -> Vec<BatchRecords> {
         let mut out: Vec<BatchRecords> = self
@@ -328,6 +349,63 @@ fn an_upload_can_be_undone_to_the_trash() {
         fs::read(e.root.join("Inbox/IMG_0001.HEIC")).unwrap(),
         b"heic bytes"
     );
+}
+
+/// A photo and its sidecar, uploaded together.
+fn upload_pair(e: &Env) {
+    let jpg = e.upload(&fs::read(fixture("red.jpg")).unwrap());
+    let xmp = e.upload(&fs::read(fixture("xmp/asteria_full.xmp")).unwrap());
+    placed(
+        e.commit(&[(&jpg, "x.jpg"), (&xmp, "x.jpg.xmp")], false)
+            .unwrap(),
+    );
+}
+
+/// An uploaded photo and its sidecar undo together: both go to the trash.
+#[test]
+fn an_upload_pair_undoes_together() {
+    let e = env();
+    upload_pair(&e);
+    let undone = e.undo_upload();
+    assert!(
+        undone.summary.done > 0 && undone.summary.skipped == 0,
+        "{undone:?}"
+    );
+    assert!(e.inbox_files().is_empty());
+    assert_eq!(e.trashed(), ["x.jpg", "x.jpg.xmp"]);
+}
+
+/// The photo was edited after the upload: neither it nor its sidecar goes to the trash.
+#[test]
+fn undo_keeps_an_upload_pair_whose_media_changed() {
+    let e = env();
+    upload_pair(&e);
+    fs::write(e.root.join("Inbox/x.jpg"), b"edited photo").unwrap();
+    let undone = e.undo_upload();
+    assert_eq!(undone.summary.done, 0, "{undone:?}");
+    assert_eq!(e.inbox_files(), ["x.jpg", "x.jpg.xmp"]);
+    assert!(e.trashed().is_empty());
+}
+
+/// The photo was rated after the upload (its sidecar rewritten): both stay, and the rating
+/// with them.
+#[test]
+fn undo_keeps_an_upload_pair_whose_sidecar_changed() {
+    let e = env();
+    upload_pair(&e);
+    e.lib
+        .set_rating(Path::new("Inbox/x.jpg"), e.me, 4, chrono::Utc::now())
+        .unwrap();
+    let undone = e.undo_upload();
+    assert_eq!(undone.summary.done, 0, "{undone:?}");
+    assert_eq!(e.inbox_files(), ["x.jpg", "x.jpg.xmp"]);
+    assert!(e.trashed().is_empty());
+    let sc = e
+        .lib
+        .read_sidecar(Path::new("Inbox/x.jpg"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(sc.rating.unwrap().value, 4);
 }
 
 #[test]

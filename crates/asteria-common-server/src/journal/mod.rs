@@ -11,8 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use asteria_common_core::Library;
 use corundum_framework::journal::{
-    BatchId, BatchRecords, Clock, Journal, JournalConfig, JournalError, JsonlStore, Registry,
-    UndoPolicy,
+    BatchId, BatchRecords, Clock, Journal, JournalConfig, JournalError, JournalStore, JsonlStore,
+    Registry, UndoPolicy,
 };
 
 pub use prepare::{Prepared, UNDO_WINDOW, prepare};
@@ -30,12 +30,21 @@ pub struct JournalCtx {
 
 pub type ServerJournal = Journal<JournalCtx>;
 
-/// How often `wait_up_to` looks at the batch.
-const POLL: Duration = Duration::from_millis(50);
+/// How often `wait_up_to` (and an upload commit settling its batch) looks at the batch.
+pub(crate) const POLL: Duration = Duration::from_millis(50);
 
 /// Prepares `<state>/journal`, opens the JsonlStore and starts the Journal with every
 /// operation registered (`register_all`), the 30-day policy and `clock` (None = system).
 pub fn open_journal(ctx: JournalCtx, clock: Option<Clock>) -> Result<ServerJournal, ServerError> {
+    open_journal_over(ctx, clock, |store| store)
+}
+
+/// [`open_journal`] over the store `wrap` makes of the JsonlStore (tests put one in the way).
+pub(crate) fn open_journal_over<S: JournalStore + 'static>(
+    ctx: JournalCtx,
+    clock: Option<Clock>,
+    wrap: impl FnOnce(JsonlStore) -> S,
+) -> Result<ServerJournal, ServerError> {
     let dir = ctx
         .library
         .state_dir()
@@ -43,7 +52,7 @@ pub fn open_journal(ctx: JournalCtx, clock: Option<Clock>) -> Result<ServerJourn
         .join("journal");
     let now: Clock = clock.unwrap_or_else(|| Arc::new(system_now_ms));
     prepare(&dir, now(), UNDO_WINDOW)?;
-    let store = JsonlStore::open(&dir)?;
+    let store = wrap(JsonlStore::open(&dir)?);
     let mut registry = Registry::new();
     register_all(&mut registry, ctx.ext.as_ref());
     let config = JournalConfig {

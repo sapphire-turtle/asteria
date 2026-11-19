@@ -384,9 +384,15 @@ async fn dispatch(
             let result = state
                 .writer()
                 .commit_upload(state.uploads().clone(), user, origin, p)
-                .await
-                .map_err(upload_err)?;
-            if matches!(result, UploadCommitResult::Placed { .. }) {
+                .await;
+            // A commit that failed while placing may have placed part of the group (it
+            // answers for that part from then on): the cache needs those files too.
+            let placed_some = matches!(
+                result,
+                Ok(UploadCommitResult::Placed { .. }) | Err(UploadError::Io(_))
+            );
+            let result = result.map_err(upload_err)?;
+            if placed_some {
                 // Same as `library.rescan`: a full queue means one is already pending. The
                 // files are placed and their sessions gone, so a failure here must not
                 // turn the response into an error (a retry would only get NotFound).

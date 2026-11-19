@@ -16,24 +16,26 @@ use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use asteria_common_api::{PlacedFile, UploadCommitParams, UploadCommitResult, UploadWarning};
 use asteria_common_core::fsutil::tmp_path_for;
-use asteria_common_core::hash::{HashOutcome, HashScope, content_hash, file_hash};
+use asteria_common_core::hash::{ContentHash, HashOutcome, HashScope, content_hash, file_hash};
 use asteria_common_core::journal::Actor;
 use asteria_common_core::paths::{media_path_for_sidecar, sidecar_path_for};
 use asteria_common_core::upload_path::validate_inbox_path;
 use asteria_common_core::{Error as FwError, Library, Sidecar, UserId};
 use corundum_framework::journal::{
-    Actor as JournalActor, BatchId, JournalError, OpKind as _, Origin, Outcome, Planned,
+    Actor as JournalActor, BatchId, BatchRecords, JournalError, OpKind as _, Origin, Outcome,
+    Planned,
 };
 
 use crate::cache::Cache;
 use crate::error::ServerError;
 use crate::fsutil::{DirError, create_dirs_inside, stage, sync_dir};
-use crate::journal::files::{Upload, UploadPlan};
+use crate::journal::files::{StagedFile, Upload, UploadPlan};
 use crate::journal::map::actor_of;
-use crate::journal::{ServerJournal, auto_label};
+use crate::journal::{POLL, ServerJournal, auto_label};
 use crate::scan::rel_string;
 use crate::upload::{Committed, SealGuard, UploadError, UploadStore};
 
@@ -51,6 +53,8 @@ struct Item {
     data: PathBuf,
     /// Payload hash; `None` for a sidecar.
     content: Option<HashOutcome>,
+    /// Whole-file hash (`file/1`).
+    file_hash: ContentHash,
     /// The file's content staged in the group's folder, under a temp name; renamed into
     /// place by [`place`].
     staged: PathBuf,
@@ -243,14 +247,14 @@ pub fn prepare_sealed(
             store.remove(&f.session);
             return Err(UploadError::HashMismatch);
         }
-        items.push((f.session.clone(), name, done.data_path, content));
+        items.push((f.session.clone(), name, done.data_path, content, whole));
     }
 
     // A sidecar that does not parse is dropped; the media still goes in.
     let mut warnings = Vec::new();
     let mut dropped = Vec::new();
     let mut keep = Vec::with_capacity(items.len());
-    for (session, name, data, content) in items {
+    for (session, name, data, content, whole) in items {
         if content.is_none() {
             match Sidecar::read(&data) {
                 Ok(Some(_)) => {}
@@ -266,7 +270,7 @@ pub fn prepare_sealed(
                 Err(e) => return Err(fw(e)),
             }
         }
-        keep.push((session, name, data, content));
+        keep.push((session, name, data, content, whole));
     }
 
     // Staged on the library's filesystem now, so that placing them is only a rename.
@@ -277,7 +281,7 @@ pub fn prepare_sealed(
     };
     let mut staging = Staging::new(library.root(), &rel, seals)?;
     let mut kept = Vec::with_capacity(keep.len());
-    for (session, name, data, content) in keep {
+    for (session, name, data, content, file_hash) in keep {
         let staged = tmp_path_for(&staging.dir.join(&session));
         stage(&data, &staged)
             .map_err(|e| UploadError::Io(format!("could not stage {name}: {e}")))?;
@@ -287,6 +291,7 @@ pub fn prepare_sealed(
             name,
             data,
             content,
+            file_hash,
             staged,
         });
     }
@@ -351,56 +356,53 @@ pub fn place(
         .iter()
         .map(|item| (item, format!("{rel_dir}/{}", target_name(&item.name, n))))
         .collect();
-    // The media first: an undo goes backwards, so it trashes each sidecar before its media,
-    // which would otherwise take the sidecar along.
-    let mut order: Vec<&(&Item, String)> = placed.iter().collect();
-    order.sort_by_key(|(item, _)| item.content.is_none());
-    let plans = order
-        .iter()
-        .map(|(item, to)| {
-            let staged = rel_string(library.root(), &item.staged).ok_or_else(|| {
-                UploadError::Io(format!(
-                    "could not place {to}: the staged name is not UTF-8"
-                ))
-            })?;
-            Ok(Planned::new::<Upload>(&UploadPlan::Place {
-                staged,
-                to: to.clone(),
-                session: item.session.clone(),
-            }))
-        })
-        .collect::<Result<Vec<_>, UploadError>>()?;
+    let plans = upload_plans(library.root(), &placed)?;
     let actor = actor_of(Actor::User(user));
-    let label = auto_label(Upload::KIND, plans.len());
+    let label = auto_label(Upload::KIND, placed.len());
     let id = journal
         .submit(plans, origin, &actor, label)
         .map_err(journal_error)?;
-    let batch = journal.wait(id).map_err(journal_error)?;
-    let failed = order
-        .iter()
-        .zip(&batch.ops)
-        .find_map(|((_, to), op)| match &op.outcome {
-            Outcome::Skipped(skip) => Some((to, skip)),
+    // From here on the batch may have placed files: the commit answers only once it has
+    // ended, and from what it did.
+    let settled = settle(journal, id);
+    let failure = match &settled {
+        Ok(b) => b.ops.iter().find_map(|op| match &op.outcome {
+            Outcome::Skipped(skip) => {
+                let to = op.plan["to"].as_str().or(op.plan["from"].as_str());
+                Some(format!("could not place {}: {skip}", to.unwrap_or("?")))
+            }
             Outcome::Done(_) => None,
-        });
-    if let Some((to, skip)) = failed {
-        tracing::warn!(path = %to, %skip, "could not place upload; rolling back the group");
-        if batch.summary.done > 0 {
+        }),
+        Err(e) => Some(format!("the journal failed: {e}")),
+    };
+    if let (Some(why), Ok(b)) = (&failure, &settled) {
+        tracing::warn!(%why, "could not place the whole group; rolling it back");
+        if b.summary.done > 0 {
             roll_back(journal, id, origin, &actor);
         }
-        return Err(UploadError::Io(format!("could not place {to}: {skip}")));
     }
-    staging.keep_folders();
-    // The renames are on disk before the sessions' data, the files' other copy, goes.
-    sync_dir(&dir);
-    for (item, rel) in &placed {
-        if let Err(e) = fs::remove_file(&item.data) {
-            tracing::warn!(path = %rel, error = %e, "could not remove a placed upload's data");
+    // What is in place now: all of it, or, after a failure, what the disk shows.
+    let root = library.root();
+    let in_place: Vec<&(&Item, String)> = match failure {
+        None => placed.iter().collect(),
+        Some(_) => placed
+            .iter()
+            .filter(|(item, to)| !item.staged.exists() && root.join(to).symlink_metadata().is_ok())
+            .collect(),
+    };
+    if !in_place.is_empty() {
+        staging.keep_folders();
+        // The renames are on disk before the sessions' data, the files' other copy, goes.
+        sync_dir(&dir);
+        for (item, rel) in &in_place {
+            if let Err(e) = fs::remove_file(&item.data) {
+                tracing::warn!(path = %rel, error = %e, "could not remove a placed upload's data");
+            }
         }
     }
-
+    let complete = in_place.len() == placed.len();
     let result = UploadCommitResult::Placed {
-        files: placed
+        files: in_place
             .iter()
             .map(|(item, rel)| PlacedFile {
                 session: item.session.clone(),
@@ -409,19 +411,107 @@ pub fn place(
             .collect(),
         warnings,
     };
-    // Each session keeps the result, so a repeated commit gets it again (see `earlier_commit`).
+    // Each session keeps the result, so a repeated commit gets it again (see
+    // `earlier_commit`) and never places the files twice. A group placed in part answers
+    // only for the sessions it placed; the others stay, to be committed again.
+    let mut sessions: Vec<String> = in_place.iter().map(|(i, _)| i.session.clone()).collect();
+    if complete {
+        sessions.extend(dropped.iter().cloned());
+    }
+    sessions.sort();
     let committed = Committed {
-        sessions: sorted_sessions(&params),
+        sessions: sessions.clone(),
         result: result.clone(),
     };
-    for session in placed.iter().map(|(i, _)| &i.session).chain(&dropped) {
+    for session in &sessions {
         if let Err(e) = store.mark_committed(session, &committed) {
             // A repeated commit writes it, from the group's other tombstones; with none at
             // all it finds the session without its data (NotFound).
             tracing::error!(%session, error = %e, "could not record a committed upload");
         }
     }
-    Ok(result)
+    match failure {
+        None => Ok(result),
+        Some(why) if complete => {
+            tracing::warn!(%why, "the journal failed, but the whole group is in place");
+            Ok(result)
+        }
+        Some(why) => Err(UploadError::Io(why)),
+    }
+}
+
+/// One `upload` per media file, with the sidecar uploaded with it, if any, so the two go
+/// and come back together; a file of the group is a media file or the sidecar of one (see
+/// `validate_group`).
+fn upload_plans(root: &Path, placed: &[(&Item, String)]) -> Result<Vec<Planned>, UploadError> {
+    let staged = |item: &Item, to: &str| -> Result<StagedFile, UploadError> {
+        Ok(StagedFile {
+            staged: rel_string(root, &item.staged).ok_or_else(|| {
+                UploadError::Io(format!(
+                    "could not place {to}: the staged name is not UTF-8"
+                ))
+            })?,
+            to: to.to_string(),
+            session: item.session.clone(),
+            file_hash: item.file_hash.to_string(),
+        })
+    };
+    placed
+        .iter()
+        .filter(|(item, _)| item.content.is_some())
+        .map(|(media, to)| {
+            let sidecar = placed.iter().find(|(item, _)| {
+                item.content.is_none()
+                    && media_path_for_sidecar(Path::new(&item.name))
+                        .is_some_and(|m| m.as_os_str() == media.name.as_str())
+            });
+            Ok(Planned::new::<Upload>(&UploadPlan::Place {
+                file: staged(media, to)?,
+                sidecar: sidecar.map(|(s, to)| staged(s, to)).transpose()?,
+            }))
+        })
+        .collect()
+}
+
+/// How long a commit waits for its batch to end once the Journal lost one of its records.
+const SETTLE_LIMIT: Duration = Duration::from_secs(60);
+
+/// Waits for the batch `id` to end, and gives its records. When the Journal could not keep
+/// one of its records, `wait` gives that error at once although the batch may still run:
+/// then this polls the batch's summary in the history until it is complete (at most
+/// `SETTLE_LIMIT`), and gives the error.
+fn settle(journal: &ServerJournal, id: BatchId) -> Result<BatchRecords, JournalError> {
+    let e = match journal.wait(id) {
+        Ok(b) => return Ok(b),
+        Err(e) => e,
+    };
+    tracing::error!(batch = %id, error = %e, "the journal failed an upload commit");
+    let deadline = Instant::now() + SETTLE_LIMIT;
+    while !ended(journal, id) {
+        if Instant::now() >= deadline {
+            tracing::error!(batch = %id, "the upload batch did not end in time");
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    Err(e)
+}
+
+/// Whether the history has the batch `id` as ended.
+fn ended(journal: &ServerJournal, id: BatchId) -> bool {
+    let mut cursor = None;
+    loop {
+        let Ok(page) = journal.history(cursor, 64) else {
+            return false;
+        };
+        if let Some(s) = page.iter().find(|s| s.begin.batch_id == id) {
+            return s.complete;
+        }
+        match page.last() {
+            Some(last) => cursor = Some(last.begin.batch_id),
+            None => return false,
+        }
+    }
 }
 
 fn sorted_sessions(params: &UploadCommitParams) -> Vec<String> {
@@ -561,12 +651,13 @@ fn free_number(dir: &Path, items: &[Item]) -> Result<u32, UploadError> {
 }
 
 /// Takes the placed files of the batch `id` back out of the library, into the trash, by
-/// undoing it; then the [`Staging`] removes the folders made for the group. Their content is
-/// still in the sessions, so a retry places them again.
+/// undoing it, and waits for the undo to end; then the [`Staging`] removes the folders made
+/// for the group. Their content is still in the sessions, so a retry places them again. What
+/// the undo could not take back, the commit answers for as placed.
 fn roll_back(journal: &ServerJournal, id: BatchId, origin: &Origin, actor: &JournalActor) {
     let undone = journal
         .undo_batch(id, origin, actor)
-        .and_then(|u| journal.wait(u));
+        .and_then(|u| settle(journal, u));
     match undone {
         Ok(b) if b.summary.skipped == 0 => {}
         Ok(b) => {
@@ -626,7 +717,7 @@ pub(crate) mod hold {
     pub fn on_place(root: &Path, f: impl Fn(&Path) + Send + Sync + 'static) -> PlaceHookGuard {
         PLACE_HOOKS
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .push((root.to_path_buf(), Arc::new(f)));
         PlaceHookGuard(root.to_path_buf())
     }
@@ -1383,6 +1474,123 @@ mod tests {
         assert!(matches!(r, UploadCommitResult::Duplicate { .. }), "{r:?}");
         assert_eq!(names(&root.join("Inbox")), ["old.jpg"]);
         assert!(store.completed(me, &s).is_ok());
+    }
+
+    /// A store that cannot keep the first `fail` operation records it is given, as a full
+    /// disk would.
+    struct Losing {
+        inner: corundum_framework::journal::JsonlStore,
+        fail: usize,
+    }
+
+    impl corundum_framework::journal::JournalStore for Losing {
+        fn append(
+            &mut self,
+            record: &corundum_framework::journal::Record,
+        ) -> Result<(), corundum_framework::journal::StoreError> {
+            if matches!(record, corundum_framework::journal::Record::Op(_)) && self.fail > 0 {
+                self.fail -= 1;
+                return Err(corundum_framework::journal::StoreError::Io(
+                    "no space left (test)".into(),
+                ));
+            }
+            self.inner.append(record)
+        }
+
+        fn batches_rev(
+            &self,
+            cursor: Option<BatchId>,
+            limit: usize,
+        ) -> Result<
+            Vec<corundum_framework::journal::BatchSummary>,
+            corundum_framework::journal::StoreError,
+        > {
+            self.inner.batches_rev(cursor, limit)
+        }
+
+        fn batch(
+            &self,
+            id: BatchId,
+        ) -> Result<
+            Option<corundum_framework::journal::BatchRecords>,
+            corundum_framework::journal::StoreError,
+        > {
+            self.inner.batch(id)
+        }
+    }
+
+    /// The Journal loses a record of the commit's batch, which still places every file: the
+    /// commit waits for the batch, answers with what was placed and leaves its tombstones, so
+    /// a retry gets the answer and places nothing twice.
+    #[test]
+    fn a_lost_journal_record_does_not_place_the_group_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        fs::create_dir(&root).unwrap();
+        let lib = Arc::new(
+            Library::init(&root, "owner")
+                .unwrap()
+                .with_state_dir(dir.path().join("state")),
+        );
+        let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
+        let ctx = crate::journal::JournalCtx {
+            library: lib.clone(),
+            cache: cache.clone(),
+            ext: Arc::new(AllMedia),
+        };
+        let journal =
+            crate::journal::open_journal_over(ctx, None, |inner| Losing { inner, fail: 1 })
+                .unwrap();
+        let store = Arc::new(UploadStore::open(&dir.path().join("state")).unwrap());
+        let me = lib.owner();
+        let upload = |bytes: &[u8]| {
+            let tmp = dir.path().join("hash-me");
+            fs::write(&tmp, bytes).unwrap();
+            let s = store
+                .begin(me, bytes.len() as u64, file_hash(&tmp).unwrap())
+                .unwrap()
+                .session;
+            store.put_chunk(me, &s, 0, bytes).unwrap();
+            s
+        };
+        let (heic, mov) = (upload(b"heic bytes"), upload(b"mov bytes"));
+        let params = UploadCommitParams {
+            files: vec![
+                UploadFile {
+                    session: heic,
+                    path: "IMG_0001.HEIC".into(),
+                },
+                UploadFile {
+                    session: mov,
+                    path: "IMG_0001.MOV".into(),
+                },
+            ],
+            allow_duplicate: false,
+        };
+        let first = commit(
+            &lib,
+            &cache,
+            &journal,
+            &store,
+            me,
+            &origin(),
+            params.clone(),
+        );
+        let again = commit(&lib, &cache, &journal, &store, me, &origin(), params);
+        let mut inbox: Vec<_> = fs::read_dir(root.join("Inbox"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        inbox.sort();
+        assert_eq!(inbox, ["IMG_0001.HEIC", "IMG_0001.MOV"]);
+        let first = first.unwrap();
+        assert!(
+            matches!(first, UploadCommitResult::Placed { .. }),
+            "{first:?}"
+        );
+        assert_eq!(again.unwrap(), first);
+        let batches = journal.history(None, 100).unwrap();
+        assert_eq!(batches.len(), 1, "{batches:?}");
     }
 
     struct AllMedia;

@@ -8,7 +8,8 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use asteria_common_core::fsutil::atomic_write;
-use asteria_common_core::paths::is_sidecar;
+use asteria_common_core::hash::file_hash;
+use asteria_common_core::paths::{is_sidecar, sidecar_path_for};
 use asteria_common_core::{UserId, classify};
 use corundum_framework::journal::{Applied, OpKind, Operation, Planned, Registry, Skip};
 use grain_id::GrainId;
@@ -107,55 +108,89 @@ impl TrashParts {
     }
 }
 
+/// A file the commit's first phase staged (library-relative), where it goes, its upload
+/// session, and its whole-file hash (`file/1`), known from the upload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StagedFile {
+    pub staged: String,
+    pub to: String,
+    pub session: String,
+    pub file_hash: String,
+}
+
 /// An upload put in place, or, as its undo or redo, a trash form: corundum applies an undo
 /// under the kind of the operation it reverses. The two tell apart by `staged`.
+///
+/// A media file and the sidecar uploaded with it are one operation: they go into place,
+/// into the trash and back together, or not at all.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum UploadPlan {
-    /// Rename the file the commit's first phase staged (library-relative) to `to`, never
-    /// over an existing file; `session` is the upload's.
+    /// Rename the staged file into place, never over an existing file, then its sidecar
+    /// beside it.
     Place {
-        staged: String,
-        to: String,
-        session: String,
+        #[serde(flatten)]
+        file: StagedFile,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sidecar: Option<StagedFile>,
     },
-    Trash(TrashPlan),
+    /// A trash plan, provided the file's sidecar, which the trash takes along, is still the
+    /// one uploaded with it (`sidecar`), or there is none when none was (`None`).
+    Trash {
+        #[serde(flatten)]
+        plan: TrashPlan,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sidecar: Option<Expect>,
+    },
 }
 
-// By hand, as `TrashPlan`'s.
+// By hand, as `TrashPlan`'s; `sidecar` is a staged file or a stamp, by the form.
 impl<'de> Deserialize<'de> for UploadPlan {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
         #[derive(Deserialize)]
         struct Parts {
             staged: Option<String>,
             session: Option<String>,
+            file_hash: Option<String>,
             to: Option<String>,
             from: Option<String>,
             trash_id: Option<GrainId>,
             expect: Option<Expect>,
+            sidecar: Option<serde_json::Value>,
         }
         let p = Parts::deserialize(d)?;
-        let missing = serde::de::Error::missing_field;
-        match (p.staged, p.session) {
-            (Some(staged), Some(session))
+        fn sidecar<T: serde::de::DeserializeOwned, E: Error>(
+            v: Option<serde_json::Value>,
+        ) -> Result<Option<T>, E> {
+            v.map(serde_json::from_value).transpose().map_err(E::custom)
+        }
+        match (p.staged, p.session, p.file_hash) {
+            (Some(staged), Some(session), Some(file_hash))
                 if p.from.is_none() && p.trash_id.is_none() && p.expect.is_none() =>
             {
                 Ok(UploadPlan::Place {
-                    staged,
-                    to: p.to.ok_or_else(|| missing("to"))?,
-                    session,
+                    file: StagedFile {
+                        staged,
+                        to: p.to.ok_or_else(|| D::Error::missing_field("to"))?,
+                        session,
+                        file_hash,
+                    },
+                    sidecar: sidecar(p.sidecar)?,
                 })
             }
-            (None, None) => TrashParts {
-                from: p.from.ok_or_else(|| missing("from"))?,
-                trash_id: p.trash_id,
-                to: p.to,
-                expect: p.expect.ok_or_else(|| missing("expect"))?,
-            }
-            .plan()
-            .map(UploadPlan::Trash),
-            _ => Err(serde::de::Error::custom(
-                "an upload plan has staged and session, or a trash plan's fields",
+            (None, None, None) => Ok(UploadPlan::Trash {
+                plan: TrashParts {
+                    from: p.from.ok_or_else(|| D::Error::missing_field("from"))?,
+                    trash_id: p.trash_id,
+                    to: p.to,
+                    expect: p.expect.ok_or_else(|| D::Error::missing_field("expect"))?,
+                }
+                .plan()?,
+                sidecar: sidecar(p.sidecar)?,
+            }),
+            _ => Err(D::Error::custom(
+                "an upload plan has staged, session and file_hash, or a trash plan's fields",
             )),
         }
     }
@@ -167,22 +202,14 @@ pub struct UploadDone {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
     pub to: String,
-    /// The item's id; `None` for a sidecar, a file the app does not show, or the trash.
+    /// The item's id; `None` for a file the app does not show, or the trash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
     /// The file as it was left: what its undo expects.
     pub expect: Expect,
-}
-
-impl From<MoveDone> for UploadDone {
-    fn from(d: MoveDone) -> UploadDone {
-        UploadDone {
-            from: Some(d.from),
-            to: d.to,
-            item_id: d.item_id,
-            expect: d.expect,
-        }
-    }
+    /// Its sidecar as it was left, when one was uploaded with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidecar: Option<Expect>,
 }
 
 /// Move the sidecar `from` to `to` (library-relative): an orphan to the item whose content
@@ -385,7 +412,8 @@ impl Operation<JournalCtx> for Trash {
 
 /// Whether the staged file can go to `to`: both plain library paths, the staged file there,
 /// `to` free, and no link on the way (#32).
-fn check_place(ctx: &JournalCtx, staged: &str, to: &str) -> Result<(), Skip> {
+fn check_place(ctx: &JournalCtx, f: &StagedFile) -> Result<(), Skip> {
+    let (staged, to) = (f.staged.as_str(), f.to.as_str());
     if !organize::safe_rel(staged) || !organize::safe_rel(to) {
         return Err(Skip::InvalidPath);
     }
@@ -410,70 +438,155 @@ fn check_place(ctx: &JournalCtx, staged: &str, to: &str) -> Result<(), Skip> {
     }
 }
 
-fn io_skip(what: &str, path: &str, e: &std::io::Error) -> Skip {
+/// A skip for an I/O error, logged with the library-relative `path`.
+pub(crate) fn io_skip(what: &str, path: &str, e: &std::io::Error) -> Skip {
     tracing::warn!(%path, error = %e, "{what}");
     Skip::Io(e.to_string())
 }
 
-/// Renames the staged file to `to`. The cache is left to the rescan the commit asks for.
-fn place(ctx: &JournalCtx, staged: &str, to: &str) -> Result<Applied<UploadDone>, Skip> {
+/// Renames the staged file into place, and gives how it was left.
+fn place_one(ctx: &JournalCtx, f: &StagedFile) -> Result<Expect, Skip> {
     let root = ctx.library.root();
-    let to_abs = root.join(to);
+    let to_abs = root.join(&f.to);
     #[cfg(test)]
     crate::upload_commit::hold::before_place(&to_abs);
-    check_place(ctx, staged, to)?;
-    move_no_clobber(&root.join(staged), &to_abs).map_err(|e| match e.kind() {
+    check_place(ctx, f)?;
+    move_no_clobber(&root.join(&f.staged), &to_abs).map_err(|e| match e.kind() {
         ErrorKind::AlreadyExists => Skip::Exists,
         ErrorKind::NotFound => Skip::NotFound,
-        _ => io_skip("cannot place the upload", to, &e),
+        _ => io_skip("cannot place the upload", &f.to, &e),
     })?;
-    let meta = std::fs::metadata(&to_abs).map_err(|e| io_skip("cannot stat the upload", to, &e))?;
-    let shown = !is_sidecar(Path::new(to)) && classify(&to_abs).is_ok_and(|k| ctx.ext.accepts(k));
+    let meta =
+        std::fs::metadata(&to_abs).map_err(|e| io_skip("cannot stat the upload", &f.to, &e))?;
+    Ok(Expect {
+        size: meta.len(),
+        mtime_ns: mtime_ns(&meta),
+        file_hash: Some(f.file_hash.clone()),
+        hash: None,
+    })
+}
+
+/// Puts the file in place, then its sidecar; if the sidecar cannot go, the file goes back to
+/// where it was staged. The cache is left to the rescan the commit asks for.
+fn place(
+    ctx: &JournalCtx,
+    file: &StagedFile,
+    sidecar: Option<&StagedFile>,
+) -> Result<Applied<UploadDone>, Skip> {
+    let expect = place_one(ctx, file)?;
+    let sidecar = match sidecar.map(|s| place_one(ctx, s)).transpose() {
+        Ok(s) => s,
+        Err(skip) => {
+            let root = ctx.library.root();
+            if let Err(e) = move_no_clobber(&root.join(&file.to), &root.join(&file.staged)) {
+                tracing::error!(path = %file.to, error = %e,
+                    "could not take an upload back after its sidecar failed to go in place");
+            }
+            return Err(skip);
+        }
+    };
+    let to_abs = ctx.library.root().join(&file.to);
+    let shown =
+        !is_sidecar(Path::new(&file.to)) && classify(&to_abs).is_ok_and(|k| ctx.ext.accepts(k));
     Ok(Applied::new(UploadDone {
         from: None,
-        to: to.to_string(),
-        item_id: shown.then(|| item_id_for(&ctx.library.config().id, to).0),
-        expect: Expect {
-            size: meta.len(),
-            mtime_ns: mtime_ns(&meta),
-            file_hash: None,
-            hash: None,
-        },
+        to: file.to.clone(),
+        item_id: shown.then(|| item_id_for(&ctx.library.config().id, &file.to).0),
+        expect,
+        sidecar,
     }))
+}
+
+/// Whether the sidecar of the library file `media` is as `want` says: the one uploaded with
+/// it, unchanged, or none at all. A sidecar edited or made since (a rating) keeps the file
+/// out of the trash, which would take it along.
+fn check_upload_sidecar(ctx: &JournalCtx, media: &str, want: Option<&Expect>) -> Result<(), Skip> {
+    let abs = sidecar_path_for(&ctx.library.root().join(media));
+    let meta = match abs.symlink_metadata() {
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(e) => return Err(io_skip("cannot stat the upload's sidecar", media, &e)),
+    };
+    let same = match (want, meta) {
+        (None, None) => true,
+        (Some(want), Some(m)) => {
+            m.is_file()
+                && (m.len(), mtime_ns(&m)) == (want.size, want.mtime_ns)
+                && match &want.file_hash {
+                    None => true,
+                    Some(h) => file_hash(&abs).is_ok_and(|have| &have.to_string() == h),
+                }
+        }
+        _ => false,
+    };
+    if same {
+        Ok(())
+    } else {
+        tracing::info!(path = %media, "the upload's sidecar changed since; leaving both");
+        Err(Skip::PreconditionFailed)
+    }
 }
 
 impl Operation<JournalCtx> for Upload {
     fn check(&self, ctx: &JournalCtx, plan: &UploadPlan) -> Result<(), Skip> {
         match plan {
-            UploadPlan::Place { staged, to, .. } => check_place(ctx, staged, to),
-            UploadPlan::Trash(t) => check(ctx, &t.op()),
+            UploadPlan::Place { file, sidecar } => {
+                check_place(ctx, file)?;
+                sidecar.as_ref().map_or(Ok(()), |s| check_place(ctx, s))
+            }
+            UploadPlan::Trash { plan, sidecar } => {
+                let op = plan.op();
+                check_upload_sidecar(ctx, &op.from, sidecar.as_ref())?;
+                check(ctx, &op)
+            }
         }
     }
 
     fn apply(&self, ctx: &JournalCtx, plan: &UploadPlan) -> Result<Applied<UploadDone>, Skip> {
         match plan {
-            UploadPlan::Place { staged, to, .. } => place(ctx, staged, to),
-            UploadPlan::Trash(t) => {
-                apply(ctx, &t.op()).map(|a| Applied::new(UploadDone::from(a.done)))
+            UploadPlan::Place { file, sidecar } => place(ctx, file, sidecar.as_ref()),
+            UploadPlan::Trash { plan, sidecar } => {
+                let op = plan.op();
+                check_upload_sidecar(ctx, &op.from, sidecar.as_ref())?;
+                let d = apply(ctx, &op)?.done;
+                Ok(Applied::new(UploadDone {
+                    from: Some(d.from),
+                    to: d.to,
+                    item_id: d.item_id,
+                    // The move keeps the content, so the hash still holds.
+                    expect: Expect {
+                        file_hash: op.expect.file_hash,
+                        ..d.expect
+                    },
+                    sidecar: sidecar.clone(),
+                }))
             }
         }
     }
 
-    /// An upload in place goes to the trash, under an id of its own, if it is still the file
-    /// that was placed; a move into or out of the trash goes back.
+    /// An upload in place goes to the trash, under an id of its own, if it and its sidecar
+    /// are still the files that were placed; a move into or out of the trash goes back.
     fn inverse(&self, done: &UploadDone) -> Option<UploadPlan> {
-        Some(UploadPlan::Trash(match &done.from {
+        let plan = match &done.from {
             None => TrashPlan::Trash {
                 from: done.to.clone(),
                 trash_id: GrainId::random(),
                 expect: done.expect.clone(),
             },
-            Some(from) => TrashPlan::Move(MovePlan {
-                from: done.to.clone(),
-                to: from.clone(),
-                expect: done.expect.clone(),
-            }),
-        }))
+            Some(from) => TrashPlan::Move(
+                MoveDone {
+                    from: from.clone(),
+                    to: done.to.clone(),
+                    item_id: done.item_id.clone(),
+                    expect: done.expect.clone(),
+                }
+                .back(),
+            ),
+        };
+        Some(UploadPlan::Trash {
+            plan,
+            sidecar: done.sidecar.clone(),
+        })
     }
 }
 
@@ -793,39 +906,55 @@ mod tests {
 
     #[test]
     fn an_upload_plan_reads_as_a_placement_or_a_trash_form() {
+        let staged = |name: &str| StagedFile {
+            staged: format!("Inbox/.{name}.tag.asteria-tmp"),
+            to: format!("Inbox/{name}"),
+            session: name.into(),
+            file_hash: "blake3:00".into(),
+        };
         let place = UploadPlan::Place {
-            staged: "Inbox/.s.tag.asteria-tmp".into(),
-            to: "Inbox/a.jpg".into(),
-            session: "s".into(),
+            file: staged("a.jpg"),
+            sidecar: None,
         };
         assert_eq!(
             serde_json::to_value(&place).unwrap(),
             serde_json::json!({
-                "staged": "Inbox/.s.tag.asteria-tmp", "to": "Inbox/a.jpg", "session": "s",
+                "staged": "Inbox/.a.jpg.tag.asteria-tmp", "to": "Inbox/a.jpg",
+                "session": "a.jpg", "file_hash": "blake3:00",
             })
         );
+        let pair = UploadPlan::Place {
+            file: staged("a.jpg"),
+            sidecar: Some(staged("a.jpg.xmp")),
+        };
         let expect = Expect {
             size: 1,
             mtime_ns: 2,
-            file_hash: None,
+            file_hash: Some("blake3:00".into()),
             hash: None,
         };
-        let trash = UploadPlan::Trash(TrashPlan::Trash {
-            from: "Inbox/a.jpg".into(),
-            trash_id: GrainId::random(),
-            expect: expect.clone(),
-        });
-        let back = UploadPlan::Trash(TrashPlan::Move(MovePlan {
-            from: ".asteria/trash/x/Inbox/a.jpg".into(),
-            to: "Inbox/a.jpg".into(),
-            expect,
-        }));
-        for plan in [place, trash, back] {
+        let trash = UploadPlan::Trash {
+            plan: TrashPlan::Trash {
+                from: "Inbox/a.jpg".into(),
+                trash_id: GrainId::random(),
+                expect: expect.clone(),
+            },
+            sidecar: Some(expect.clone()),
+        };
+        let back = UploadPlan::Trash {
+            plan: TrashPlan::Move(MovePlan {
+                from: ".asteria/trash/x/Inbox/a.jpg".into(),
+                to: "Inbox/a.jpg".into(),
+                expect,
+            }),
+            sidecar: None,
+        };
+        for plan in [place, pair, trash, back] {
             let v = serde_json::to_value(&plan).unwrap();
             assert_eq!(serde_json::from_value::<UploadPlan>(v).unwrap(), plan);
         }
         let mixed = serde_json::json!({
-            "staged": "Inbox/.s", "to": "Inbox/a.jpg", "session": "s",
+            "staged": "Inbox/.s", "to": "Inbox/a.jpg", "session": "s", "file_hash": "blake3:00",
             "expect": {"size": 1, "mtime_ns": 2},
         });
         assert!(serde_json::from_value::<UploadPlan>(mixed).is_err());
