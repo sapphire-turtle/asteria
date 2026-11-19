@@ -158,6 +158,8 @@ impl Env {
                     to: to.map(str::to_string),
                 })
                 .collect(),
+            indices: Vec::new(),
+            early: Vec::new(),
         })
     }
 

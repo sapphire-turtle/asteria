@@ -80,9 +80,10 @@ async fn lists_the_framework_tools() {
         "{instructions}"
     );
     assert!(
-        instructions.contains("you can undo it with organize_undo within 30 days."),
+        instructions.contains("organize_undo reverses it within 30 days."),
         "{instructions}"
     );
+    assert!(instructions.contains("may answer BUSY"), "{instructions}");
     client.cancel().await.unwrap();
 }
 

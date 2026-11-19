@@ -7,6 +7,7 @@
 use std::io::ErrorKind;
 use std::path::Path;
 
+use asteria_common_api::SkipReason;
 use asteria_common_core::fsutil::atomic_write;
 use asteria_common_core::hash::file_hash;
 use asteria_common_core::paths::{is_sidecar, sidecar_path_for};
@@ -228,10 +229,26 @@ pub struct TidyMove {
 }
 
 /// The moves of the batch, and the user the app's `after_moves` acts for.
+///
+/// An `organize.apply` batch also keeps the request index of each operation it runs, in
+/// order, and the operations skipped while planning, so `organize.status` reports like the
+/// apply did. Both are empty in an undo, and in a batch recorded before they were kept.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TidyPlan {
     pub user: UserId,
     pub moves: Vec<TidyMove>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indices: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub early: Vec<EarlySkip>,
+}
+
+/// An operation of the request skipped while planning, which the batch never ran.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EarlySkip {
+    pub index: u32,
+    pub path: String,
+    pub reason: SkipReason,
 }
 
 pub struct Move;
@@ -654,6 +671,8 @@ impl Operation<JournalCtx> for OrganizeTidy {
             done: TidyPlan {
                 user: plan.user,
                 moves: kept,
+                indices: plan.indices.clone(),
+                early: plan.early.clone(),
             },
             children,
         })
@@ -665,6 +684,8 @@ impl Operation<JournalCtx> for OrganizeTidy {
         Some(TidyPlan {
             user: done.user,
             moves: Vec::new(),
+            indices: Vec::new(),
+            early: Vec::new(),
         })
     }
 }
@@ -770,6 +791,15 @@ mod tests {
 
     /// A batch that stops after its second of three moves, as a crash would leave it, is
     /// listed as not complete once the store is opened again, and its done moves undo.
+    #[test]
+    fn a_tidy_plan_recorded_before_request_indices_still_loads() {
+        let user = UserId(GrainId::random());
+        let old = serde_json::json!({"user": user, "moves": [{"from": "a.jpg", "to": "c.jpg"}]});
+        let plan: TidyPlan = serde_json::from_value(old).unwrap();
+        assert!(plan.indices.is_empty() && plan.early.is_empty());
+        assert_eq!(plan.moves.len(), 1);
+    }
+
     #[test]
     fn an_interrupted_batch_is_listed_and_undoable() {
         let dir = tempfile::tempdir().unwrap();

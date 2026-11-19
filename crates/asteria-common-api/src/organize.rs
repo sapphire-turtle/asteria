@@ -19,7 +19,8 @@ pub struct OrganizeOp {
     pub item_id: ItemId,
     #[serde(flatten)]
     pub action: OrganizeAction,
-    /// `blake3:<hex>` the client saw; the op is skipped with `hash_mismatch` if the file differs.
+    /// `blake3:<hex>` the client saw; the op is skipped with `changed` if the file differs
+    /// (servers before API 2.5 sent `hash_mismatch`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_hash: Option<String>,
 }

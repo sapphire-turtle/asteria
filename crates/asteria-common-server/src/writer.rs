@@ -31,7 +31,7 @@ use crate::cache::{Cache, ItemRecord};
 use crate::error::ServerError;
 use crate::ext::AppExtension;
 use crate::hashing::{RelinkReport, relink_orphans};
-use crate::journal::files::{self, OrganizeTidy, TidyMove, TidyPlan};
+use crate::journal::files::{self, EarlySkip, OrganizeTidy, TidyMove, TidyPlan};
 use crate::journal::map::actor_of;
 use crate::journal::sidecar::{
     Fields, Rate, RateDone, RatePlan, RatingAt, WriteSidecar, WriteSidecarPlan,
@@ -480,6 +480,7 @@ impl Writer {
         let deadline = Instant::now() + self.write_wait();
         let mut indices = Vec::new();
         let mut early = Vec::new();
+        let mut skips = Vec::new();
         let mut plans = Vec::new();
         let mut moves = Vec::new();
         for (i, planned) in ops.into_iter().enumerate() {
@@ -493,7 +494,14 @@ impl Writer {
                     };
                     moves.push(TidyMove { from: op.from, to });
                 }
-                Err((path, why)) => early.push(organize::skipped(i, &path, why)),
+                Err((path, why)) => {
+                    early.push(organize::skipped(i, &path, why));
+                    skips.push(EarlySkip {
+                        index: i as u32,
+                        path,
+                        reason: why,
+                    });
+                }
             }
         }
         if indices.is_empty() {
@@ -508,6 +516,9 @@ impl Writer {
         plans.push(Op::new::<OrganizeTidy>(&TidyPlan {
             user: organize::actor_user(actor),
             moves,
+            // For `organize.status`, which reports from the Journal alone.
+            indices: indices.iter().map(|&i| i as u32).collect(),
+            early: skips,
         }));
         let actor = actor_of(actor);
         let id = self

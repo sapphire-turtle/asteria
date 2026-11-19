@@ -569,7 +569,8 @@ fn applied(index: usize, op: &PlannedOp, to: String, item_id: Option<ItemId>) ->
 }
 
 /// Checks every operation in order without touching anything; each one sees the effect the
-/// earlier ones would have.
+/// earlier ones would have. A hash mismatch reports as `changed`, as a real apply's does
+/// (API 2.5 no longer sends `hash_mismatch`).
 pub(crate) fn dry_run(ctx: &OpCtx, ops: &[Planned]) -> Vec<OpResult> {
     let mut sim = Sim::default();
     let lib_id = &ctx.library.config().id;
@@ -578,6 +579,7 @@ pub(crate) fn dry_run(ctx: &OpCtx, ops: &[Planned]) -> Vec<OpResult> {
         .map(|(i, planned)| match planned {
             Err((path, why)) => skipped(i, path, *why),
             Ok(op) => match check(ctx, op, &sim) {
+                Err(SkipReason::HashMismatch) => skipped(i, reported_path(op), SkipReason::Changed),
                 Err(why) => skipped(i, reported_path(op), why),
                 Ok(()) => match &op.to {
                     Target::Path(to) => {
@@ -821,10 +823,34 @@ pub(crate) fn history(
     })
 }
 
+/// The request indices of an `organize.apply` batch's operations and the operations it
+/// skipped while planning, as its closing tidy keeps them. `None` for any other batch, and
+/// for one recorded before they were kept.
+fn request_order(b: &BatchRecords) -> Option<(Vec<usize>, Vec<OpResult>)> {
+    let tidy = b
+        .ops
+        .iter()
+        .find(|o| o.parent.is_none() && o.kind == files::OrganizeTidy::KIND)?;
+    let plan: files::TidyPlan = serde_json::from_value(tidy.plan.clone()).ok()?;
+    if plan.indices.is_empty() {
+        return None;
+    }
+    let indices = plan.indices.iter().map(|&i| i as usize).collect();
+    let early = plan
+        .early
+        .into_iter()
+        .map(|s| skipped(s.index as usize, &s.path, s.reason))
+        .collect();
+    Some((indices, early))
+}
+
 /// Where the batch `id` is, with its results once it has ended. Blocks on the Journal.
 pub(crate) fn status(journal: &ServerJournal, id: BatchId) -> Result<OrganizeStatus, JournalError> {
     let b = journal.status(id)?;
-    let results = results(&b);
+    let results = match request_order(&b) {
+        Some((indices, early)) => merge_results(&b, &indices, early),
+        None => results(&b),
+    };
     let count = |status| results.iter().filter(|r| r.status == status).count() as u32;
     Ok(OrganizeStatus {
         batch_id: id.to_string(),

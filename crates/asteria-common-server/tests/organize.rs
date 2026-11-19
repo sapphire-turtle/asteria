@@ -730,3 +730,57 @@ async fn an_apply_that_cannot_start_in_time_is_busy_and_never_runs() {
         "{batches:?}"
     );
 }
+
+#[tokio::test]
+async fn status_keeps_request_indices_and_early_skips() {
+    let gate = Arc::new(Gate::default());
+    let e = common::env_ext(gate.clone());
+    e.state.set_write_wait(Duration::from_millis(50));
+    gate.set(true);
+    let ops = vec![
+        json!({"item_id": "nope", "kind": "trash"}),
+        mv(&e, "a.jpg", "c.jpg"),
+        mv(&e, "sub/b.jpg", "d.jpg"),
+    ];
+    let v = apply(&e, ops, false, None).await;
+    assert_eq!(v["result"]["running"], true, "{v}");
+    let id = batch_id(&v);
+
+    gate.set(false);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let s = loop {
+        let s = batch_status(&e, &id).await;
+        if s["result"]["running"] == false {
+            break s;
+        }
+        assert!(std::time::Instant::now() < deadline, "still running: {s}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let r = &s["result"];
+    assert_eq!(r["complete"], true, "{s}");
+    assert_eq!(r["done"], 2, "{s}");
+    assert_eq!(r["skipped"], 1, "{s}");
+    let results = r["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3, "{s}");
+    assert_eq!(results[0]["index"], 0, "{s}");
+    assert_eq!(results[0]["status"], "skipped");
+    assert_eq!(results[0]["reason"], "missing");
+    assert_eq!(results[1]["index"], 1, "{s}");
+    assert_eq!(results[1]["status"], "done");
+    assert_eq!(results[1]["new_path"], "c.jpg");
+    assert_eq!(results[2]["index"], 2, "{s}");
+    assert_eq!(results[2]["status"], "done");
+    assert_eq!(results[2]["new_path"], "d.jpg");
+}
+
+#[tokio::test]
+async fn dry_run_reports_a_hash_mismatch_as_changed() {
+    let e = env();
+    let mut op = mv(&e, "a.jpg", "c.jpg");
+    op["file_hash"] = json!("blake3:00");
+    let v = apply(&e, vec![op], true, None).await;
+    let r = &v["result"]["results"][0];
+    assert_eq!(r["status"], "skipped", "{v}");
+    assert_eq!(r["reason"], "changed", "{v}");
+    assert!(e.root.join("a.jpg").exists());
+}
