@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 
 use crate::cache::Cache;
 use crate::ext::AppExtension;
+use crate::journal::ServerJournal;
 use crate::process::Processor;
 use crate::upload::UploadStore;
 use crate::writer::Writer;
@@ -30,6 +31,7 @@ pub struct AppState {
     extension: Arc<dyn AppExtension>,
     processor: Arc<Processor>,
     uploads: Arc<UploadStore>,
+    journal: ServerJournal,
 }
 
 impl AppState {
@@ -49,6 +51,7 @@ impl AppState {
         extension: Arc<dyn AppExtension>,
         processor: Arc<Processor>,
         uploads: Arc<UploadStore>,
+        journal: ServerJournal,
     ) -> AppState {
         let marks = cache.clone();
         processor.set_unprocessable_hook(move |hash, preset, reason| {
@@ -73,6 +76,7 @@ impl AppState {
             extension,
             processor,
             uploads,
+            journal,
         }
     }
 
@@ -92,8 +96,8 @@ impl AppState {
     /// Sets how long `organize.apply` and `organize.undo` wait for a batch before they
     /// answer `running`. For tests.
     #[doc(hidden)]
-    pub fn set_organize_wait(&self, wait: std::time::Duration) {
-        self.writer.set_organize_wait(wait);
+    pub fn set_write_wait(&self, wait: std::time::Duration) {
+        self.writer.set_write_wait(wait);
     }
     /// The verifier of the library's API keys.
     pub fn keys(&self) -> &Arc<KeyVerifier> {
@@ -113,6 +117,10 @@ impl AppState {
     }
     pub fn extension(&self) -> &Arc<dyn AppExtension> {
         &self.extension
+    }
+    /// The journal every change to the library goes through.
+    pub fn journal(&self) -> &ServerJournal {
+        &self.journal
     }
     pub fn processor(&self) -> &Arc<Processor> {
         &self.processor

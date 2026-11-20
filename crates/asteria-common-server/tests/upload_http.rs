@@ -98,6 +98,20 @@ async fn full_upload_over_http() {
     assert_eq!(v["result"]["outcome"], "placed", "{v}");
     assert_eq!(v["result"]["files"][0]["path"], "Inbox/trip/x.jpg");
     assert_eq!(fs::read(e.root.join("Inbox/trip/x.jpg")).unwrap(), bytes);
+    // Journaled as one upload batch, by the owner, from their key.
+    let newest = &e.state.journal().history(None, 1).unwrap()[0];
+    let batch = e.state.journal().status(newest.begin.batch_id).unwrap();
+    assert_eq!(batch.ops.len(), 1);
+    assert_eq!(batch.ops[0].kind, "upload");
+    assert_eq!(batch.ops[0].plan["to"], "Inbox/trip/x.jpg");
+    assert_eq!(
+        batch.summary.begin.actor,
+        corundum_framework::journal::Actor::person(e.lib.owner().to_string())
+    );
+    assert!(
+        batch.summary.begin.origin.as_str().starts_with("key:"),
+        "{batch:?}"
+    );
     // A rescan was requested.
     let mut e = e;
     assert!(e._rescan_rx.try_recv().is_ok());

@@ -18,6 +18,7 @@ use asteria_common_client::session::{Session, SessionDirs, SessionState};
 use asteria_common_client::upload::queue::{GroupState, QueuedGroup, UploadQueue, queue_path};
 use asteria_common_client::upload::{UploadSnapshot, UploadsState, set_retry_backoff};
 use asteria_common_core::{Library, MediaKind};
+use asteria_common_server::journal::{JournalCtx, open_journal};
 use asteria_common_server::keys::{KeyStore, KeyVerifier};
 use asteria_common_server::upload::UploadStore;
 use asteria_common_server::{
@@ -129,8 +130,17 @@ impl TestServer {
             .unwrap();
         let hooks = puts.clone();
         let addr = rt.block_on(async {
-            let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
             let (rescan, rescan_rx) = tokio::sync::mpsc::channel(1);
+            let journal = open_journal(
+                JournalCtx {
+                    library: lib.clone(),
+                    cache: cache.clone(),
+                    ext: Arc::new(Photos),
+                },
+                None,
+            )
+            .unwrap();
+            let (writer, _h) = spawn_writer(lib.clone(), cache.clone(), journal.clone());
             let state = AppState::new(
                 lib,
                 cache,
@@ -143,6 +153,7 @@ impl TestServer {
                 Arc::new(Photos),
                 processor,
                 uploads,
+                journal,
             );
             let app = router(state).layer(axum::middleware::from_fn(
                 move |req: axum::extract::Request, next: axum::middleware::Next| {

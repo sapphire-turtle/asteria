@@ -46,10 +46,6 @@ pub enum Error {
     InvalidRating(i8),
     #[error("no state directory to keep the journal in")]
     NoStateDir,
-    #[error("failed to serialize journal entry: {0}")]
-    JournalSerialize(String),
-    #[error("malformed journal entry at {}:{line}", .file.display())]
-    MalformedJournal { file: PathBuf, line: usize },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

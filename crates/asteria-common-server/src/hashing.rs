@@ -1,24 +1,28 @@
 //! Background payload hashing of cached items and re-linking of orphaned XMP sidecars.
 //!
-//! Both functions are synchronous. `relink_orphans` writes to the library (it moves a
-//! sidecar), so in production it must be called from the library's write queue.
+//! Both functions are synchronous. `relink_orphans` writes to the library (it moves
+//! sidecars, as a batch of the Journal's `relink_sidecar` operations), so in production it
+//! must be called from the library's write queue.
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use asteria_common_core::Actor;
 use asteria_common_core::hash::{ContentHash, HashScope, content_hash, file_hash};
-use asteria_common_core::journal::{Actor, JournalEntry, OpId, OpKind};
 use asteria_common_core::paths::{is_sidecar, media_path_for_sidecar, sidecar_path_for};
 use asteria_common_core::{Error as FwError, Library, Sidecar};
-use chrono::Utc;
-use grain_id::GrainId;
+use corundum_framework::journal::{OpKind as _, Outcome, Planned, Skip};
 use walkdir::WalkDir;
 
 use crate::cache::{Cache, SidecarSnapshot, StoredHash};
 use crate::error::ServerError;
 use crate::fsutil::move_no_clobber;
+use crate::journal::files::{RelinkPlan, RelinkSidecar, io_skip};
+use crate::journal::map::{actor_of, origin_scan};
+use crate::journal::{ServerJournal, auto_label};
+use crate::organize;
 use crate::scan::{is_hidden, mtime_ns, rel_lossy, rel_string};
 
 const BATCH: usize = 64;
@@ -143,9 +147,15 @@ pub struct RelinkReport {
 /// Moves each orphaned sidecar (its media file is gone) next to the one candidate cached item with
 /// the same content hash and scope, provided that item has no sidecar on disk and its file
 /// still matches the stored hash's size/mtime. Orphans are grouped first: several orphans
-/// claiming one target are all `ambiguous` and nothing is moved. A move is journaled and
-/// the item's cached sidecar snapshot refreshed.
-pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, ServerError> {
+/// claiming one target are all `ambiguous` and nothing is moved. The moves run in `journal`
+/// as one batch of `relink_sidecar`s from the scan, by the library's owner, and this waits for
+/// it (so it must not run inside the Journal's own operations); each refreshes the item's
+/// cached sidecar snapshot.
+pub fn relink_orphans(
+    library: &Library,
+    cache: &Cache,
+    journal: &ServerJournal,
+) -> Result<RelinkReport, ServerError> {
     let root = library.root();
     let mut orphans: Vec<String> = Vec::new();
     let mut it = WalkDir::new(root)
@@ -245,8 +255,9 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
         }
     }
 
-    // Phase 2: move.
-    let journal = library.journal()?;
+    // Phase 2: move, as one batch.
+    let mut plans = Vec::new();
+    let mut moving = Vec::new();
     for (old, target, stored) in uncontested {
         let target_abs = root.join(&target);
         match std::fs::metadata(&target_abs) {
@@ -266,42 +277,85 @@ pub fn relink_orphans(library: &Library, cache: &Cache) -> Result<RelinkReport, 
                 continue;
             }
         }
-        let new_sidecar_abs = sidecar_path_for(&target_abs);
-        let new_sidecar = rel_lossy(root, &new_sidecar_abs);
-        let old_abs = root.join(&old);
-        // Check the filesystem, not the cached snapshot: the sidecar may be newer than the scan.
-        if new_sidecar_abs.symlink_metadata().is_ok() {
-            if same_file(&old_abs, &new_sidecar_abs) {
-                // A crash between link and remove of an earlier relink: finish the move.
-                if let Err(e) = std::fs::remove_file(&old_abs) {
-                    tracing::warn!(sidecar = %old, error = %e, "could not finish interrupted relink");
+        plans.push(Planned::new::<RelinkSidecar>(&RelinkPlan {
+            from: old.clone(),
+            to: rel_lossy(root, &sidecar_path_for(&target_abs)),
+        }));
+        moving.push((old, target));
+    }
+    if !plans.is_empty() {
+        let label = auto_label(RelinkSidecar::KIND, plans.len());
+        let owner = actor_of(Actor::User(library.owner()));
+        let id = journal.submit(plans, &origin_scan(), &owner, label)?;
+        let batch = journal.wait(id)?;
+        for ((old, target), op) in moving.into_iter().zip(batch.ops) {
+            match op.outcome {
+                Outcome::Done(_) => report.relinked.push((old, target)),
+                Outcome::Skipped(skip) => {
+                    tracing::warn!(sidecar = %old, %target, %skip, "not relinked");
                     report.conflicts.push(old);
-                    continue;
                 }
-            } else {
-                tracing::warn!(sidecar = %old, %target, "target already has a sidecar; not relinking");
-                report.conflicts.push(old);
-                continue;
             }
-        } else if let Err(e) = move_no_clobber(&old_abs, &new_sidecar_abs) {
-            tracing::warn!(sidecar = %old, %target, error = %e, "could not move sidecar");
-            report.conflicts.push(old);
-            continue;
         }
-        journal.append(&JournalEntry {
-            op_id: OpId(GrainId::random()),
-            plan_id: None,
-            actor: Actor::User(library.owner()),
-            at: Utc::now(),
-            kind: OpKind::RelinkSidecar,
-            before: serde_json::json!({ "path": old }),
-            after: serde_json::json!({ "path": new_sidecar }),
-        })?;
-        refresh_snapshot(library, cache, &target)?;
-        report.relinked.push((old, target));
     }
     cache.flush()?;
     Ok(report)
+}
+
+/// Whether the sidecar `from` can move to `to` (library-relative sidecar paths): `from` is
+/// there, and `to` is free or is `from` itself (an interrupted relink: a hard link of it).
+pub(crate) fn check_sidecar_move(library: &Library, from: &str, to: &str) -> Result<(), Skip> {
+    let plain = |p: &str| organize::safe_rel(p) && is_sidecar(Path::new(p));
+    if !plain(from) || !plain(to) {
+        return Err(Skip::InvalidPath);
+    }
+    let root = library.root();
+    let (old_abs, new_abs) = (root.join(from), root.join(to));
+    match old_abs.symlink_metadata() {
+        Ok(_) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => return Err(Skip::NotFound),
+        Err(e) => return Err(io_skip("cannot stat the sidecar", from, &e)),
+    }
+    match new_abs.symlink_metadata() {
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Ok(_) if same_file(&old_abs, &new_abs) => Ok(()),
+        Ok(_) => Err(Skip::Exists),
+        Err(e) => Err(io_skip("cannot stat the sidecar's target", to, &e)),
+    }
+}
+
+/// Moves the sidecar `from` to `to`, never over another file, and refreshes the cached
+/// sidecar snapshot of both media files.
+pub(crate) fn move_sidecar(
+    library: &Library,
+    cache: &Cache,
+    from: &str,
+    to: &str,
+) -> Result<(), Skip> {
+    check_sidecar_move(library, from, to)?;
+    let root = library.root();
+    let (old_abs, new_abs) = (root.join(from), root.join(to));
+    if new_abs.symlink_metadata().is_ok() {
+        // A crash between link and remove of an earlier relink: finish the move.
+        std::fs::remove_file(&old_abs)
+            .map_err(|e| io_skip("could not finish an interrupted relink", from, &e))?;
+    } else {
+        move_no_clobber(&old_abs, &new_abs).map_err(|e| match e.kind() {
+            ErrorKind::AlreadyExists => Skip::Exists,
+            ErrorKind::NotFound => Skip::NotFound,
+            _ => io_skip("could not move the sidecar", from, &e),
+        })?;
+    }
+    for sidecar in [from, to] {
+        let Some(media) = media_path_for_sidecar(Path::new(sidecar)) else {
+            continue;
+        };
+        let media = media.to_string_lossy();
+        if let Err(e) = refresh_snapshot(library, cache, &media) {
+            tracing::warn!(%media, error = %e, "sidecar snapshot not refreshed; the next scan will");
+        }
+    }
+    Ok(())
 }
 
 /// Items an orphan sidecar with this hash may be moved to (spec §4.2 item 5): current

@@ -6,11 +6,12 @@ use std::time::{Duration, SystemTime};
 
 use asteria_common_api::{UploadCommitParams, UploadCommitResult, UploadFile, UploadWarning};
 use asteria_common_core::hash::{ContentHash, file_hash};
-use asteria_common_core::journal::OpKind;
 use asteria_common_core::{Library, MediaKind, UserId};
+use asteria_common_server::journal::{JournalCtx, ServerJournal, open_journal};
 use asteria_common_server::upload::{UploadError, UploadLimits, UploadStore};
 use asteria_common_server::upload_commit::commit;
 use asteria_common_server::{AppExtension, Cache, hash_pending, scan, spawn_writer};
+use corundum_framework::journal::{Actor, BatchRecords, Origin, Outcome, Skip};
 use grain_id::GrainId;
 
 struct Photos;
@@ -25,6 +26,7 @@ struct Env {
     root: PathBuf,
     lib: Arc<Library>,
     cache: Arc<Cache>,
+    journal: ServerJournal,
     store: Arc<UploadStore>,
     me: UserId,
 }
@@ -50,12 +52,22 @@ fn env_with_limits(limits: UploadLimits) -> Env {
     );
     let cache = Arc::new(Cache::open(&dir.path().join("cache"), &lib.config().id).unwrap());
     let store = Arc::new(UploadStore::open_with_limits(&dir.path().join("state"), limits).unwrap());
+    let journal = open_journal(
+        JournalCtx {
+            library: lib.clone(),
+            cache: cache.clone(),
+            ext: Arc::new(Photos),
+        },
+        None,
+    )
+    .unwrap();
     Env {
         dir,
         root,
         me: lib.owner(),
         lib,
         cache,
+        journal,
         store,
     }
 }
@@ -83,13 +95,61 @@ impl Env {
         files: &[(&str, &str)],
         allow_duplicate: bool,
     ) -> Result<UploadCommitResult, UploadError> {
+        self.commit_as(self.me, files, allow_duplicate)
+    }
+
+    fn commit_as(
+        &self,
+        user: UserId,
+        files: &[(&str, &str)],
+        allow_duplicate: bool,
+    ) -> Result<UploadCommitResult, UploadError> {
         commit(
             &self.lib,
             &self.cache,
+            &self.journal,
             &self.store,
-            self.me,
+            user,
+            &origin(),
             params(files, allow_duplicate),
         )
+    }
+
+    /// Undoes the newest upload batch, and gives the undo as it ended.
+    fn undo_upload(&self) -> BatchRecords {
+        let id = self.upload_batches().last().unwrap().summary.begin.batch_id;
+        let me = Actor::person(self.me.to_string());
+        let u = self.journal.undo_batch(id, &origin(), &me).unwrap();
+        self.journal.wait(u).unwrap()
+    }
+
+    /// The names of the files in the trash, sorted.
+    fn trashed(&self) -> Vec<String> {
+        let trash = self.root.join(".asteria/trash");
+        let mut out: Vec<String> = walkdir::WalkDir::new(&trash)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|d| d.file_type().is_file())
+            .map(|d| d.file_name().to_string_lossy().into_owned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The upload batches, oldest first, with their operations.
+    fn upload_batches(&self) -> Vec<BatchRecords> {
+        let mut out: Vec<BatchRecords> = self
+            .journal
+            .history(None, 1000)
+            .unwrap()
+            .into_iter()
+            .map(|s| self.journal.status(s.begin.batch_id).unwrap())
+            .filter(|b| {
+                !b.summary.begin.is_compensation() && b.ops.iter().any(|o| o.kind == "upload")
+            })
+            .collect();
+        out.reverse();
+        out
     }
 
     fn alive(&self, session: &str) -> bool {
@@ -132,6 +192,10 @@ impl Env {
         let inbox = self.root.join("Inbox");
         !inbox.exists() || fs::read_dir(inbox).unwrap().next().is_none()
     }
+}
+
+fn origin() -> Origin {
+    Origin::new("test")
 }
 
 fn params(files: &[(&str, &str)], allow_duplicate: bool) -> UploadCommitParams {
@@ -199,26 +263,149 @@ fn places_a_group_under_inbox() {
     );
     assert!(e.committed(&heic) && e.committed(&mov));
 
-    let entries: Vec<_> = e
-        .lib
-        .journal()
-        .unwrap()
-        .read_all()
-        .unwrap()
-        .into_iter()
-        .filter(|j| j.kind == OpKind::Upload)
+    // One batch for the commit, by the committing user, from the caller's origin.
+    let batches = e.upload_batches();
+    assert_eq!(batches.len(), 1);
+    let b = &batches[0];
+    assert_eq!(b.summary.begin.actor, Actor::person(e.me.to_string()));
+    assert_eq!(b.summary.begin.origin, origin());
+    assert_eq!(b.summary.begin.label.as_deref(), Some("Upload 2 files"));
+    assert!(b.summary.complete && b.summary.done == 2, "{b:?}");
+    let ops: Vec<_> = b.ops.iter().filter(|o| o.kind == "upload").collect();
+    assert_eq!(ops.len(), 2);
+    for (op, (session, path)) in ops.iter().zip([
+        (&heic, "Inbox/a/IMG_0001.HEIC"),
+        (&mov, "Inbox/a/IMG_0001.MOV"),
+    ]) {
+        assert_eq!(op.plan["session"], session.as_str());
+        assert_eq!(op.plan["to"], path);
+        assert!(op.plan["staged"].as_str().unwrap().starts_with("Inbox/a/"));
+        let Outcome::Done(done) = &op.outcome else {
+            panic!("{op:?}")
+        };
+        assert_eq!(done["to"], path);
+        assert_eq!(
+            done["item_id"],
+            asteria_common_server::item_id_for(&e.lib.config().id, path).0
+        );
+    }
+}
+
+/// Undoing an upload moves its files into the trash, unless one changed since; undoing that
+/// undo puts them back.
+#[test]
+fn an_upload_can_be_undone_to_the_trash() {
+    let e = env();
+    let heic = e.upload(b"heic bytes");
+    let mov = e.upload(b"mov bytes");
+    let jpg = e.upload(b"jpeg bytes");
+    placed(
+        e.commit(
+            &[
+                (&heic, "IMG_0001.HEIC"),
+                (&mov, "IMG_0001.MOV"),
+                (&jpg, "x.jpg"),
+            ],
+            false,
+        )
+        .unwrap(),
+    );
+    // x.jpg is edited after the upload: its undo leaves it alone.
+    let x = e.root.join("Inbox/x.jpg");
+    fs::write(&x, b"edited jpeg").unwrap();
+
+    let id = e.upload_batches()[0].summary.begin.batch_id;
+    let me = Actor::person(e.me.to_string());
+    let u = e.journal.undo_batch(id, &origin(), &me).unwrap();
+    let undone = e.journal.wait(u).unwrap();
+    assert_eq!(undone.summary.done, 2, "{undone:?}");
+    let skipped: Vec<_> = undone
+        .ops
+        .iter()
+        .filter_map(|o| match &o.outcome {
+            Outcome::Skipped(s) => Some(s.clone()),
+            Outcome::Done(_) => None,
+        })
         .collect();
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].before, serde_json::json!({ "session": heic }));
+    assert_eq!(skipped, [Skip::PreconditionFailed]);
+    assert_eq!(e.inbox_files(), ["x.jpg"]);
+    let trash = e.root.join(".asteria/trash");
+    let trashed: Vec<String> = walkdir::WalkDir::new(&trash)
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|d| d.file_type().is_file())
+        .map(|d| d.file_name().to_string_lossy().into_owned())
+        .collect();
+    let mut trashed = trashed;
+    trashed.sort();
+    assert_eq!(trashed, ["IMG_0001.HEIC", "IMG_0001.MOV"]);
+
+    // The undo of the undo brings them back.
+    let r = e.journal.undo_batch(u, &origin(), &me).unwrap();
+    let redone = e.journal.wait(r).unwrap();
+    assert_eq!(redone.summary.done, 2, "{redone:?}");
+    assert_eq!(e.inbox_files(), ["IMG_0001.HEIC", "IMG_0001.MOV", "x.jpg"]);
     assert_eq!(
-        entries[0].after,
-        serde_json::json!({ "path": "Inbox/a/IMG_0001.HEIC" })
+        fs::read(e.root.join("Inbox/IMG_0001.HEIC")).unwrap(),
+        b"heic bytes"
     );
-    assert_eq!(entries[1].before, serde_json::json!({ "session": mov }));
-    assert_eq!(
-        entries[1].after,
-        serde_json::json!({ "path": "Inbox/a/IMG_0001.MOV" })
+}
+
+/// A photo and its sidecar, uploaded together.
+fn upload_pair(e: &Env) {
+    let jpg = e.upload(&fs::read(fixture("red.jpg")).unwrap());
+    let xmp = e.upload(&fs::read(fixture("xmp/asteria_full.xmp")).unwrap());
+    placed(
+        e.commit(&[(&jpg, "x.jpg"), (&xmp, "x.jpg.xmp")], false)
+            .unwrap(),
     );
+}
+
+/// An uploaded photo and its sidecar undo together: both go to the trash.
+#[test]
+fn an_upload_pair_undoes_together() {
+    let e = env();
+    upload_pair(&e);
+    let undone = e.undo_upload();
+    assert!(
+        undone.summary.done > 0 && undone.summary.skipped == 0,
+        "{undone:?}"
+    );
+    assert!(e.inbox_files().is_empty());
+    assert_eq!(e.trashed(), ["x.jpg", "x.jpg.xmp"]);
+}
+
+/// The photo was edited after the upload: neither it nor its sidecar goes to the trash.
+#[test]
+fn undo_keeps_an_upload_pair_whose_media_changed() {
+    let e = env();
+    upload_pair(&e);
+    fs::write(e.root.join("Inbox/x.jpg"), b"edited photo").unwrap();
+    let undone = e.undo_upload();
+    assert_eq!(undone.summary.done, 0, "{undone:?}");
+    assert_eq!(e.inbox_files(), ["x.jpg", "x.jpg.xmp"]);
+    assert!(e.trashed().is_empty());
+}
+
+/// The photo was rated after the upload (its sidecar rewritten): both stay, and the rating
+/// with them.
+#[test]
+fn undo_keeps_an_upload_pair_whose_sidecar_changed() {
+    let e = env();
+    upload_pair(&e);
+    e.lib
+        .set_rating(Path::new("Inbox/x.jpg"), e.me, 4, chrono::Utc::now())
+        .unwrap();
+    let undone = e.undo_upload();
+    assert_eq!(undone.summary.done, 0, "{undone:?}");
+    assert_eq!(e.inbox_files(), ["x.jpg", "x.jpg.xmp"]);
+    assert!(e.trashed().is_empty());
+    let sc = e
+        .lib
+        .read_sidecar(Path::new("Inbox/x.jpg"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(sc.rating.unwrap().value, 4);
 }
 
 #[test]
@@ -352,13 +539,7 @@ fn incomplete_or_foreign_sessions_are_refused() {
 
     let mine = e.upload(b"jpeg bytes");
     let stranger = UserId(GrainId::random());
-    let r = commit(
-        &e.lib,
-        &e.cache,
-        &e.store,
-        stranger,
-        params(&[(&mine, "x.jpg")], false),
-    );
+    let r = e.commit_as(stranger, &[(&mine, "x.jpg")], false);
     assert!(matches!(r, Err(UploadError::NotFound)), "{r:?}");
     assert!(e.alive(&mine));
     assert!(e.inbox_is_empty());
@@ -427,11 +608,12 @@ fn japanese_path_roundtrips() {
 async fn writer_commits_through_the_queue() {
     let e = env();
     let s = e.upload(b"heic bytes");
-    let (writer, _h) = spawn_writer(e.lib.clone(), e.cache.clone());
+    let (writer, _h) = spawn_writer(e.lib.clone(), e.cache.clone(), e.journal.clone());
     let r = writer
         .commit_upload(
             e.store.clone(),
             e.me,
+            origin(),
             params(&[(&s, "IMG_0001.HEIC")], false),
         )
         .await
@@ -545,16 +727,10 @@ fn a_repeated_commit_returns_the_first_result() {
     assert_eq!(e.commit(&again, false).unwrap(), first);
     assert_eq!(e.commit(&files, true).unwrap(), first);
     assert_eq!(e.inbox_files(), ["a/IMG_0001.HEIC", "a/IMG_0001.MOV"]);
-    let journaled = e
-        .lib
-        .journal()
-        .unwrap()
-        .read_all()
-        .unwrap()
-        .into_iter()
-        .filter(|j| j.kind == OpKind::Upload)
-        .count();
-    assert_eq!(journaled, 2);
+    // Only the first commit placed anything: one batch of two uploads.
+    let batches = e.upload_batches();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].summary.done, 2);
 }
 
 /// A crash while the tombstones were written leaves some of the group's sessions without
@@ -624,13 +800,7 @@ fn status_of_a_committed_session_has_nothing_missing() {
         e.store.put_chunk(e.me, &s, 0, b"jpeg bytes"),
         Err(UploadError::Invalid(_))
     ));
-    let r = commit(
-        &e.lib,
-        &e.cache,
-        &e.store,
-        UserId(GrainId::random()),
-        params(&[(&s, "x.jpg")], false),
-    );
+    let r = e.commit_as(UserId(GrainId::random()), &[(&s, "x.jpg")], false);
     assert!(matches!(r, Err(UploadError::NotFound)), "{r:?}");
 }
 

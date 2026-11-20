@@ -19,7 +19,8 @@ pub struct OrganizeOp {
     pub item_id: ItemId,
     #[serde(flatten)]
     pub action: OrganizeAction,
-    /// `blake3:<hex>` the client saw; the op is skipped with `hash_mismatch` if the file differs.
+    /// `blake3:<hex>` the client saw; the op is skipped with `changed` if the file differs
+    /// (servers before API 2.5 sent `hash_mismatch`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_hash: Option<String>,
 }
@@ -134,6 +135,10 @@ pub struct OrganizeHistoryParams {
     pub limit: Option<u32>,
     #[serde(default)]
     pub cursor: Option<String>,
+    /// Only the batches with an operation of one of these kinds (`move`, `trash`, …); all
+    /// batches when absent (API 2.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<Vec<String>>,
 }
 
 /// Result of `organize.history`, newest batch first.
@@ -184,6 +189,14 @@ mod tests {
                 .unwrap();
         assert_eq!(op.action, OrganizeAction::Trash);
         assert_eq!(op.file_hash.as_deref(), Some("blake3:00"));
+    }
+
+    #[test]
+    fn history_kinds_are_optional() {
+        let p: OrganizeHistoryParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.kinds, None);
+        let p: OrganizeHistoryParams = serde_json::from_str(r#"{"kinds":["trash"]}"#).unwrap();
+        assert_eq!(p.kinds, Some(vec!["trash".to_string()]));
     }
 
     #[test]

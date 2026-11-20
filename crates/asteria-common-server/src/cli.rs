@@ -18,6 +18,7 @@ use corundum_framework_update::{ReleaseSource, UpdateArgs};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::journal::{JournalCtx, open_journal};
 use crate::local::{open_or_init_library, unique_name};
 use crate::upload::UploadStore;
 use crate::watch::{DEFAULT_DEBOUNCE, DEFAULT_PERIOD};
@@ -448,7 +449,16 @@ async fn run(
     uploads: Arc<UploadStore>,
     listen: SocketAddr,
 ) -> AnyResult<()> {
-    let (writer, writer_handle) = spawn_writer(library.clone(), cache.clone());
+    // Another process cannot hold the journal: `server.lock` is ours.
+    let journal = open_journal(
+        JournalCtx {
+            library: library.clone(),
+            cache: cache.clone(),
+            ext: spec.extension.clone(),
+        },
+        None,
+    )?;
+    let (writer, writer_handle) = spawn_writer(library.clone(), cache.clone(), journal.clone());
     let closer = writer.clone();
     let scanning = Arc::new(AtomicBool::new(false));
     let (rescan_tx, rescan_rx) = mpsc::channel(1);
@@ -464,6 +474,7 @@ async fn run(
         spec.extension.clone(),
         processor,
         uploads.clone(),
+        journal,
     );
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "listening");

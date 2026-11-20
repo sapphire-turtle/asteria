@@ -448,3 +448,67 @@ fn a_rating_during_a_held_send_reaches_the_file_at_once() {
     release.store(true, Ordering::SeqCst);
     wait_for("both ratings to be confirmed", || queue.pending() == 0);
 }
+
+/// A BUSY server (a long batch holds its write queue) answers again later: the ratings stay
+/// pending and go again after a wait, with no notice.
+#[test]
+fn busy_is_retried_not_dropped() {
+    set_retry_backoff(Duration::from_millis(50), Duration::from_millis(200));
+    let dir = tempfile::tempdir().unwrap();
+    let path = queue_file(&dir);
+    let calls = Calls::default();
+    let seen = calls.clone();
+    let busy = Arc::new(AtomicBool::new(true));
+    let left = busy.clone();
+    let addr = serve_queue(move |req| {
+        let (id, _, params) = seen.record(req);
+        if left.swap(false, Ordering::SeqCst) {
+            return StubResponse::rpc_error(id, codes::BUSY, "another write is in progress; retry");
+        }
+        StubResponse::rpc_result(id, all_applied(&params))
+    });
+    let (queue, _gate) = start(addr, &path, true);
+    queue.rate(item("A"), 4);
+    wait_for("the rating to be confirmed", || queue.pending() == 0);
+    assert_eq!(calls.count("ops.apply"), 2);
+    assert!(queue.take_notices().is_empty());
+    assert_eq!(queue.rating(&item("A")), Some(4));
+    assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+}
+
+/// On a server without `ops.apply`, a BUSY `media.update` is no refusal of that rating: it
+/// and the ones after it go again after a wait.
+#[test]
+fn an_old_servers_busy_is_retried_not_dropped() {
+    set_retry_backoff(Duration::from_millis(50), Duration::from_millis(200));
+    let dir = tempfile::tempdir().unwrap();
+    let path = queue_file(&dir);
+    let calls = Calls::default();
+    let seen = calls.clone();
+    let busy = Arc::new(AtomicBool::new(true));
+    let left = busy.clone();
+    let addr = serve_queue(move |req| {
+        let (id, method, params) = seen.record(req);
+        match method.as_str() {
+            "media.update" if left.swap(false, Ordering::SeqCst) => {
+                StubResponse::rpc_error(id, codes::BUSY, "another write is in progress; retry")
+            }
+            "media.update" => StubResponse::rpc_result(
+                id,
+                media_item(
+                    params["id"].as_str().unwrap(),
+                    params["rating"].as_i64().unwrap(),
+                ),
+            ),
+            _ => StubResponse::rpc_error(id, codes::METHOD_NOT_FOUND, "method not found"),
+        }
+    });
+    let (queue, _gate) = start(addr, &path, true);
+    queue.rate(item("A"), 4);
+    queue.rate(item("B"), 1);
+    wait_for("both ratings to be confirmed", || queue.pending() == 0);
+    assert!(queue.take_notices().is_empty());
+    assert_eq!(queue.rating(&item("A")), Some(4));
+    assert_eq!(queue.rating(&item("B")), Some(1));
+    assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+}

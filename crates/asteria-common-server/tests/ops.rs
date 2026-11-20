@@ -209,3 +209,65 @@ async fn a_sidecar_that_cannot_be_written_rejects_only_its_op() {
     );
     assert_eq!(rating(&e, &b).await, 5);
 }
+
+/// Applied, superseded and the rejections keep the values they had on the wire, and the
+/// ratings that reached the Journal are one batch of `rate`s from the caller's key.
+#[tokio::test]
+async fn ops_apply_results_keep_their_wire_values() {
+    let e = env();
+    let a = item_id(&e, "a.jpg");
+    let b = item_id(&e, "sub/b.jpg");
+    let v = apply(&e, vec![op("o0", &a, 5, "2026-11-01T10:00:00Z")]).await;
+    assert_eq!(status(&v, 0), "applied");
+    // Broken after the scan: only writing it finds out.
+    fs::write(e.root.join("sub/b.jpg.xmp"), "<not xml").unwrap();
+    let v = apply(
+        &e,
+        vec![
+            op("applied", &a, 2, "2026-11-02T10:00:00Z"),
+            op("superseded", &a, 4, "2026-11-01T09:00:00Z"),
+            op(
+                "missing",
+                "00000000-0000-0000-0000-000000000000",
+                3,
+                "2026-11-01T10:00:00Z",
+            ),
+            op("read_only", &b, 3, "2026-11-01T10:00:00Z"),
+        ],
+    )
+    .await;
+    let rs = v["result"]["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{v}"));
+    let got: Vec<_> = rs
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap(),
+                r["status"].as_str().unwrap(),
+                r.get("reason").and_then(Value::as_str),
+                r.get("item").map(|i| i["rating"].clone()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("applied", "applied", None, Some(json!(2))),
+            ("superseded", "superseded", None, Some(json!(2))),
+            ("missing", "rejected", Some("not_found"), None),
+            ("read_only", "rejected", Some("read_only"), None),
+        ]
+    );
+
+    let newest = e.state.journal().history(None, 1).unwrap();
+    let batch = e.state.journal().status(newest[0].begin.batch_id).unwrap();
+    assert_eq!(batch.summary.begin.label.as_deref(), Some("Rate 3 items"));
+    assert!(
+        batch.summary.begin.origin.as_str().starts_with("key:"),
+        "{:?}",
+        batch.summary.begin.origin
+    );
+    let kinds: Vec<&str> = batch.ops.iter().map(|o| o.kind.as_str()).collect();
+    assert_eq!(kinds, ["rate", "rate", "rate"]);
+}

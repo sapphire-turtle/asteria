@@ -15,11 +15,11 @@ thiserror.workspace = true
 blake3.workspace = true
 xml-rs.workspace = true
 chrono.workspace = true
-serde_json.workspace = true
 tracing.workspace = true
 asteria-common-api = { path = "../asteria-common-api" }
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
 crc32fast.workspace = true
 lofty.workspace = true

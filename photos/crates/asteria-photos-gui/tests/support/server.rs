@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use asteria_common_core::{Library, MediaKind};
+use asteria_common_server::journal::{JournalCtx, open_journal};
 use asteria_common_server::keys::{KeyStore, KeyVerifier};
 use asteria_common_server::upload::UploadStore;
 use asteria_common_server::{
@@ -101,8 +102,17 @@ impl TestServer {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let log = requests.clone();
         let addr = rt.block_on(async {
-            let (writer, _h) = spawn_writer(state_lib.clone(), cache.clone());
             let (rescan, rescan_rx) = tokio::sync::mpsc::channel(1);
+            let journal = open_journal(
+                JournalCtx {
+                    library: state_lib.clone(),
+                    cache: cache.clone(),
+                    ext: Arc::new(Photos),
+                },
+                None,
+            )
+            .unwrap();
+            let (writer, _h) = spawn_writer(state_lib.clone(), cache.clone(), journal.clone());
             let state = AppState::new(
                 state_lib,
                 cache,
@@ -115,6 +125,7 @@ impl TestServer {
                 Arc::new(Photos),
                 processor,
                 uploads,
+                journal,
             );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();

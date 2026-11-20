@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "asteria-common-api"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1146,7 +1146,7 @@ dependencies = [
  "flate2",
  "http",
  "log",
- "minisign-verify",
+ "minisign-verify 0.2.5",
  "percent-encoding",
  "reqwest 0.12.28",
  "semver",
@@ -1413,11 +1413,12 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbf3b8c5d96ad3ed4cefaafcb492d48394a42107cd4099de132072da74b4c7b6"
+checksum = "64199ccfda83f9b6b519709df54562ff8e84a6f471543965e96917341fafc01e"
 dependencies = [
  "corundum-framework-gui",
+ "corundum-framework-journal",
  "corundum-framework-keys",
  "corundum-framework-package",
  "corundum-framework-platform",
@@ -1427,9 +1428,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-audio"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8e7c57ae324c2a7efc25abc56784c2b6357cab495d4909e1b786748addcb59a"
+checksum = "b16414a4921c9a39fb90fd5777975026540a65b629715367449782a598e687ce"
 dependencies = [
  "cpal",
  "ogg",
@@ -1442,9 +1443,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-build"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b50885bb6d8525e88d9efaa98f0b234cf27121fb18bd6b4115429bb08ecbb5ba"
+checksum = "7d2a20a91748db36b0a0d05b03a1705caaf658fe9792cfd41c37e899dfb04581"
 dependencies = [
  "corundum-framework-platform",
  "png 0.18.1",
@@ -1453,9 +1454,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-gui"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24d8d56ff2f93ecb61faf5b116a2a40e0f19b4363e8cdc343b35e3f6a384fb7b"
+checksum = "1069c66645e0ddddd48979512967cc9e9f35c08a59936529b1916ae3d167f1f5"
 dependencies = [
  "corundum-framework-keys",
  "corundum-framework-package",
@@ -1487,24 +1488,37 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-image"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e28f93e93df65195c06dff7403ef06cc92ee916ce6cfddf35495f45b8b4d6aad"
+checksum = "b337ce6f6cdb09042b9c9f16b71269fc06e2a3dcc4b6e27788fa39f80947ebcf"
 dependencies = [
  "fast_image_resize",
  "image",
  "libwebp-sys 0.14.4",
- "moxcms",
+ "moxcms 0.9.2",
  "rawler",
  "thiserror 2.0.21",
  "tracing",
 ]
 
 [[package]]
-name = "corundum-framework-keys"
-version = "0.11.0"
+name = "corundum-framework-journal"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f0fc1b840b6cac8a0d8fb6023eb2aee1037a9e67d49a600ad8aec9a334224de"
+checksum = "0f22ed8629c5b83aa4d94af80767e39482a16001631105ec41df37358679cad9"
+dependencies = [
+ "grain-id",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "corundum-framework-keys"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1a28569b5657f63869471b9fb11f0f39cd6c4d5052fd8d392350f6cb1d18b8c"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -1521,9 +1535,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-package"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a77b3025fc7d4007219227e23cb3fe30853e89b8d904eb26f2e25b3cb6caa2f3"
+checksum = "d1ebe35633be1ed99d2a5e0e1591f153a62afeb1ea9d40eca16d8a0265a23d0c"
 dependencies = [
  "cargo-packager-updater",
  "corundum-framework-platform",
@@ -1540,9 +1554,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-platform"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67e2eaeaec01723c010ef43b7d2ee153380cea07cb7652ef446cfed8ebb16d73"
+checksum = "6f856c775cb906c9c33ba8264007b85fce07c1150282786e36eedfc73fc7a2d5"
 dependencies = [
  "dirs 7.0.0",
  "interprocess",
@@ -1560,9 +1574,9 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-service"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd3db97f959d221bb8f78e39b0192aefce62bdf278eb0ef16d5c106a7b12b2e6"
+checksum = "c89a78f3b299321bab5cfbf0001d1eb3f875b7ad9a931454c7c0975a6898442d"
 dependencies = [
  "corundum-framework-platform",
  "libc",
@@ -1572,14 +1586,14 @@ dependencies = [
 
 [[package]]
 name = "corundum-framework-update"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "839ed51902952b1cb65e08f03a5fa6f479b05af77ae61151024b94e24d9e187a"
+checksum = "85eab5bad8271b674d3a3261590f025b66c363004e3a9aa566f721c6474c55c7"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "corundum-framework-platform",
- "minisign-verify",
+ "minisign-verify 0.3.0",
  "reqwest 0.13.5",
  "self-replace",
  "semver",
@@ -3072,7 +3086,7 @@ dependencies = [
  "color_quant",
  "gif",
  "image-webp",
- "moxcms",
+ "moxcms 0.8.1",
  "num-traits",
  "png 0.18.1",
  "tiff",
@@ -3761,6 +3775,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22f9645cb765ea72b8111f36c522475d2daa0d22c957a9826437e97534bc4e9e"
 
 [[package]]
+name = "minisign-verify"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871285dc19d8d0ebe0eef3d0e99a205f2a71363b122632cbbfa4a6c370a960ce"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3797,6 +3817,16 @@ name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
+dependencies = [
+ "num-traits",
+ "pxfm",
+]
+
+[[package]]
+name = "moxcms"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "561875e11b3d8618524f974f85e4bbd05a64a112b8f7541ffcc236b5166c0564"
 dependencies = [
  "num-traits",
  "pxfm",
@@ -5508,9 +5538,9 @@ dependencies = [
 
 [[package]]
 name = "rtrb"
-version = "0.3.6"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "342e1478a6e1c839e7405033eabfdc954d4d5dabd39f34e83420a43a95acfb04"
+checksum = "5974e397833d890f2f74963408e0d4a6cd8eda2f6a445ae06750291b5d7a997e"
 
 [[package]]
 name = "rubato"

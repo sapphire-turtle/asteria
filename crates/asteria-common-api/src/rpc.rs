@@ -54,6 +54,10 @@ pub mod codes {
     pub const UPLOAD_INCOMPLETE: i32 = -32007;
     pub const HASH_MISMATCH: i32 = -32008;
     pub const ALREADY_UNDONE: i32 = -32009;
+    /// The change is older than the undo window.
+    pub const UNDO_EXPIRED: i32 = -32010;
+    /// The caller may not undo that change.
+    pub const FORBIDDEN: i32 = -32011;
 }
 
 pub const SERVER_INFO: &str = "server.info";

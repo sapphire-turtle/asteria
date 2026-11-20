@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use asteria_common_core::{Library, MediaKind};
+use asteria_common_server::journal::{JournalCtx, open_journal};
 use asteria_common_server::keys::{KeyStore, KeyVerifier};
 use asteria_common_server::upload::UploadStore;
 use asteria_common_server::{AppExtension, AppState, Cache, Processor, router, scan, spawn_writer};
@@ -102,7 +103,16 @@ fn env_full(
     fs::create_dir(root.join("sub")).unwrap();
     fs::copy(&red, root.join("sub/b.jpg")).unwrap();
     scan(&lib, &cache, ext.as_ref()).unwrap();
-    let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
+    let journal = open_journal(
+        JournalCtx {
+            library: lib.clone(),
+            cache: cache.clone(),
+            ext: ext.clone(),
+        },
+        None,
+    )
+    .unwrap();
+    let (writer, _h) = spawn_writer(lib.clone(), cache.clone(), journal.clone());
 
     let keys_dir = dir.path().join("keys");
     let mut keys = key_store(&keys_dir);
@@ -142,9 +152,10 @@ fn env_full(
         1,
         Arc::new(AtomicBool::new(false)),
         rescan,
-        ext,
+        ext.clone(),
         processor.clone(),
         Arc::new(UploadStore::open(&dir.path().join("state")).unwrap()),
+        journal,
     );
     Env {
         _dir: dir,

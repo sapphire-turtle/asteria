@@ -3,13 +3,10 @@
 use std::path::{Component, Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use grain_id::GrainId;
-use serde_json::json;
 
 use crate::error::{Error, Result};
 use crate::hash::{content_hash, file_hash};
 use crate::ids::UserId;
-use crate::journal::{Actor, JournalEntry, OpId, OpKind};
 use crate::library::Library;
 use crate::paths::{META_DIR, is_sidecar, sidecar_path_for};
 use crate::sidecar::Sidecar;
@@ -30,27 +27,14 @@ fn checked_rel(media_rel: &Path) -> Result<()> {
     }
 }
 
-fn changed_fields(before: &Sidecar, after: &Sidecar) -> Vec<&'static str> {
-    let mut out = Vec::new();
-    if before.rating != after.rating {
-        out.push("rating");
-    }
-    if before.user_ratings != after.user_ratings {
-        out.push("user_ratings");
-    }
-    if before.subjects != after.subjects {
-        out.push("subjects");
-    }
-    if before.hierarchical_subjects != after.hierarchical_subjects {
-        out.push("hierarchical_subjects");
-    }
-    if before.description != after.description {
-        out.push("description");
-    }
-    if before.label != after.label {
-        out.push("label");
-    }
-    out
+/// Whether a managed field other than the hashes differs.
+fn changed(before: &Sidecar, after: &Sidecar) -> bool {
+    before.rating != after.rating
+        || before.user_ratings != after.user_ratings
+        || before.subjects != after.subjects
+        || before.hierarchical_subjects != after.hierarchical_subjects
+        || before.description != after.description
+        || before.label != after.label
 }
 
 impl Library {
@@ -74,18 +58,11 @@ impl Library {
     /// `sc.file_hash` is `None` inside `f` and is always the current file's hash when written:
     /// the media file is hashed unless `f` sets it. A change to the file hash alone is not written.
     ///
-    /// The change is journaled in this instance's journal; without a state directory
-    /// (see [`Library::with_state_dir`]) this fails with `NoStateDir` before writing anything.
+    /// Nothing is journaled here: the server records its writes in its own journal.
     ///
     /// Returns `Ok(true)` when a sidecar was written, `Ok(false)` when nothing needed writing.
-    pub fn update_sidecar(
-        &self,
-        media_rel: &Path,
-        actor: Actor,
-        f: impl FnOnce(&mut Sidecar),
-    ) -> Result<bool> {
+    pub fn update_sidecar(&self, media_rel: &Path, f: impl FnOnce(&mut Sidecar)) -> Result<bool> {
         checked_rel(media_rel)?;
-        let journal = self.journal()?;
         let media: PathBuf = self.root().join(media_rel);
         if !media.is_file() {
             return Err(Error::MediaNotFound(media_rel.to_path_buf()));
@@ -99,8 +76,7 @@ impl Library {
         sidecar.file_hash = None;
         f(&mut sidecar);
 
-        let fields = changed_fields(&original, &sidecar);
-        if fields.is_empty() && (existed || !sidecar.has_user_data()) {
+        if !changed(&original, &sidecar) && (existed || !sidecar.has_user_data()) {
             return Ok(false);
         }
         if sidecar.content_hash.is_none() {
@@ -111,22 +87,6 @@ impl Library {
             sidecar.file_hash = Some(file_hash(&media)?);
         }
         sidecar.write(&sidecar_path)?;
-
-        let path = media_rel
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("/");
-        let detail = json!({"path": path, "fields": fields});
-        journal.append(&JournalEntry {
-            op_id: OpId(GrainId::random()),
-            plan_id: None,
-            actor,
-            at: Utc::now(),
-            kind: OpKind::WriteSidecar,
-            before: detail.clone(),
-            after: detail,
-        })?;
         Ok(true)
     }
 
@@ -140,13 +100,12 @@ impl Library {
         user: UserId,
         value: i8,
         at: DateTime<Utc>,
-        actor: Actor,
     ) -> Result<()> {
         if !(-1..=5).contains(&value) {
             return Err(Error::InvalidRating(value));
         }
         let owner = self.owner();
-        self.update_sidecar(media_rel, actor, |sc| {
+        self.update_sidecar(media_rel, |sc| {
             // The value was range-checked above, so this cannot fail.
             let _ = sc.apply_rating(owner, user, value, at);
         })?;

@@ -1,14 +1,20 @@
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-use asteria_common_api::{ItemId, MediaUpdateParams};
-use asteria_common_core::journal::Actor;
+use asteria_common_api::{ItemId, MediaUpdateParams, codes};
+use asteria_common_core::Actor;
 use asteria_common_core::{Library, MediaKind, UserId};
+use asteria_common_server::journal::{JournalCtx, ServerJournal, open_journal};
 use asteria_common_server::{
     AppExtension, Cache, StoredHash, WriteError, Writer, scan, spawn_writer,
 };
+use corundum_framework::journal::Origin;
 use grain_id::GrainId;
+use serde_json::json;
 
 struct Photos;
 impl AppExtension for Photos {
@@ -23,6 +29,7 @@ struct Env {
     lib: Arc<Library>,
     cache: Arc<Cache>,
     writer: Writer,
+    journal: ServerJournal,
 }
 
 fn env() -> Env {
@@ -41,13 +48,23 @@ fn env() -> Env {
     )
     .unwrap();
     scan(&lib, &cache, &Photos).unwrap();
-    let (writer, _h) = spawn_writer(lib.clone(), cache.clone());
+    let journal = open_journal(
+        JournalCtx {
+            library: lib.clone(),
+            cache: cache.clone(),
+            ext: Arc::new(Photos),
+        },
+        None,
+    )
+    .unwrap();
+    let (writer, _h) = spawn_writer(lib.clone(), cache.clone(), journal.clone());
     Env {
         _dir: dir,
         root,
         lib,
         cache,
         writer,
+        journal,
     }
 }
 
@@ -73,7 +90,11 @@ async fn update_rating_and_tags_writes_sidecar_and_cache() {
     p.rating = Some(4);
     p.subjects = Some(vec!["cat".into()]);
     let owner = e.lib.owner();
-    let rec = e.writer.update(Actor::User(owner), p).await.unwrap();
+    let rec = e
+        .writer
+        .update(Actor::User(owner), test_origin(), p)
+        .await
+        .unwrap();
     assert_eq!(rec.sidecar.owner_rating, Some(4));
     assert_eq!(rec.sidecar.subjects, vec!["cat".to_string()]);
     let sc = e.lib.read_sidecar(Path::new("a.jpg")).unwrap().unwrap();
@@ -89,7 +110,11 @@ async fn non_owner_rating_goes_to_user_ratings() {
     let other = UserId(GrainId::random());
     let mut p = params(id(&e));
     p.rating = Some(2);
-    let rec = e.writer.update(Actor::User(other), p).await.unwrap();
+    let rec = e
+        .writer
+        .update(Actor::User(other), test_origin(), p)
+        .await
+        .unwrap();
     assert_eq!(rec.sidecar.owner_rating, None);
     assert_eq!(rec.sidecar.user_ratings.get(&other.to_string()), Some(&2));
 }
@@ -102,7 +127,10 @@ async fn read_only_item_is_refused_untouched() {
     scan(&e.lib, &e.cache, &Photos).unwrap();
     let mut p = params(id(&e));
     p.rating = Some(3);
-    let r = e.writer.update(Actor::User(e.lib.owner()), p).await;
+    let r = e
+        .writer
+        .update(Actor::User(e.lib.owner()), test_origin(), p)
+        .await;
     assert!(matches!(r, Err(WriteError::ReadOnly(_))), "{r:?}");
     assert_eq!(fs::read(&xmp).unwrap(), b"<not xmp");
 }
@@ -113,11 +141,18 @@ async fn deleted_file_is_not_found() {
     let mut p = params(id(&e));
     p.label = Some(Some("x".into()));
     fs::remove_file(e.root.join("a.jpg")).unwrap();
-    let r = e.writer.update(Actor::User(e.lib.owner()), p).await;
+    let r = e
+        .writer
+        .update(Actor::User(e.lib.owner()), test_origin(), p)
+        .await;
     assert_eq!(r, Err(WriteError::NotFound));
     let r = e
         .writer
-        .update(Actor::User(e.lib.owner()), params(ItemId("nope".into())))
+        .update(
+            Actor::User(e.lib.owner()),
+            test_origin(),
+            params(ItemId("nope".into())),
+        )
         .await;
     assert_eq!(r, Err(WriteError::NotFound));
 }
@@ -133,20 +168,25 @@ async fn control_chars_are_invalid() {
             2 => p.subjects = Some(vec!["ok".into(), "b\u{0}".into()]),
             _ => p.hierarchical_subjects = Some(vec!["a|\u{1f}".into()]),
         }
-        let r = e.writer.update(Actor::User(e.lib.owner()), p).await;
+        let r = e
+            .writer
+            .update(Actor::User(e.lib.owner()), test_origin(), p)
+            .await;
         assert!(matches!(r, Err(WriteError::Invalid(_))), "{r:?}");
     }
     assert!(!e.root.join("a.jpg.xmp").exists());
     let mut p = params(id(&e));
     p.label = Some(Some("tab\tnl\n".into()));
     e.writer
-        .update(Actor::User(e.lib.owner()), p)
+        .update(Actor::User(e.lib.owner()), test_origin(), p)
         .await
         .unwrap();
     let mut p = params(id(&e));
     p.rating = Some(9);
     assert!(matches!(
-        e.writer.update(Actor::User(e.lib.owner()), p).await,
+        e.writer
+            .update(Actor::User(e.lib.owner()), test_origin(), p)
+            .await,
         Err(WriteError::Invalid(_))
     ));
 }
@@ -163,7 +203,7 @@ async fn concurrent_updates_are_serialized() {
         p.label = Some(Some(format!("l{i}")));
         p.subjects = Some(vec![format!("s{i}")]);
         hs.push(tokio::spawn(async move {
-            w.update(Actor::User(owner), p).await
+            w.update(Actor::User(owner), test_origin(), p).await
         }));
     }
     for h in hs {
@@ -198,15 +238,20 @@ async fn cached_hash_avoids_rehash() {
     let mut p = params(rec.id);
     p.label = Some(Some("x".into()));
     e.writer
-        .update(Actor::User(e.lib.owner()), p)
+        .update(Actor::User(e.lib.owner()), test_origin(), p)
         .await
         .unwrap();
     let sc = e.lib.read_sidecar(Path::new("a.jpg")).unwrap().unwrap();
     assert_eq!(sc.content_hash.unwrap().0.to_string(), fake);
 }
 
+/// How many batches the journal has.
 fn journal_len(e: &Env) -> usize {
-    e.lib.journal().unwrap().read_all().unwrap().len()
+    e.journal.history(None, 10_000).unwrap().len()
+}
+
+fn test_origin() -> Origin {
+    Origin::new("test")
 }
 
 fn fake_hash(e: &Env) -> String {
@@ -234,7 +279,7 @@ async fn rating_only_uses_cached_hash() {
     let mut p = params(id(&e));
     p.rating = Some(5);
     e.writer
-        .update(Actor::User(e.lib.owner()), p)
+        .update(Actor::User(e.lib.owner()), test_origin(), p)
         .await
         .unwrap();
     let sc = e.lib.read_sidecar(Path::new("a.jpg")).unwrap().unwrap();
@@ -243,14 +288,14 @@ async fn rating_only_uses_cached_hash() {
 }
 
 #[tokio::test]
-async fn rating_and_label_is_one_journal_entry() {
+async fn rating_and_label_is_one_batch() {
     let e = env();
     let before = journal_len(&e);
     let mut p = params(id(&e));
     p.rating = Some(3);
     p.label = Some(Some("x".into()));
     e.writer
-        .update(Actor::User(e.lib.owner()), p)
+        .update(Actor::User(e.lib.owner()), test_origin(), p)
         .await
         .unwrap();
     assert_eq!(journal_len(&e), before + 1);
@@ -267,7 +312,7 @@ async fn stale_cached_hash_is_not_used() {
     let mut p = params(id(&e));
     p.label = Some(Some("x".into()));
     e.writer
-        .update(Actor::User(e.lib.owner()), p)
+        .update(Actor::User(e.lib.owner()), test_origin(), p)
         .await
         .unwrap();
     let sc = e.lib.read_sidecar(Path::new("a.jpg")).unwrap().unwrap();
@@ -281,7 +326,10 @@ async fn malformed_sidecar_at_write_time_sets_error() {
     fs::write(e.root.join("a.jpg.xmp"), b"<not xmp").unwrap();
     let mut p = params(id(&e));
     p.label = Some(Some("x".into()));
-    let r = e.writer.update(Actor::User(e.lib.owner()), p.clone()).await;
+    let r = e
+        .writer
+        .update(Actor::User(e.lib.owner()), test_origin(), p.clone())
+        .await;
     assert!(matches!(r, Err(WriteError::ReadOnly(_))), "{r:?}");
     let Err(WriteError::ReadOnly(msg)) = &r else {
         unreachable!()
@@ -300,7 +348,7 @@ async fn writer_does_not_touch_cached_hash() {
     p.label = Some(Some("x".into()));
     let rec = e
         .writer
-        .update(Actor::User(e.lib.owner()), p)
+        .update(Actor::User(e.lib.owner()), test_origin(), p)
         .await
         .unwrap();
     assert_eq!(rec.hash, None);
@@ -311,14 +359,14 @@ async fn writer_does_not_touch_cached_hash() {
 async fn shutdown_drains_all_queued_jobs() {
     let e = env();
     let owner = e.lib.owner();
-    let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone());
+    let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone(), e.journal.clone());
     let mut tasks = Vec::new();
     for i in 0..5 {
         let w = w.clone();
         let mut p = params(id(&e));
         p.subjects = Some(vec![format!("t{i}")]);
         tasks.push(tokio::spawn(async move {
-            w.update(Actor::User(owner), p).await
+            w.update(Actor::User(owner), test_origin(), p).await
         }));
     }
     // Let every task enqueue its job before dropping our handle.
@@ -338,7 +386,7 @@ async fn shutdown_drains_all_queued_jobs() {
 #[tokio::test]
 async fn stopped_writer_errors() {
     let e = env();
-    let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone());
+    let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone(), e.journal.clone());
     h.abort();
     let _ = h.await;
     assert_eq!(
@@ -351,14 +399,14 @@ async fn stopped_writer_errors() {
 async fn close_drains_queued_jobs_while_clones_live() {
     let e = env();
     let owner = e.lib.owner();
-    let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone());
+    let (w, h) = spawn_writer(e.lib.clone(), e.cache.clone(), e.journal.clone());
     let mut tasks = Vec::new();
     for i in 0..5 {
         let w = w.clone();
         let mut p = params(id(&e));
         p.subjects = Some(vec![format!("t{i}")]);
         tasks.push(tokio::spawn(async move {
-            w.update(Actor::User(owner), p).await
+            w.update(Actor::User(owner), test_origin(), p).await
         }));
     }
     for _ in 0..50 {
@@ -379,4 +427,76 @@ async fn close_drains_queued_jobs_while_clones_live() {
         lingering.relink_orphans().await,
         Err(WriteError::Internal("writer stopped".into()))
     );
+}
+
+/// Holds `after_moves`, which runs at the end of every organize batch, until the gate opens.
+#[derive(Default)]
+struct Gate {
+    closed: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+impl Gate {
+    fn set(&self, closed: bool) {
+        *self.closed.lock().unwrap() = closed;
+        self.cv.notify_all();
+    }
+}
+
+impl AppExtension for Gate {
+    fn accepts(&self, kind: MediaKind) -> bool {
+        matches!(kind, MediaKind::Image)
+    }
+    fn after_moves(
+        &self,
+        _ctx: &asteria_common_server::ExtContext,
+        _moves: &[(String, String)],
+    ) -> Vec<asteria_common_server::Rewrite> {
+        let guard = self.closed.lock().unwrap();
+        let _ = self
+            .cv
+            .wait_timeout_while(guard, Duration::from_secs(30), |closed| *closed)
+            .unwrap();
+        Vec::new()
+    }
+}
+
+/// A `media.update` behind an organize batch that is held is BUSY once its job has not
+/// started within the wait, and is never run; after the batch the same call applies.
+#[tokio::test]
+async fn update_is_busy_behind_a_long_batch() {
+    let gate = Arc::new(Gate::default());
+    let e = common::env_ext(gate.clone());
+    e.state.set_write_wait(Duration::from_millis(50));
+    gate.set(true);
+    let mv = json!({"item_id": common::item_id(&e, "a.jpg"), "kind": "move", "to": "c.jpg"});
+    let first = common::call(
+        &e.app,
+        &e.owner_token,
+        "organize.apply",
+        json!({"ops": [mv]}),
+    )
+    .await;
+    assert_eq!(first["result"]["running"], true, "{first}");
+
+    let b = common::item_id(&e, "sub/b.jpg");
+    let update = json!({"id": b, "rating": 4});
+    let started = std::time::Instant::now();
+    let busy = common::call(&e.app, &e.owner_token, "media.update", update.clone()).await;
+    assert!(started.elapsed() < Duration::from_secs(5), "{busy}");
+    assert_eq!(busy["error"]["code"], codes::BUSY, "{busy}");
+    assert!(!e.root.join("sub/b.jpg.xmp").exists());
+    let ops = json!({"ops": [{"id": "o", "kind": "rating", "item": b, "value": 2,
+        "at": "2026-11-01T00:00:00Z"}]});
+    let busy = common::call(&e.app, &e.owner_token, "ops.apply", ops).await;
+    assert_eq!(busy["error"]["code"], codes::BUSY, "{busy}");
+
+    gate.set(false);
+    e.state.set_write_wait(Duration::from_secs(10));
+    let done = common::call(&e.app, &e.owner_token, "media.update", update).await;
+    assert_eq!(done["result"]["rating"], 4, "{done}");
+    // The refused calls never ran: the journal has the organize batch and this one.
+    let batches = e.state.journal().history(None, 100).unwrap();
+    assert_eq!(batches.len(), 2, "{batches:?}");
+    assert_eq!(batches[0].begin.label.as_deref(), Some("Rate 1 items"));
 }
